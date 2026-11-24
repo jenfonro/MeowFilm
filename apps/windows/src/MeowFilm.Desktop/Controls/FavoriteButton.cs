@@ -50,7 +50,7 @@ public sealed class FavoriteButton : Button
         CornerRadius = new CornerRadius(16);
         BorderThickness = new Thickness(0);
         Content = icon;
-        if (ManagementList.TryFindAppStyle("MeowFilm.GhostButton") is { } ghost)
+        if (DesktopVisual.TryAppStyle("MeowFilm.GhostButton") is { } ghost)
             Style = ghost;
         RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => RefreshGlyph());
         Loaded += (_, _) =>

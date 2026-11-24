@@ -1,32 +1,6 @@
 import Foundation
 import os
 
-/// These are platform protocol semantics, not a generic HTTP auth policy.
-/// In particular, a plain 403 has no evidence that logging in will fix it.
-public enum MusicPlatformFailure {
-    public static func http(_ status: Int) -> MusicServiceError? {
-        switch status {
-        case 200...299: return nil
-        case 401: return .authRequired
-        case 403: return .requestRejected
-        case 404: return .notFound
-        case 429: return .rateLimited
-        default: return .upstreamFailed
-        }
-    }
-    public static func netease(_ code: Int) -> MusicServiceError? {
-        switch code {
-        case 200: return nil
-        case 301, 401: return .authRequired
-        case 403: return .requestRejected
-        case 404: return .notFound
-        case 429, 509: return .rateLimited
-        case 250, 460, 461: return .verificationRequired
-        default: return .upstreamFailed
-        }
-    }
-}
-
 /// A fixed schema keeps arbitrary URLs, response bodies and credentials out of
 /// diagnostics. IDs are request-local, never an account or media identifier.
 public struct MusicRequestTrace: Sendable {

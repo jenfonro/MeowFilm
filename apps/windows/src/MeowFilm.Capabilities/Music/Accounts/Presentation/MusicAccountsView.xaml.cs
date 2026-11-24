@@ -4,9 +4,7 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
-using Windows.System;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
 
 namespace MeowFilm.Capabilities;
 
@@ -18,8 +16,8 @@ public partial class MusicAccountsView : UserControl
     private bool isCompact;
     private ObservableCollection<MusicPlatformSettingsRow>? tableSource;
     private MusicAccountsController? observed;
-    private bool loginShowing, logoutShowing;
-    private Button? logoutAnchor;
+    private bool loginShowing;
+    private CancellationTokenSource? logoutCts;
     private DesktopWindow? window;
     private IDisposable? visibility;
     private CancellationTokenSource? pollingCancellation;
@@ -78,31 +76,41 @@ public partial class MusicAccountsView : UserControl
             RetireLoginPopup();
         }
     }
-    private async void ShowLogout()
+    private async void ShowLogoutDialog(MusicAccountsController owner, MusicPlatformAccount account)
     {
-        if (logoutShowing) return;
-        logoutShowing = true;
+        if (logoutCts is not null) return;
+        var cts = new CancellationTokenSource();
+        logoutCts = cts;
+        logoutConfirmation = (owner, account);
+        var request = new DesktopDialogRequest
+        {
+            Title = "退出账号",
+            Message = "退出此账号？",
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            DefaultButton = DesktopDialogDefaultButton.Close,
+            MinWidth = 240,
+            MaxWidth = 320
+        };
         try
         {
-            await DesktopModalHost.ShowSurfaceAsync(
-                this,
-                LogoutPopupSurface,
-                onOpened: () => CancelLogoutButton.Focus(FocusState.Programmatic),
-                canRestoreFocus: () => logoutConfirmation is not null);
+            var result = await DesktopModalHost.ShowDialogAsync(this, request, cts.Token);
+            if (result == DesktopDialogResult.Primary && SurfaceVisible && ReferenceEquals(Owner, owner))
+                await owner.LogoutAccountAsync(account, confirmed: true);
         }
         catch (OperationCanceledException) { }
         catch (Exception error)
         {
-            if (IsLoaded && Accounts is { } owner) _ = owner.Notify(MusicRuntimeContext.ErrorText(error));
+            if (IsLoaded && Accounts is { } current) _ = current.Notify(MusicRuntimeContext.ErrorText(error));
         }
         finally
         {
-            logoutShowing = false;
-            var target = logoutAnchor;
-            logoutConfirmation = null;
-            logoutAnchor = null;
-            if (SurfaceVisible && target is { IsEnabled: true } && DesktopVisual.IsVisible(target))
-                target.Focus(FocusState.Programmatic);
+            if (ReferenceEquals(logoutCts, cts))
+            {
+                logoutCts = null;
+                logoutConfirmation = null;
+            }
+            cts.Dispose();
         }
     }
 
@@ -206,8 +214,13 @@ public partial class MusicAccountsView : UserControl
     private void RetireLogoutPopup()
     {
         logoutConfirmation = null;
-        logoutAnchor = null;
-        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
+        var cts = logoutCts;
+        logoutCts = null;
+        if (cts is not null)
+        {
+            try { cts.Cancel(); }
+            catch (ObjectDisposedException) { }
+        }
     }
 
     private void Attach()
@@ -287,7 +300,7 @@ public partial class MusicAccountsView : UserControl
 
     private void Login_Click(object sender, RoutedEventArgs e)
     {
-        if (loginShowing || logoutShowing || !SurfaceVisible || Owner is not { CanEdit: true, AccountBusy: false } owner ||
+        if (loginShowing || logoutCts is not null || !SurfaceVisible || Owner is not { CanEdit: true, AccountBusy: false } owner ||
             sender is not Button { Tag: MusicPlatformSettingsRow row } ||
             !owner.PlatformSettings.Contains(row) || !row.ShowLogin) return;
         RunUiAction(async () =>
@@ -306,29 +319,11 @@ public partial class MusicAccountsView : UserControl
 
     private void Logout_Click(object sender, RoutedEventArgs e)
     {
-        if (loginShowing || logoutShowing || !SurfaceVisible || Owner is not { } owner ||
-            sender is not Button { Tag: MusicPlatformSettingsRow row } button ||
+        if (loginShowing || logoutCts is not null || !SurfaceVisible || Owner is not { } owner ||
+            sender is not Button { Tag: MusicPlatformSettingsRow row } ||
             !owner.PlatformSettings.Contains(row) || !row.CanLogout) return;
         RetireLogoutPopup();
-        logoutConfirmation = (owner, row.Account);
-        logoutAnchor = button;
-        ShowLogout();
-    }
-
-    private void CancelLogout_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-    private void LogoutPopup_KeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        if (e.Key != VirtualKey.Escape) return;
-        e.Handled = true;
-        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-    }
-
-    private void ConfirmLogout_Click(object sender, RoutedEventArgs e)
-    {
-        var confirmation = logoutConfirmation;
-        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-        if (SurfaceVisible && confirmation is { } captured && ReferenceEquals(Owner, captured.Owner))
-            RunUiAction(() => captured.Owner.LogoutAccountAsync(captured.Account, confirmed: true));
+        ShowLogoutDialog(owner, row.Account);
     }
 
     private void Feedback_Click(object sender, RoutedEventArgs e)
@@ -388,8 +383,8 @@ public partial class MusicAccountsView : UserControl
         if (Owner?.ShowAccountSms != true) return;
         QrPanel.Visibility = Visibility.Collapsed;
         SmsPanel.Visibility = Visibility.Visible;
-        QrModeButton.Tag = Visibility.Collapsed;
-        SmsModeButton.Tag = Visibility.Visible;
+        QrModeButton.IsChecked = false;
+        SmsModeButton.IsChecked = true;
         StopPolling();
         RefreshSmsCountdown();
         SmsPhoneInput.Focus(FocusState.Programmatic);
@@ -399,8 +394,8 @@ public partial class MusicAccountsView : UserControl
     {
         QrPanel.Visibility = Visibility.Visible;
         SmsPanel.Visibility = Visibility.Collapsed;
-        QrModeButton.Tag = Visibility.Visible;
-        SmsModeButton.Tag = Visibility.Collapsed;
+        QrModeButton.IsChecked = true;
+        SmsModeButton.IsChecked = false;
         StopSmsCountdown();
         RefreshPolling();
     }
@@ -575,7 +570,7 @@ public partial class MusicAccountsView : UserControl
         var row = ResolveDebugRow(owner, platform);
         if (!row.ShowLogin)
             throw DebugApiException.InvalidState($"Music account '{row.Platform}' cannot start login right now.");
-        if (logoutShowing) RetireLogoutPopup();
+        if (logoutCts is not null) RetireLogoutPopup();
         await StartLoginSurfaceAsync(owner, row);
         cancellationToken.ThrowIfCancellationRequested();
         var normalizedMode = mode?.Trim().ToLowerInvariant();
@@ -635,9 +630,7 @@ public partial class MusicAccountsView : UserControl
             };
         }
         RetireLogoutPopup();
-        logoutConfirmation = (owner, row.Account);
-        logoutAnchor = null;
-        ShowLogout();
+        ShowLogoutDialog(owner, row.Account);
         return new
         {
             executed = true,

@@ -5,12 +5,12 @@ import Foundation
 extension MusicViewModel {
     func reconcilePlaybackFeedbackSettings(accessGeneration: UUID?) async throws {
         let own = lifecycle
-        guard isAvailable, !isClosed, accessGeneration == own else { throw MusicServiceError.staleAccess }
+        guard !isClosed, accessGeneration == own else { throw MusicServiceError.staleAccess }
         let service = try requireService()
         // A confirmed/uncertain settings write outlives its presentation.
         // Read the native facts, not an inferred revision or the whole library.
         let next = try await Task { try await service.state() }.value
-        guard isAvailable, !isClosed, lifecycle == own else { throw MusicServiceError.staleAccess }
+        guard !isClosed, lifecycle == own else { throw MusicServiceError.staleAccess }
         guard next.settingsRevision >= state.settingsRevision else { return }
         let current = state
         let navigation = next.revision == current.revision ? next : current

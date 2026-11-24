@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 
 /// Ordinary playback memory, not a download store. Reference: iWebPlus
 /// b900c259, static/player.js:171-199. Hits neither renew TTL nor reorder entries.
@@ -171,6 +172,20 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
     func removeAll() {
         let retirement = locked { clearLocked() }
         retirement.finish()
+    }
+
+    func debugStats() -> DebugJSONValue {
+        locked {
+            .object([
+                "entryCount": .int(entries.count),
+                "bytes": .int(bytes),
+                "maximumEntries": .int(Self.maximumEntries),
+                "maximumBytes": .int(Self.maximumBytes),
+                "inFlightCount": .int(producers.count),
+                "available": .bool(available),
+                "closed": .bool(closed)
+            ])
+        }
     }
 
     /// Selection/lyric-disable revocation preserves completed content for replay.

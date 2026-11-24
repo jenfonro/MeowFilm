@@ -30,10 +30,20 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
   clock = Date.now, tokenProvider } = {}) {
   const clients = createClientContexts({ dataRoot, clientStore, transport, clock }), accounts = createAccountOperations(), mutations = createMutations();
   const sessions = new Map(), active = new Set(), cache = new Map(), flights = new Map();
-  let cacheBytes = 0, closed = false, closing, xeapiState = {};
+  let cacheBytes = 0, cacheHits = 0, cacheMisses = 0, cacheEvictions = 0, cacheExpiredPurges = 0;
+  let closed = false, closing, xeapiState = {};
+  const cacheMaxEntries = 64, cacheMaxBytes = 2 * 1024 * 1024;
   function erase(key) {
     const entry = cache.get(key);
     if (entry) { cacheBytes -= entry.bytes; cache.delete(key); }
+  }
+  function purgeExpired(at) {
+    for (const [key, entry] of cache) {
+      if (entry.expires <= at) {
+        erase(key);
+        cacheExpiredPurges++;
+      }
+    }
   }
   function invalidate(platform) {
     for (const [key, entry] of cache) if (!platform || entry.platform === platform) erase(key);
@@ -212,6 +222,10 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
         assertCurrent();
         const old = cache.get(key);
         if (!params.refresh && old?.expires > clock()) {
+          // True LRU: promote hit entry to most-recently-used position.
+          cache.delete(key);
+          cache.set(key, old);
+          cacheHits++;
           debug?.emit({
             level: 'debug',
             cat: 'music-platform',
@@ -221,7 +235,8 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
           });
           return cloneJSONValue(old.value);
         }
-        if (old) erase(key);
+        cacheMisses++;
+        if (old) { erase(key); if (old.expires <= clock()) cacheExpiredPurges++; }
         const shared = flights.get(key);
         if (shared) {
           debug?.emit({
@@ -241,10 +256,15 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
           // Only public reads and the existing private directory/daily cache are retained.
           if (!entry.account || ['daily', 'channels', 'channel-directory'].includes(parts[0])) {
             const bytes = Buffer.byteLength(stringifyJSONValue(result));
-            if (bytes <= 2 * 1024 * 1024 && flights.get(key) === flight) {
+            if (bytes <= cacheMaxBytes && flights.get(key) === flight) {
+              const nowMs = clock();
               erase(key);
-              while (cache.size >= 64 || cacheBytes + bytes > 2 * 1024 * 1024) erase(cache.keys().next().value);
-              cache.set(key, { platform, bytes, value: cloneJSONValue(result), expires: Math.min(clock() + ttl, result.expiresAt ?? Infinity) });
+              if (cache.size >= cacheMaxEntries || cacheBytes + bytes > cacheMaxBytes) purgeExpired(nowMs);
+              while ((cache.size >= cacheMaxEntries || cacheBytes + bytes > cacheMaxBytes) && cache.size > 0) {
+                erase(cache.keys().next().value);
+                cacheEvictions++;
+              }
+              cache.set(key, { platform, bytes, value: cloneJSONValue(result), expires: Math.min(nowMs + ttl, result.expiresAt ?? Infinity) });
               cacheBytes += bytes;
               debug?.emit({
                 level: 'debug',
@@ -387,6 +407,13 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
       debug?.emit({ level: 'info', cat: 'music-platform', sub: platform ?? 'all', event: 'cache.clear', data: { platform: platform ?? null } });
       return { cleared: true };
     },
+    clearMemory() {
+      const clearedEntries = cache.size;
+      const clearedBytes = cacheBytes;
+      cache.clear();
+      cacheBytes = 0;
+      return { clearedEntries, clearedBytes };
+    },
     describe() { return { execution: 'node', contract: 'music.platform.v1', platforms: Object.keys(providers) }; },
     diagnostics() {
       return {
@@ -395,6 +422,12 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
         inFlightCacheReads: flights.size,
         cacheEntries: cache.size,
         cacheBytes,
+        cacheMaxEntries,
+        cacheCapacityBytes: cacheMaxBytes,
+        cacheHits,
+        cacheMisses,
+        cacheEvictions,
+        cacheExpiredPurges,
         sessions: [...sessions.keys()],
       };
     },

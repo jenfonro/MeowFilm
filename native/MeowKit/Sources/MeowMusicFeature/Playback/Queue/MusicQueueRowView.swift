@@ -4,7 +4,7 @@ import UIKit
 import MeowUI
 
 @MainActor
-final class MusicQueueRowView: UIView {
+final class MusicQueueRowView: UIView, PageThemeable {
     var onFavorite: (() -> Void)?
     var onRemove: (() -> Void)?
     let reorderHandle = UIImageView(image: PageIcon.image(.reorder, size: 18))
@@ -15,6 +15,7 @@ final class MusicQueueRowView: UIView {
     private static let filledHeart = PageIcon.image(.heart, filled: true, size: 22)
     private var restingBackground = UIColor.clear, interactionBackground = UIColor.clear
     private var isPressed = false, isReordering = false
+    private var isRowActive = false, isRowFavorite = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -39,26 +40,32 @@ final class MusicQueueRowView: UIView {
                    favorite: Bool?, removable: Bool, reorderable: Bool, theme: PageTheme) {
         self.title.text = title
         self.artist.text = artist
+        isRowActive = active
+        isRowFavorite = favorite == true
         mark.text = String(format: "%02d", index + 1)
         mark.isHidden = active
         playing.isHidden = !active
-        mark.textColor = UIColor(theme.muted)
-        playing.tintColor = UIColor(theme.accent)
-        self.title.textColor = UIColor(active ? theme.accent : theme.ink)
-        self.artist.textColor = UIColor(theme.muted)
-        restingBackground = active ? UIColor(theme.accent).withAlphaComponent(0.06) : .clear
-        interactionBackground = UIColor(theme.chip)
-        updateBackground()
         self.favorite.isHidden = favorite == nil
-        self.favorite.setImage(favorite == true ? Self.filledHeart : Self.heart, for: .normal)
-        self.favorite.tintColor = UIColor(favorite == true ? theme.accent : theme.muted)
-        self.favorite.accessibilityLabel = (favorite == true ? "取消收藏 " : "收藏 ") + title
+        self.favorite.setImage(isRowFavorite ? Self.filledHeart : Self.heart, for: .normal)
+        self.favorite.accessibilityLabel = (isRowFavorite ? "取消收藏 " : "收藏 ") + title
         remove.isHidden = !removable
-        remove.tintColor = UIColor(theme.muted)
         remove.accessibilityLabel = "移出队列 " + title
         reorderHandle.isHidden = !reorderable
-        reorderHandle.tintColor = UIColor(theme.muted).withAlphaComponent(0.6)
+        applyTheme(theme)
         setNeedsLayout()
+    }
+
+    func applyTheme(_ theme: PageTheme) {
+        mark.textColor = UIColor(theme.muted)
+        playing.tintColor = UIColor(theme.accent)
+        title.textColor = UIColor(isRowActive ? theme.accent : theme.ink)
+        artist.textColor = UIColor(theme.muted)
+        restingBackground = isRowActive ? UIColor(theme.accent).withAlphaComponent(0.06) : .clear
+        interactionBackground = UIColor(theme.chip)
+        updateBackground()
+        favorite.tintColor = UIColor(isRowFavorite ? theme.accent : theme.muted)
+        remove.tintColor = UIColor(theme.muted)
+        reorderHandle.tintColor = UIColor(theme.muted).withAlphaComponent(0.6)
     }
 
     func setPressed(_ pressed: Bool) {

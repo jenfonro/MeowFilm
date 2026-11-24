@@ -850,6 +850,7 @@ export function createMediaService({ debug } = {}) {
         activeOwners: owners.size,
         activeStreams: operations.size,
         inboundSockets: inboundSockets.size,
+        cachePool: cachePool.diagnostics(),
       };
     },
     async prefetch(id) {

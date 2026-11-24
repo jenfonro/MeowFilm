@@ -6,21 +6,20 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class MusicLyricRowView : UserControl
+public sealed partial class MusicLyricRowView : UserControl
 {
     private const int WordPoolLimit = 24;
-    private static readonly SolidColorBrush SelectedTextBrush = DesktopVisual.Brush("#EBEAED");
-    private static readonly SolidColorBrush UnselectedTextBrush = DesktopVisual.Brush("#8B898C");
-    private static readonly SolidColorBrush SelectedWordNormalBrush = DesktopVisual.Brush("#8B898C");
-    private static readonly SolidColorBrush UnselectedWordNormalBrush = DesktopVisual.Brush("#68666A");
-    private static readonly SolidColorBrush SelectedWordHighlightBrush = DesktopVisual.Brush("#F4F3F6");
-    private static readonly SolidColorBrush UnselectedWordHighlightBrush = DesktopVisual.Brush("#928F90");
+    [ThreadStatic] private static SolidColorBrush? selectedTextBrush, unselectedTextBrush;
+    [ThreadStatic] private static SolidColorBrush? selectedWordNormalBrush, unselectedWordNormalBrush;
+    [ThreadStatic] private static SolidColorBrush? selectedWordHighlightBrush, unselectedWordHighlightBrush;
 
-    private readonly StackPanel stack = new();
-    private readonly TextBlock plain = new() { FontSize = 20, TextWrapping = TextWrapping.Wrap };
-    private readonly WrapPanel words = new();
-    private readonly TextBlock translation = new() { Name = "LyricTranslation", FontSize = 14, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 5, 0, 0) };
-    private readonly TextBlock romanization = new() { FontSize = 14, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 5, 0, 0) };
+    private static SolidColorBrush SelectedTextBrush => selectedTextBrush ??= DesktopVisual.Brush("#EBEAED");
+    private static SolidColorBrush UnselectedTextBrush => unselectedTextBrush ??= DesktopVisual.Brush("#8B898C");
+    private static SolidColorBrush SelectedWordNormalBrush => selectedWordNormalBrush ??= DesktopVisual.Brush("#8B898C");
+    private static SolidColorBrush UnselectedWordNormalBrush => unselectedWordNormalBrush ??= DesktopVisual.Brush("#68666A");
+    private static SolidColorBrush SelectedWordHighlightBrush => selectedWordHighlightBrush ??= DesktopVisual.Brush("#F4F3F6");
+    private static SolidColorBrush UnselectedWordHighlightBrush => unselectedWordHighlightBrush ??= DesktopVisual.Brush("#928F90");
+
     private readonly List<MusicLyricWordView> wordPool = [];
     private MusicLyricsController? lyrics;
     private MusicLyricRow? row;
@@ -29,9 +28,7 @@ public sealed class MusicLyricRowView : UserControl
 
     public MusicLyricRowView()
     {
-        IsTabStop = false; IsHitTestVisible = false;
-        stack.Children.Add(plain); stack.Children.Add(words); stack.Children.Add(translation); stack.Children.Add(romanization);
-        Content = new Border { Padding = new Thickness(76, 11, 16, 11), MinHeight = 47, Child = stack };
+        InitializeComponent();
         DataContextChanged += (_, _) => Reload();
         Loaded += (_, _) =>
         {
@@ -59,22 +56,22 @@ public sealed class MusicLyricRowView : UserControl
             lastSelected = null;
             lastShowTranslation = null;
         }
-        plain.Text = row?.Text ?? "";
-        plain.Visibility = words.Children.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        translation.Text = row?.Translation ?? "";
-        romanization.Text = row?.Romanization ?? "";
+        PlainText.Text = row?.Text ?? "";
+        PlainText.Visibility = WordsPanel.Children.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        LyricTranslation.Text = row?.Translation ?? "";
+        RomanizationText.Text = row?.Romanization ?? "";
         Refresh(force: true);
     }
 
     private void SyncWordViews(IReadOnlyList<MusicLyricWord>? timed)
     {
         int targetCount = timed?.Count ?? 0;
-        int currentCount = words.Children.Count;
+        int currentCount = WordsPanel.Children.Count;
         int reuseCount = Math.Min(currentCount, targetCount);
 
         for (int i = 0; i < reuseCount; i++)
         {
-            var view = (MusicLyricWordView)words.Children[i];
+            var view = (MusicLyricWordView)WordsPanel.Children[i];
             view.Word = timed![i];
         }
 
@@ -94,15 +91,15 @@ public sealed class MusicLyricRowView : UserControl
                 {
                     view = new MusicLyricWordView { Word = timed![i], FontSize = 20 };
                 }
-                words.Children.Add(view);
+                WordsPanel.Children.Add(view);
             }
         }
         else if (targetCount < currentCount)
         {
             for (int i = currentCount - 1; i >= targetCount; i--)
             {
-                var view = (MusicLyricWordView)words.Children[i];
-                words.Children.RemoveAt(i);
+                var view = (MusicLyricWordView)WordsPanel.Children[i];
+                WordsPanel.Children.RemoveAt(i);
                 view.StopHighlight(0);
                 if (wordPool.Count < WordPoolLimit)
                     wordPool.Add(view);
@@ -120,17 +117,17 @@ public sealed class MusicLyricRowView : UserControl
     {
         bool selected = lyrics is { } owner && owner.LyricDisplayIndex is int displayIndex &&
             displayIndex >= 0 && displayIndex < owner.Lyrics.Count && ReferenceEquals(owner.Lyrics[displayIndex], row);
-        bool showTranslation = lyrics?.ShowLyricTranslation != false && translation.Text.Length > 0;
+        bool showTranslation = lyrics?.ShowLyricTranslation != false && LyricTranslation.Text.Length > 0;
         if (force || lastSelected != selected)
         {
             lastSelected = selected;
             var normal = selected ? SelectedTextBrush : UnselectedTextBrush;
-            plain.Foreground = translation.Foreground = romanization.Foreground = normal;
+            PlainText.Foreground = LyricTranslation.Foreground = RomanizationText.Foreground = normal;
             var wordNormal = selected ? SelectedWordNormalBrush : UnselectedWordNormalBrush;
             var wordHighlight = selected ? SelectedWordHighlightBrush : UnselectedWordHighlightBrush;
-            for (int i = 0; i < words.Children.Count; i++)
+            for (int i = 0; i < WordsPanel.Children.Count; i++)
             {
-                if (words.Children[i] is MusicLyricWordView word)
+                if (WordsPanel.Children[i] is MusicLyricWordView word)
                 {
                     word.Foreground = wordNormal;
                     word.Highlight = wordHighlight;
@@ -140,8 +137,8 @@ public sealed class MusicLyricRowView : UserControl
         if (force || lastShowTranslation != showTranslation)
         {
             lastShowTranslation = showTranslation;
-            translation.Visibility = showTranslation ? Visibility.Visible : Visibility.Collapsed;
+            LyricTranslation.Visibility = showTranslation ? Visibility.Visible : Visibility.Collapsed;
         }
-        romanization.Visibility = romanization.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        RomanizationText.Visibility = RomanizationText.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 }

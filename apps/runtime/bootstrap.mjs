@@ -268,7 +268,17 @@ export function createAppRuntime({ sessionId,
         contract: HTTP_PROTOCOL,
         codes: publicCodes,
         ...optionalJsonContent,
-        handler: withCtx(() => success(debug.runGc())),
+        handler: withCtx(() => success(debug.runGc({
+          clearCaches() {
+            const cleared = {};
+            for (const [id, module] of owners.entries()) {
+              if (typeof module.clearMemoryCache !== 'function') continue;
+              try { cleared[id] = module.clearMemoryCache(); }
+              catch (error) { cleared[id] = { error: error?.message ?? String(error) }; }
+            }
+            return cleared;
+          },
+        }))),
       };
     }
     if (method === 'POST' && url.pathname === '/v1/debug/heapsnapshot') {

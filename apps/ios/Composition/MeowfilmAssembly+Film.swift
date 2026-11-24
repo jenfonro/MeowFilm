@@ -4,7 +4,7 @@ import MeowRuntime
 
 @MainActor
 extension MeowfilmAssembly {
-    func makeFilmPlayback(item: FilmItem, kind: FilmPlaybackKind,
+    func makeFilmPlayback(item: FilmItem,
                           entrySurface: String? = nil) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
         guard let target = item.playbackTarget, let businessID = item.businessID, !businessID.isEmpty,

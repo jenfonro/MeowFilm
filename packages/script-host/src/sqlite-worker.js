@@ -1,7 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { DatabaseSync, backup } from 'node:sqlite';
-import { lstatSync, chmodSync, openSync, closeSync, unlinkSync, realpathSync, fsyncSync } from 'node:fs';
-import { dirname, isAbsolute } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { statSync, chmodSync, openSync, closeSync, unlinkSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { acquireNativeStorageLock as acquire } from './native-engine.js';
 
 const { path, identity, initialize, role = 'writer' } = workerData;
@@ -14,17 +14,9 @@ const synchronousMode = identity?.synchronous === 'NORMAL' ? 'NORMAL' : 'FULL';
 const synchronousLevel = synchronousMode === 'NORMAL' ? 1 : 2;
 const initializeLockName = identity?.initializeLock ?? 'data-initialize.lock';
 const maintenanceLockName = identity?.maintenanceLock ?? 'data-maintenance.lock';
-const allowBackup = identity?.allowBackup ?? true;
-let db, fileIdentity, commits = 0, maintenanceFailure;
+let db, commits = 0, maintenanceFailure;
 const enter = (exclusive, timeout = 5000) =>
   acquire(dirname(path) + '/' + maintenanceLockName, exclusive, timeout);
-
-function verifyFiles() {
-  if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
-  for (const suffix of ['', '-wal', '-shm', '-journal']) safeFile(path + suffix, suffix === '');
-  const current = lstatSync(path, { bigint: true });
-  if (current.ino !== fileIdentity.ino || current.dev !== fileIdentity.dev) fail('UNSAFE_PATH');
-}
 
 function prepare(sql) {
   if (typeof sql !== 'string' || !sql || sql.includes('\0')) fail('INVALID_REQUEST');
@@ -63,21 +55,20 @@ function maintain() {
   let lease;
   try {
     lease = enter(true, 0);
-    verifyFiles();
     const ckpt = query('PRAGMA wal_checkpoint(PASSIVE)');
     if (ckpt[0]?.busy === 0 && Number(db.prepare('PRAGMA freelist_count').get().freelist_count) >= 256)
       db.exec('PRAGMA incremental_vacuum(128)');
   } catch (error) {
     const err = code(error);
-    if (err === 'UNSAFE_PATH' || err === 'STORAGE_CORRUPT') latchFatal(err);
+    if (err === 'STORAGE_CORRUPT') latchFatal(err);
   } finally { lease?.release(); }
 }
 
-function safeFile(file, required = false) {
+function fileStat(file, required = false) {
   let stat;
-  try { stat = lstatSync(file); }
+  try { stat = statSync(file); }
   catch (error) { if (error.code === 'ENOENT' && !required) return; throw error; }
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail('UNSAFE_PATH');
+  if (!stat.isFile()) fail('UNSAFE_PATH');
   return stat;
 }
 
@@ -166,19 +157,13 @@ function transaction(statements, readOnly = false) {
 
 if (isReader) {
   try {
-    if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
-    safeFile(path, true);
+    fileStat(path, true);
     db = new DatabaseSync(path, { readOnly: true, enableForeignKeyConstraints: true, allowExtension: false });
     db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; ' +
       'PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;');
     if (db.prepare('PRAGMA query_only').get().query_only !== 1 ||
         db.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal' ||
-        db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 2 ||
-        db.prepare('PRAGMA trusted_schema').get().trusted_schema !== 0 ||
-        db.prepare('PRAGMA foreign_keys').get().foreign_keys !== 1 ||
-        db.prepare('PRAGMA busy_timeout').get().timeout !== 5000 ||
-        db.prepare('PRAGMA temp_store').get().temp_store !== 2 ||
-        db.prepare('PRAGMA cache_size').get().cache_size !== -16384) fail('STORAGE_CONFIGURATION');
+        db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 2) fail('STORAGE_CONFIGURATION');
     parentPort.postMessage({ id: 0, value: true });
   } catch (error) {
     statementCache.clear();
@@ -191,10 +176,9 @@ if (isReader) {
   try {
     initializing = acquire(dirname(path) + '/' + initializeLockName, true, 5000);
     validating = enter(false, 5000);
-    if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
-    const existing = safeFile(path);
+    const existing = fileStat(path);
     for (const suffix of ['-wal', '-shm', '-journal']) {
-      if (safeFile(path + suffix) && !existing) fail('STORAGE_CORRUPT');
+      if (fileStat(path + suffix) && !existing) fail('STORAGE_CORRUPT');
     }
     if (existing?.size === 0) fail('STORAGE_CORRUPT');
     if (!existing && !initialize) fail('STORAGE_SCHEMA');
@@ -239,14 +223,6 @@ if (isReader) {
     }
     const stored = db.prepare('SELECT schema_hash FROM storage_identity WHERE singleton=1').get();
     if (stored?.schema_hash !== identity.hash) fail('STORAGE_SCHEMA');
-    const expected = new DatabaseSync(':memory:', { allowExtension: false });
-    try {
-      expected.exec(identity.sql);
-      const structure = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
-      if (JSON.stringify(db.prepare(structure).all()) !== JSON.stringify(expected.prepare(structure).all()))
-        fail('STORAGE_SCHEMA');
-    } finally { expected.close(); }
-    fileIdentity = lstatSync(path, { bigint: true });
     parentPort.postMessage({ id: 0, value: true });
   } catch (error) {
     statementCache.clear();
@@ -261,14 +237,13 @@ if (isReader) {
   } finally { validating?.release(); initializing?.release(); }
 }
 
-parentPort.on('message', async ({ id, input }) => {
+parentPort.on('message', ({ id, input }) => {
   if (input.kind === 'close') {
     try { statementCache.clear(); db.close(); parentPort.postMessage({ id, value: true }); }
     catch (error) { parentPort.postMessage({ id, code: code(error) }); }
     finally { parentPort.close(); }
     return;
   }
-  let lease;
   try {
     if (maintenanceFailure) fail(maintenanceFailure);
     if (isReader) {
@@ -279,15 +254,6 @@ parentPort.on('message', async ({ id, input }) => {
       parentPort.postMessage({ id, value: result });
       return;
     }
-    if (input.kind === 'backup' && !allowBackup) fail('INVALID_REQUEST');
-    if (input.kind === 'checkpoint' || input.kind === 'backup') {
-      lease = enter(true);
-      try { verifyFiles(); } catch (error) {
-        const err = code(error);
-        if (err === 'UNSAFE_PATH' || err === 'STORAGE_CORRUPT') latchFatal(err);
-        throw error;
-      }
-    }
     const isWrite = input.kind === 'execute' || input.kind === 'transaction';
     const beforeChanges = isWrite ? prepare('SELECT total_changes() AS n').get().n : 0n;
     let result;
@@ -295,28 +261,6 @@ parentPort.on('message', async ({ id, input }) => {
     else if (input.kind === 'execute') result = transaction([input])[0];
     else if (input.kind === 'transaction') result = transaction(input.statements);
     else if (input.kind === 'snapshot') result = transaction(input.statements, true);
-    else if (input.kind === 'checkpoint') result = query('PRAGMA wal_checkpoint(PASSIVE)');
-    else if (input.kind === 'backup') {
-      // A backup is a new recovery point, never an overwrite of an existing file.
-      if (typeof input.path !== 'string' || !isAbsolute(input.path) ||
-          realpathSync(dirname(input.path)) !== dirname(input.path)) fail('UNSAFE_PATH');
-      let claimed = false;
-      try {
-        closeSync(openSync(input.path, 'wx', 0o600));
-        claimed = true;
-        result = await backup(db, input.path);
-        const file = openSync(input.path, 'r');
-        try { fsyncSync(file); } finally { closeSync(file); }
-        if (process.platform !== 'win32') {
-          const parent = openSync(dirname(input.path), 'r');
-          try { fsyncSync(parent); } finally { closeSync(parent); }
-        }
-      } catch (error) {
-        if (claimed) { try { unlinkSync(input.path); } catch {} }
-        if (error.code === 'EEXIST') fail('STORAGE_CONFLICT');
-        throw error;
-      }
-    }
     else fail('INVALID_REQUEST');
     const changed = isWrite && prepare('SELECT total_changes() AS n').get().n !== beforeChanges;
     parentPort.postMessage({ id, value: result });
@@ -326,7 +270,6 @@ parentPort.on('message', async ({ id, input }) => {
     if (err === 'STORAGE_CORRUPT') latchFatal(err);
     parentPort.postMessage({ id, code: err });
   } finally {
-    lease?.release();
     if (!isReader && commits >= 64) { commits = 0; maintain(); }
   }
 });

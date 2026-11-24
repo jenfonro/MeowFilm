@@ -77,7 +77,7 @@ internal static class Program
                 pendingRules = null;
                 pendingSources = null;
                 pendingMetadata = null;
-                capabilities.Add(new NovelCapability(runtime, dataStorage));
+                capabilities.Add(new NovelCapability(runtime, dataStorage, effectivePaths.Temp));
             },
             launch => new NativeApplication(launch),
             async () =>

@@ -119,15 +119,13 @@ internal static class FilmRulesStore
 
             foreach (string group in new[] { "episodeCleanRegexRules", "episodeRules", "movieRules", "aggregateRegexRules" })
             {
-                if (db.Execute("""
+                db.Execute("""
                     INSERT INTO film_rule_groups(group_name,overridden,row_revision)
                     VALUES($g,1,1)
                     ON CONFLICT(group_name) DO UPDATE SET
                         overridden=1,
                         row_revision=film_rule_groups.row_revision+1
-                    WHERE film_rule_groups.row_revision < 9007199254740991
-                    """, ("$g", group)) != 1)
-                    throw new StorageException(StorageError.Conflict);
+                    """, ("$g", group));
             }
 
             return db.CommitRevision(Owner, expected);

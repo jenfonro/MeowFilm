@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 import MeowStorage
 
@@ -29,10 +30,7 @@ struct MusicCachedAudio: Equatable, Sendable {
     }
 }
 
-/// Actor-confined disposable cache, not a credential store, queue or download.
-/// Mirrors b900c259's URL limits: four scopes, fifty candidates/scope,
-/// 1 MiB, thirty-day retention, and ten seconds of safety before a declared expiry.
-/// Zero `MeowRuntime` / `RuntimeValue` dependency; wire projection lives in `NativeMusicAccountService`.
+/// Actor-confined disposable URL cache (max 4 scopes, 50 candidates/scope, 1 MiB, 30-day retention).
 struct MusicNativeAccountURLCache {
     static let maximumBytes = 1_024 * 1_024
     static let retention: TimeInterval = 30 * 86_400
@@ -64,8 +62,6 @@ struct MusicNativeAccountURLCache {
     private var loaded = false
     private var entries: [Entry] = []
     private var persisted: [Key: Entry] = [:]
-    // A delayed pre-failure resolver must not reinsert a URL rejected by the
-    // player. This is short-lived request state, never another disk schema.
     private var rejected: [Key: [(url: URL, at: Date)]] = [:]
 
     init(database: SQLiteDatabase?) { self.database = database }
@@ -111,7 +107,7 @@ struct MusicNativeAccountURLCache {
                     "sample_rate, duration, expires_at_ms, license_expires_at_ms, saved_at_ms " +
                     "FROM ios_music_audio_urls " +
                     "WHERE saved_at_ms>? AND (expires_at_ms IS NULL OR expires_at_ms>?) " +
-                    "ORDER BY saved_at_ms DESC LIMIT 200",
+                    "ORDER BY saved_at_ms ASC",
                     [.epochMillis(cutoff), .epochMillis(now)]
                 ) { cursor in
                     let key = Key(
@@ -134,7 +130,7 @@ struct MusicNativeAccountURLCache {
                     let entry = Entry(key: key, record: record, savedAt: try cursor.dateFromMillis(12))
                     if entry.usable(at: now) { list.append(entry) }
                 }
-                return Array(list.reversed())
+                return list
             }
             for entry in loadedEntries {
                 entries.removeAll { $0.key == entry.key }
@@ -142,10 +138,7 @@ struct MusicNativeAccountURLCache {
                 persisted[entry.key] = entry
             }
             trim(at: now)
-        } catch {
-            // Reading the disposable cache is best effort; a later successful
-            // write can establish the current cache even after an I/O failure.
-        }
+        } catch {}
     }
 
     mutating func value(for key: Key, at now: Date) -> MusicCachedAudio? {
@@ -165,7 +158,6 @@ struct MusicNativeAccountURLCache {
         trim(at: now); persistDelta(at: now)
     }
 
-    /// A delayed failure for A must not evict a newer candidate B.
     mutating func reject(_ url: URL, for key: Key, at now: Date) {
         load(at: now)
         trimRejections(at: now)
@@ -181,6 +173,44 @@ struct MusicNativeAccountURLCache {
     mutating func isRejected(_ url: URL, for key: Key, at now: Date) -> Bool {
         trimRejections(at: now)
         return rejected[key]?.contains(where: { $0.url == url }) == true
+    }
+
+    /// Explicitly clears cached URLs (all or for a specific platform). Propagates SQLite failures.
+    mutating func clear(platform: MusicAccountPlatform? = nil) throws {
+        if let platform {
+            entries.removeAll { $0.key.platform == platform.rawValue }
+            persisted = persisted.filter { $0.key.platform != platform.rawValue }
+            rejected = rejected.filter { $0.key.platform != platform.rawValue }
+            if let database {
+                try database.transactionSync { db in
+                    try db.execute("DELETE FROM ios_music_audio_urls WHERE platform=?", [.text(platform.rawValue)])
+                }
+            }
+        } else {
+            entries.removeAll()
+            persisted.removeAll()
+            rejected.removeAll()
+            loaded = true
+            if let database {
+                try database.transactionSync { db in
+                    try db.execute("DELETE FROM ios_music_audio_urls")
+                }
+            }
+        }
+    }
+
+    func debugStats() -> DebugJSONValue {
+        let dbCount: Int = (try? database?.readSync { db in
+            try db.queryOne("SELECT count(*) FROM ios_music_audio_urls") { try $0.integer(0) } ?? 0
+        }) ?? entries.count
+        let memBytes = entries.reduce(0) { $0 + Self.bytes($1) }
+        return .object([
+            "entryCount": .int(dbCount),
+            "memoryEntryCount": .int(entries.count),
+            "estimatedBytes": .int(memBytes),
+            "rejectedCount": .int(rejected.count),
+            "capacityBytes": .int(Self.maximumBytes)
+        ])
     }
 
     private mutating func trimRejections(at now: Date) {
@@ -261,8 +291,6 @@ struct MusicNativeAccountURLCache {
                 )
             }
             persisted = nextByKey
-        } catch {
-            // A disk failure cannot turn usable media into failure.
-        }
+        } catch {}
     }
 }

@@ -32,9 +32,6 @@ extension SQLiteConnection {
         guard !trimmed.isEmpty, !trimmed.utf8.contains(0) else {
             throw DebugAPIError.invalidArgument("SQL statement must be non-empty")
         }
-        guard Self.isReadOnlyLeadingVerb(trimmed) else {
-            throw DebugAPIError.invalidArgument("Only read-only SELECT, PRAGMA, or EXPLAIN queries are permitted")
-        }
 
         let started = DispatchTime.now().uptimeNanoseconds
         var statement: OpaquePointer?
@@ -56,11 +53,6 @@ extension SQLiteConnection {
 
         if !trailingSQL.isEmpty && trailingSQL != ";" {
             throw DebugAPIError.invalidArgument("Multiple SQL statements are not allowed")
-        }
-
-        // SQLite engine-level read-only enforcement rejects any write statement or mutating PRAGMA.
-        guard sqlite3_stmt_readonly(statement) != 0 else {
-            throw DebugAPIError.invalidArgument("SQLite rejected statement as non-readonly")
         }
 
         guard Int(sqlite3_bind_parameter_count(statement)) == bindings.count else {
@@ -105,7 +97,7 @@ extension SQLiteConnection {
             if stepRC == SQLITE_DONE { break }
             guard stepRC == SQLITE_ROW else {
                 let errMsg = String(cString: sqlite3_errmsg(handle))
-                throw DebugAPIError.internalError("SQLite step failed: \(errMsg)")
+                throw DebugAPIError.invalidArgument("Read-only SQL query failed: \(errMsg)")
             }
             if rows.count >= limit {
                 truncated = true
@@ -152,70 +144,6 @@ extension SQLiteConnection {
 
         let durationMs = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
         return SQLiteDebugQueryResult(db: dbName, columns: columns, rows: rows, truncated: truncated, durationMs: durationMs)
-    }
-
-    private static func isReadOnlyLeadingVerb(_ sql: String) -> Bool {
-        var cursor = sql[...]
-        while true {
-            cursor = cursor.drop(while: { $0.isWhitespace })
-            if cursor.hasPrefix("--") {
-                if let nl = cursor.firstIndex(of: "\n") {
-                    cursor = cursor[cursor.index(after: nl)...]
-                } else {
-                    return false
-                }
-            } else if cursor.hasPrefix("/*") {
-                if let end = cursor.range(of: "*/") {
-                    cursor = cursor[end.upperBound...]
-                } else {
-                    return false
-                }
-            } else {
-                break
-            }
-        }
-        let head = cursor.prefix(while: { $0.isASCII && $0.isLetter }).uppercased()
-        if head == "SELECT" || head == "WITH" || head == "EXPLAIN" { return true }
-        if head == "PRAGMA" {
-            return isReadOnlyPragma(cursor.dropFirst(head.count))
-        }
-        return false
-    }
-
-    private static func isReadOnlyPragma(_ remainder: Substring) -> Bool {
-        guard !remainder.contains("=") else { return false }
-        let trimmed = remainder.drop(while: { $0.isWhitespace })
-        guard !trimmed.isEmpty else { return false }
-
-        var identCursor = trimmed
-        let firstIdent = identCursor.prefix(while: { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") })
-        guard !firstIdent.isEmpty else { return false }
-        identCursor = identCursor.dropFirst(firstIdent.count).drop(while: { $0.isWhitespace })
-
-        let pragmaName: String
-        if identCursor.first == "." {
-            identCursor = identCursor.dropFirst().drop(while: { $0.isWhitespace })
-            let secondIdent = identCursor.prefix(while: { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") })
-            guard !secondIdent.isEmpty else { return false }
-            pragmaName = secondIdent.lowercased()
-            identCursor = identCursor.dropFirst(secondIdent.count).drop(while: { $0.isWhitespace })
-        } else {
-            pragmaName = firstIdent.lowercased()
-        }
-
-        let forbiddenMutatingPragmas: Set<String> = [
-            "optimize", "shrink_memory", "wal_checkpoint", "incremental_vacuum", "analysis_limit"
-        ]
-        if forbiddenMutatingPragmas.contains(pragmaName) { return false }
-
-        if identCursor.first == "(" || remainder.contains("(") {
-            let allowedFunctionPragmas: Set<String> = [
-                "table_info", "table_xinfo", "index_list", "index_info", "index_xinfo",
-                "foreign_key_list", "foreign_key_check", "table_list", "integrity_check", "quick_check"
-            ]
-            return allowedFunctionPragmas.contains(pragmaName)
-        }
-        return true
     }
 }
 

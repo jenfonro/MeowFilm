@@ -6,6 +6,7 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicAppearanceView : UserControl
 {
+    private IDisposable? visibility;
     private bool active;
     public MusicSettingsController Settings { get; }
 
@@ -15,7 +16,18 @@ public partial class MusicAppearanceView : UserControl
         InitializeComponent();
         PaletteSelection.Presets = MusicAppearancePalette.Options
             .Select(option => new ColorPreset(option.Key, option.Name, option.Color)).ToArray();
-        _ = DesktopVisual.ObserveVisibility(this, visible => _ = UpdateActivation());
+        Loaded += (_, _) =>
+        {
+            visibility?.Dispose();
+            visibility = DesktopVisual.ObserveVisibility(this, visible => _ = UpdateActivation());
+        };
+        Unloaded += (_, _) =>
+        {
+            if (IsLoaded) return;
+            visibility?.Dispose();
+            visibility = null;
+            _ = UpdateActivation();
+        };
     }
 
     private async Task UpdateActivation()

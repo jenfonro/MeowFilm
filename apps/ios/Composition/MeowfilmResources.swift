@@ -13,6 +13,8 @@ import MeowNovelFeature
 /// Filesystem preparation is off MainActor. Music and Cat borrow the App's
 /// script session; their installations and private data belong to Node.
 struct MeowfilmResources: Sendable {
+    let dataRoot: URL
+    let tempRoot: URL
     let database: SQLiteDatabase
     let cacheDatabase: SQLiteDatabase
     let musicLibrary: MusicNativeLibraryDatabase
@@ -48,12 +50,19 @@ struct MeowfilmResources: Sendable {
                 .appendingPathComponent("meowfilm", isDirectory: true)
         }
         DebugRuntime.current?.session.updateDataRoot(root)
+        self.dataRoot = root
+        self.tempRoot = try AppTempDirectory.configure(dataRoot: root)
         let database = try SQLiteDatabase.openData(dataRoot: root)
         let cacheDatabase = try SQLiteDatabase.openCache(dataRoot: root)
         self.database = database
         self.cacheDatabase = cacheDatabase
-        let resources = root.appendingPathComponent("resources-v1", isDirectory: true)
+        var resources = root.appendingPathComponent("resources-v1", isDirectory: true)
         try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        #if os(iOS)
+        var backupValues = URLResourceValues()
+        backupValues.isExcludedFromBackup = true
+        try? resources.setResourceValues(backupValues)
+        #endif
         musicLibrary = MusicNativeLibraryDatabase(database: database)
         musicPresentationCache = MusicNativePresentationCache(database: cacheDatabase)
         musicAudioCache = NativeMusicAudioFileCache(database: cacheDatabase,
@@ -108,14 +117,37 @@ struct MeowfilmResources: Sendable {
             platformClient: musicPlatform,
             database: database,
             cacheDatabase: cacheDatabase,
-            cacheLifecycle: { [musicAudioCache] event in
+            cacheLifecycle: { [musicAudioCache, musicHomeSnapshot] event in
                 switch event {
                 case .accountChanged:
-                    await musicAudioCache?.clearOfficial()
+                    try? await musicAudioCache?.clearOfficial()
+                    try? musicHomeSnapshot.clear()
                 case .accessChanged, .closed:
                     await musicAudioCache?.cancelPending()
                 }
             }
         )
+    }
+
+    /// Unified explicit clear across all music cache domains; propagates real errors.
+    func clearMusicCaches() async throws {
+        if let musicAudioCache {
+            try await musicAudioCache.clear()
+        } else {
+            try await musicPresentationCache.clear()
+        }
+        if let musicAccounts {
+            try await musicAccounts.clearAccountCaches()
+        }
+        try await musicSourceDiscoveryCache.clear()
+        try musicHomeSnapshot.clear()
+        do {
+            try await musicPlatform.clear(platform: nil)
+        } catch {
+            let failure = MusicPlatformClient.error(error)
+            if failure != .closed && failure != .unavailable && failure != .timeout {
+                throw error
+            }
+        }
     }
 }

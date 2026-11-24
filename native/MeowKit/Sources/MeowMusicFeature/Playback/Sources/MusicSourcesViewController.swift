@@ -116,12 +116,7 @@ final class MusicSourcesViewController: MusicPageViewController,
                 do {
                     for try await snapshot in updates {
                         guard !Task.isCancelled, let self, self.request == own else { break }
-                        if self.rejecting, self.model.current?.id == self.fence.occurrence,
-                           self.model.accountAccessGeneration == self.fence.access, self.originIsCurrent() {
-                            self.snapshot = snapshot; self.render()
-                            continue
-                        }
-                        if self.selecting, self.model.current?.id == self.fence.occurrence,
+                        if (self.rejecting || self.selecting), self.model.current?.id == self.fence.occurrence,
                            self.model.accountAccessGeneration == self.fence.access, self.originIsCurrent() {
                             self.snapshot = snapshot; self.render()
                             continue
@@ -181,11 +176,8 @@ final class MusicSourcesViewController: MusicPageViewController,
         guard isViewLoaded, dataSource != nil else { return }
         more.tintColor = UIColor(theme.ink)
         emptyLabel.textColor = UIColor(theme.muted)
-        for path in table.indexPathsForVisibleRows ?? [] {
-            if let id = dataSource.itemIdentifier(for: path), let source = rowProjection[id],
-               let cell = table.cellForRow(at: path) as? MusicSourceRowCell {
-                cell.configure(source: source, theme: theme)
-            }
+        for cell in table.visibleCells {
+            (cell as? MusicSourceRowCell)?.applyTheme(theme)
         }
     }
 
@@ -335,7 +327,7 @@ final class MusicSourcesViewController: MusicPageViewController,
 }
 
 @MainActor
-private final class MusicSourceRowCell: UITableViewCell {
+private final class MusicSourceRowCell: UITableViewCell, PageThemeable {
     static let reuseIdentifier = "music.source.row"
 
     private let titleLabel = UILabel()
@@ -378,9 +370,13 @@ private final class MusicSourceRowCell: UITableViewCell {
             ?? "请求\(MusicQualityLabel.name(source.selection.quality)) · 实际音质未确认"
         titleLabel.text = source.title
         titleLabel.font = .preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
-        titleLabel.textColor = UIColor(theme.ink)
         detailLabel.text = platform + " · " + quality + "\n录音 " + source.selection.sourceKey
         detailLabel.font = .preferredFont(forTextStyle: .subheadline, compatibleWith: traitCollection)
+        applyTheme(theme)
+    }
+
+    func applyTheme(_ theme: PageTheme) {
+        titleLabel.textColor = UIColor(theme.ink)
         detailLabel.textColor = UIColor(theme.muted)
     }
 }

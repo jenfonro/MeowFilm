@@ -1,6 +1,5 @@
 #if os(iOS)
 import UIKit
-import Combine
 import MeowDebug
 import MeowUI
 
@@ -113,7 +112,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             emptyLabel.textColor = UIColor(theme.muted)
             collection.refreshControl?.tintColor = UIColor(theme.accent)
             renderHeartbeat()
-            updateVisibleCells()
+            for cell in collection.visibleCells { (cell as? MusicLibraryCell)?.applyTheme(theme) }
             for case let header as MusicLibrarySectionHeader in collection.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionHeader) {
                 header.applyTheme(theme)
             }
@@ -334,7 +333,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
 }
 
 @MainActor
-private final class MusicLibraryCell: UICollectionViewCell {
+private final class MusicLibraryCell: UICollectionViewCell, PageThemeable {
     private let artwork = MusicArtworkView(size: 0)
     private let placeholderIcon = UIImageView()
     private let title = UILabel(), count = UILabel()
@@ -365,9 +364,6 @@ private final class MusicLibraryCell: UICollectionViewCell {
     }
     func configure(_ item: MusicCollection, grid: Bool, theme: PageTheme, images: MusicArtworkImages) {
         self.grid = grid
-        artwork.backgroundColor = UIColor(theme.chip)
-        artwork.layer.borderColor = UIColor(theme.border).cgColor
-        placeholderIcon.tintColor = UIColor(theme.muted)
         placeholderIcon.image = item.kind == "favorites"
             ? PageIcon.image(.heart, filled: false, size: grid ? 28 : 20)
             : UIImage(systemName: "music.note.list",
@@ -378,9 +374,16 @@ private final class MusicLibraryCell: UICollectionViewCell {
         count.text = item.networkReference.map { $0.platform.title } ?? "\(item.count)首"
         title.font = .systemFont(ofSize: grid ? 13 : 16)
         count.font = .systemFont(ofSize: 11)
-        title.textColor = UIColor(theme.ink); count.textColor = UIColor(theme.muted)
+        applyTheme(theme)
         accessibilityIdentifier = "music.library.collection.\(item.id)"
         setNeedsLayout()
+    }
+    func applyTheme(_ theme: PageTheme) {
+        artwork.backgroundColor = UIColor(theme.chip)
+        artwork.layer.borderColor = UIColor(theme.border).cgColor
+        placeholderIcon.tintColor = UIColor(theme.muted)
+        title.textColor = UIColor(theme.ink)
+        count.textColor = UIColor(theme.muted)
     }
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -404,7 +407,7 @@ private final class MusicLibraryCell: UICollectionViewCell {
 }
 
 @MainActor
-private final class MusicLibraryHeartbeatButton: UIButton {
+private final class MusicLibraryHeartbeatButton: UIButton, PageThemeable {
     private let iconView = UIImageView(image: MusicPlaybackModeIcon.image(.heartbeat))
     private let titleCopy = UILabel()
     private let chevron = UIImageView(image: UIImage(
@@ -479,7 +482,7 @@ private final class MusicLibraryHeartbeatButton: UIButton {
 }
 
 @MainActor
-private final class MusicLibrarySectionHeader: UICollectionReusableView {
+private final class MusicLibrarySectionHeader: UICollectionReusableView, PageThemeable {
     private let title = UILabel()
     override init(frame: CGRect) {
         super.init(frame: frame)

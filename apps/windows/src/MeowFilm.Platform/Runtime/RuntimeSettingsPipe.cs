@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -19,20 +18,16 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
             {
                 var line = await ReadAsync(token, store is null ? 64 * 1024 : null).ConfigureAwait(false)
                     ?? throw new BridgeException("CLOSED");
-                try
+                var value = BridgeCodec.DecodeJSONValue(line);
+                if (value.TryGetProperty("protocol", out _))
                 {
-                    var value = BridgeCodec.DecodeJSONValue(line);
-                    if (value.TryGetProperty("protocol", out _))
-                    {
-                        if (line.Length > 64 * 1024 || offset != count ||
-                            BridgeCodec.RequiredProperty(value, "protocol").GetString() != RuntimeHttpProtocol.Name)
-                            throw new BridgeException("INVALID_RESPONSE");
-                        string endpoint = BridgeCodec.RequiredProperty(value, "baseUrl").GetString()!;
-                        return RuntimeHttpProtocol.ValidateEndpoint(endpoint);
-                    }
-                    await RespondAsync(value, token).ConfigureAwait(false);
+                    if (line.Length > 64 * 1024 || offset != count ||
+                        BridgeCodec.RequiredProperty(value, "protocol").GetString() != RuntimeHttpProtocol.Name)
+                        throw new BridgeException("INVALID_RESPONSE");
+                    string endpoint = BridgeCodec.RequiredProperty(value, "baseUrl").GetString()!;
+                    return RuntimeHttpProtocol.ValidateEndpoint(endpoint);
                 }
-                finally { CryptographicOperations.ZeroMemory(line); }
+                await RespondAsync(value, token).ConfigureAwait(false);
             }
         }
         catch (BridgeException error) when (error.Code != "CLOSED") { throw new BridgeException("INVALID_RESPONSE"); }
@@ -51,11 +46,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
             {
                 var line = await ReadAsync(CancellationToken.None).ConfigureAwait(false);
                 if (line is null) return "CLOSED";
-                try
-                {
-                    await RespondAsync(BridgeCodec.DecodeJSONValue(line), CancellationToken.None).ConfigureAwait(false);
-                }
-                finally { CryptographicOperations.ZeroMemory(line); }
+                await RespondAsync(BridgeCodec.DecodeJSONValue(line), CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (BridgeException) { return "INVALID_RESPONSE"; }
@@ -64,7 +55,6 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
         catch (InvalidOperationException) { return "INVALID_RESPONSE"; }
         catch (FormatException) { return "INVALID_RESPONSE"; }
         catch (IOException) { return "CLOSED"; }
-        finally { CryptographicOperations.ZeroMemory(buffer); }
     }
 
     private async Task RespondAsync(JsonElement request, CancellationToken token)
@@ -102,43 +92,34 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
             reply = new { kind = "settings.result", id, ok = false, code = error.Code is "INVALID_REQUEST" ? "INVALID_REQUEST" : "STORAGE_ERROR" };
         }
         byte[] response = BridgeCodec.EncodeJSONValue(reply);
-        try
-        {
-            await stream.WriteAsync(response, token).ConfigureAwait(false);
-            await stream.WriteAsync("\n"u8.ToArray(), token).ConfigureAwait(false);
-            await stream.FlushAsync(token).ConfigureAwait(false);
-        }
-        finally { CryptographicOperations.ZeroMemory(response); }
+        await stream.WriteAsync(response, token).ConfigureAwait(false);
+        await stream.WriteAsync("\n"u8.ToArray(), token).ConfigureAwait(false);
+        await stream.FlushAsync(token).ConfigureAwait(false);
     }
 
     private async Task<byte[]?> ReadAsync(CancellationToken token, int? maximum = null)
     {
         using var line = new MemoryStream();
-        try
+        for (;;)
         {
-            for (;;)
+            if (offset == count)
             {
-                if (offset == count)
+                count = await stream.ReadAsync(buffer, token).ConfigureAwait(false);
+                offset = 0;
+                if (count == 0)
                 {
-                    count = await stream.ReadAsync(buffer, token).ConfigureAwait(false);
-                    offset = 0;
-                    if (count == 0)
-                    {
-                        if (line.Length != 0) throw new BridgeException("INVALID_RESPONSE");
-                        return null;
-                    }
+                    if (line.Length != 0) throw new BridgeException("INVALID_RESPONSE");
+                    return null;
                 }
-                int newline = Array.IndexOf(buffer, (byte)'\n', offset, count - offset);
-                int length = (newline < 0 ? count : newline) - offset;
-                if (maximum is { } limit && line.Length + length > limit) throw new BridgeException("INVALID_RESPONSE");
-                line.Write(buffer, offset, length);
-                CryptographicOperations.ZeroMemory(buffer.AsSpan(offset, length));
-                offset += length;
-                if (newline < 0) continue;
-                offset++;
-                return line.ToArray();
             }
+            int newline = Array.IndexOf(buffer, (byte)'\n', offset, count - offset);
+            int length = (newline < 0 ? count : newline) - offset;
+            if (maximum is { } limit && line.Length + length > limit) throw new BridgeException("INVALID_RESPONSE");
+            line.Write(buffer, offset, length);
+            offset += length;
+            if (newline < 0) continue;
+            offset++;
+            return line.ToArray();
         }
-        finally { if (line.TryGetBuffer(out var bytes)) CryptographicOperations.ZeroMemory(bytes); }
     }
 }

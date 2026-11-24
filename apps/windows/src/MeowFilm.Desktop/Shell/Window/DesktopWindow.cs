@@ -52,7 +52,7 @@ public class DesktopWindow : Window
             nativeMessageHandlers = next;
         }
     }
-    private readonly NativeSubclass callback;
+    private readonly NativeWin32.SubclassProc callback;
     private bool visible, sessionEnding, closingProgrammatically, closed, keepBackgroundOnShow, subclassAttached;
     private DesktopWindowState state;
     internal DesktopWindowState CachedWindowState => state;
@@ -62,7 +62,7 @@ public class DesktopWindow : Window
         DesktopTypography.Install(Application.Current);
         Handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
         callback = ProcessMessage;
-        if (!SetWindowSubclass(Handle, callback, 1, 0)) throw new InvalidOperationException("WINDOW_SUBCLASS_FAILED");
+        if (!NativeWin32.SetWindowSubclass(Handle, callback, 1, 0)) throw new InvalidOperationException("WINDOW_SUBCLASS_FAILED");
         subclassAttached = true;
         state = WindowState;
         AppWindow.Closing += (_, args) =>
@@ -92,7 +92,7 @@ public class DesktopWindow : Window
     {
         if (!subclassAttached) return;
         subclassAttached = false;
-        RemoveWindowSubclass(hwnd, callback, 1);
+        NativeWin32.RemoveWindowSubclass(hwnd, callback, 1);
     }
 
     public void AttachRoot()
@@ -158,7 +158,7 @@ public class DesktopWindow : Window
         try
         {
             AppWindow.Show(false);
-            SetWindowPos(Handle, HwndBottom, 0, 0, 0, 0, SwpNoSize | SwpNoMove | SwpNoActivate);
+            NativeWin32.SetWindowPos(Handle, HwndBottom, 0, 0, 0, 0, SwpNoSize | SwpNoMove | SwpNoActivate);
         }
         finally
         {
@@ -167,7 +167,7 @@ public class DesktopWindow : Window
     }
     public void Resize(double width, double height)
     {
-        double scale = GetDpiForWindow(Handle) / 96d;
+        double scale = NativeWin32.GetDpiForWindow(Handle) / 96d;
         AppWindow.Resize(new SizeInt32((int)Math.Round(width * scale), (int)Math.Round(height * scale)));
     }
     protected virtual void OnClosing(CancelEventArgs args) { }
@@ -178,7 +178,7 @@ public class DesktopWindow : Window
         if (message == WmNcDestroy)
         {
             DetachSubclass(hwnd);
-            return DefSubclassProc(hwnd, message, wParam, lParam);
+            return NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
         }
         // WM_QUERYENDSESSION is accepted by normal window processing. Only the confirmed
         // WM_ENDSESSION starts release, so a cancelled OS logout does not retire the app.
@@ -190,9 +190,9 @@ public class DesktopWindow : Window
         }
         if (message == 0x24)
         {
-            var systemResult = DefSubclassProc(hwnd, message, wParam, lParam);
+            var systemResult = NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
             var limits = Marshal.PtrToStructure<MinMaxInfo>(lParam);
-            double scale = GetDpiForWindow(hwnd) / 96d;
+            double scale = NativeWin32.GetDpiForWindow(hwnd) / 96d;
             if (MinWidth > 0) limits.MinTrack.X = (int)Math.Ceiling(MinWidth * scale);
             if (MinHeight > 0) limits.MinTrack.Y = (int)Math.Ceiling(MinHeight * scale);
             Marshal.StructureToPtr(limits, lParam, false);
@@ -200,7 +200,7 @@ public class DesktopWindow : Window
         }
         if (message == WmWindowPosChanging && keepBackgroundOnShow)
         {
-            var pos = Marshal.PtrToStructure<WindowPos>(lParam);
+            var pos = Marshal.PtrToStructure<NativeWin32.WindowPos>(lParam);
             pos.HwndInsertAfter = HwndBottom;
             pos.Flags = (pos.Flags & ~SwpNoZOrder) | SwpNoActivate;
             Marshal.StructureToPtr(pos, lParam, false);
@@ -212,11 +212,9 @@ public class DesktopWindow : Window
             nint result = handlers[i](hwnd, (int)message, (nint)wParam, lParam, ref handled);
             if (handled) return result;
         }
-        return DefSubclassProc(hwnd, message, wParam, lParam);
+        return NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
     }
-    [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X, Y; }
-    [StructLayout(LayoutKind.Sequential)] private struct MinMaxInfo { public NativePoint Reserved, MaxSize, MaxPosition, MinTrack, MaxTrack; }
-    [StructLayout(LayoutKind.Sequential)] private struct WindowPos { public nint Hwnd, HwndInsertAfter; public int X, Y, Cx, Cy; public uint Flags; }
+    [StructLayout(LayoutKind.Sequential)] private struct MinMaxInfo { public NativeWin32.NativePoint Reserved, MaxSize, MaxPosition, MinTrack, MaxTrack; }
     private const uint WmNcDestroy = 0x0082;
     private const uint WmWindowPosChanging = 0x0046;
     private static readonly nint HwndBottom = (nint)1;
@@ -224,12 +222,6 @@ public class DesktopWindow : Window
     private const uint SwpNoMove = 0x0002;
     private const uint SwpNoZOrder = 0x0004;
     private const uint SwpNoActivate = 0x0010;
-    private delegate nint NativeSubclass(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data);
-    [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowSubclass(nint hwnd, NativeSubclass callback, nuint id, nuint data);
-    [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RemoveWindowSubclass(nint hwnd, NativeSubclass callback, nuint id);
-    [DllImport("comctl32.dll")] private static extern nint DefSubclassProc(nint hwnd, uint message, nuint wParam, nint lParam);
-    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint hwnd);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hwnd, nint hwndInsertAfter, int x, int y, int cx, int cy, uint flags);
 }
 public enum DesktopWindowState { Normal, Minimized, Maximized }
 internal delegate nint DesktopWindowMessageHandler(nint hwnd, int message, nint wParam, nint lParam, ref bool handled);

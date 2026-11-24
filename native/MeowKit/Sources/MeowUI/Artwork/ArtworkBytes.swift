@@ -12,4 +12,5 @@ public protocol ArtworkByteCaching: Sendable {
     var revision: UUID { get }
     func read(_ url: URL) async -> ArtworkBytes?
     func store(_ data: Data, for url: URL, revision: UUID) async -> ArtworkBytes?
+    func remove(_ url: URL, revision: UUID) async
 }

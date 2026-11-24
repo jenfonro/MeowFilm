@@ -19,7 +19,7 @@ const codes = new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIP
   'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED', 'TIMEOUT', 'SCRIPT_CLEANUP', 'SCRIPT_FAILURE',
   'SCRIPT_PROTOCOL_ERROR', 'NETWORK_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'STORAGE_ERROR',
   'CORRUPT_STORAGE', 'ROLLBACK_UNAVAILABLE', 'INVALID_SOURCE_URL', 'SOURCE_DOWNLOAD_FAILED',
-  'SOURCE_REDIRECT', 'MEDIA_UNAVAILABLE', 'INVALID_MEDIA_CANDIDATE', 'EXPIRED_MEDIA_CANDIDATE',
+  'MEDIA_UNAVAILABLE', 'INVALID_MEDIA_CANDIDATE', 'EXPIRED_MEDIA_CANDIDATE',
   'MEDIA_HEADERS_UNSUPPORTED', 'TARGET_CHANGED', 'RECORDING_MISMATCH']);
 // Public catalog identifiers of one well-known recording per platform. A pass
 // means "this sample resolved", never "every song or quality is playable".
@@ -107,7 +107,7 @@ function sourceURL(value) {
     'INVALID_SOURCE_URL');
   let url;
   try { url = new URL(input); } catch { throw new Failure('INVALID_SOURCE_URL'); }
-  requireValue(url.protocol === 'https:' && url.hostname.length > 0 && !url.username && !url.password &&
+  requireValue(['http:', 'https:'].includes(url.protocol) && url.hostname.length > 0 && !url.username && !url.password &&
     !input.includes('#') && /\.js$/i.test(url.pathname), 'INVALID_SOURCE_URL');
   return url.href;
 }
@@ -257,7 +257,7 @@ function lxInfo(musicInfo) {
  */
 export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHost,
   network,
-  download = createSourceDownload({ maxRedirects: 0 }),
+  download = createSourceDownload(),
   clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, debug } = {}) {
   const activeNetwork = network ?? createNodeNetwork({ debug, debugCategory: 'music-playback', debugSub: 'music.script.http' });
   requireValue(typeof dataRoot === 'string' && typeof hostFactory === 'function' &&
@@ -376,8 +376,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     const header = describe(decode(bytes), basename);
     const contentHash = trustedHash ?? digest(bytes), name = `sources/${contentHash}.js`;
     const existing = sourceFiles.read(name);
-    try { if (!existing?.equals(bytes)) sourceFiles.write(name, bytes); }
-    finally { existing?.fill(0); }
+    if (!existing?.equals(bytes)) sourceFiles.write(name, bytes);
     proposals.set(contentHash, (proposals.get(contentHash) ?? 0) + 1);
     return { name: header.name, version: { contentHash, bytes: bytes.length, version: header.version,
       author: header.author, description: header.description, homepage: header.homepage } };
@@ -391,10 +390,8 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   function readSource(version) {
     const bytes = sourceFiles.read(`sources/${version.contentHash}.js`);
     requireValue(bytes, 'CORRUPT_STORAGE');
-    try {
-      requireValue(bytes.length === version.bytes && digest(bytes) === version.contentHash, 'CORRUPT_STORAGE');
-      return decode(bytes);
-    } finally { bytes.fill(0); }
+    requireValue(bytes.length === version.bytes && digest(bytes) === version.contentHash, 'CORRUPT_STORAGE');
+    return decode(bytes);
   }
   async function fetchSource(url, signal, id) {
     const timeout = new AbortController();
@@ -403,24 +400,20 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     let response;
     try {
       response = await track({ installationId: id }, Promise.resolve().then(() => download({
-        url, options: { followRedirect: false },
+        url, options: { followRedirect: true },
         signal: AbortSignal.any([signal, timeout.signal]), validateURL: sourceURL,
       })), 'download');
       guard(signal);
       requireValue(!timeout.signal.aborted, 'TIMEOUT');
     } catch (error) {
-      response?.body?.fill?.(0);
       if (signal.aborted) throw new Failure('CANCELLED');
       if (timeout.signal.aborted) throw new Failure('TIMEOUT');
       if (error instanceof ScriptHostError && error.code === 'RESOURCE_LIMIT') throw new Failure('LIMIT');
       throw new Failure('SOURCE_DOWNLOAD_FAILED');
     } finally { clearTimer(timer); }
-    try {
-      requireValue(!(response?.statusCode >= 300 && response.statusCode < 400), 'SOURCE_REDIRECT');
-      requireValue(response?.statusCode === 200 && Buffer.isBuffer(response.body) && response.body.length > 0,
-        'SOURCE_DOWNLOAD_FAILED');
-      return response.body;
-    } catch (error) { response?.body?.fill?.(0); throw error; }
+    requireValue(response?.statusCode === 200 && Buffer.isBuffer(response.body) && response.body.length > 0,
+      'SOURCE_DOWNLOAD_FAILED');
+    return response.body;
   }
 
   /** Guest KV permission is checked both before enqueueing and before commit. */
@@ -779,7 +772,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
           published = true;
           return result;
         } finally {
-          bytes.fill(0); sources.finish(input, published);
+          sources.finish(input, published);
           if (prepared) releaseSource(prepared.version);
         }
       });
@@ -792,7 +785,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         guard(signal);
         prepared = prepare(bytes, sourceBasename(url));
         return await add(id, prepared, { kind: 'network', url });
-      } finally { bytes.fill(0); if (prepared) releaseSource(prepared.version); }
+      } finally { if (prepared) releaseSource(prepared.version); }
     }),
     'music.script.sources.edit': business(['installationId', 'name', 'url'], ['installationId'], (params, signal) => {
       installation(params.installationId);
@@ -833,7 +826,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
           published = true;
           return result;
         } finally {
-          bytes?.fill(0);
           if (input) sources.finish(input, published);
           if (prepared) releaseSource(prepared.version);
         }

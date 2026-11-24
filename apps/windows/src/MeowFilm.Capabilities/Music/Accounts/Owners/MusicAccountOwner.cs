@@ -379,6 +379,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 await SaveDetailsCacheAsync(op.Platform, new(committed.Generation, committed.Scope!, committed.ValueFingerprint!,
                     observation.Profile.UserId, observation.Profile, observation.ProfileFetchedAt,
                     observation.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl, observation.Entitlements), () => Guard(op)).ConfigureAwait(false);
+            else
+                await DeleteDetailsCacheAsync(op.Platform).ConfigureAwait(false);
             Guard(op);
             Notify(op.Platform);
             return committed;
@@ -389,6 +391,19 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             if (op.Admitted) throw new MusicAccountException("COMMIT_UNKNOWN");
             throw;
         }
+    }
+
+    private async Task DeleteDetailsCacheAsync(string platform)
+    {
+        try
+        {
+            await cacheDatabase.WriteAsync(db =>
+            {
+                AccountDetailsStore.Delete(db, platform);
+                return true;
+            }, CancellationToken.None, 256).ConfigureAwait(false);
+        }
+        catch { }
     }
     private async Task<JsonObject> Validate(string platform, string? supplied, CancellationToken token)
     {

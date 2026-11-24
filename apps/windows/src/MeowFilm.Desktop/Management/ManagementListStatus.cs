@@ -13,7 +13,7 @@ public sealed class ManagementStatus : Button
 
     public ManagementStatus()
     {
-        if (ManagementList.TryFindAppStyle("MeowFilm.ManagementStatus") is { } style) Style = style;
+        if (DesktopVisual.TryAppStyle("MeowFilm.ManagementStatus") is { } style) Style = style;
         IsTabStop = false;
         Loaded += (_, _) => ApplyTone();
         ActualThemeChanged += (_, _) => ApplyTone();

@@ -5,13 +5,12 @@ import Darwin
 
 /// Closed diagnostics: file-provider errors may contain a private path or URL.
 public enum ImportedFileError: Error, Equatable, Sendable, LocalizedError {
-    case invalidFile, unavailable, changed, cancelled
+    case invalidFile, unavailable, cancelled
 
     public var errorDescription: String? {
         switch self {
         case .invalidFile: return "文件无效"
         case .unavailable: return "文件不可读取"
-        case .changed: return "文件已更改，请重新选择"
         case .cancelled: return "已取消"
         }
     }
@@ -85,16 +84,6 @@ public enum ImportedFileReader {
                 return try handle.read(upToCount: count)
             }
             try checkCancellation()
-            #if canImport(Darwin)
-            var after = stat()
-            guard fstat(handle.fileDescriptor, &after) == 0 else { throw ImportedFileError.unavailable }
-            guard before.st_dev == after.st_dev, before.st_ino == after.st_ino,
-                  before.st_size == after.st_size, Int64(bytes.count) == after.st_size,
-                  before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-                  before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec else {
-                throw ImportedFileError.changed
-            }
-            #endif
             return bytes
         } catch let error as ImportedFileError { throw error }
         catch { throw ImportedFileError.unavailable }

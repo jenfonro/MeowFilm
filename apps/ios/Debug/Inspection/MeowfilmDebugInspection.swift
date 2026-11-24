@@ -91,7 +91,7 @@ extension MeowfilmDebugNavigator {
         }
 
         let bounds = window?.bounds ?? .zero
-        let scale = window?.screen.scale ?? UIScreen.main.scale
+        let scale = window?.windowScene?.screen.scale ?? window?.traitCollection.displayScale ?? 3
         let windowJSON: DebugJSONValue = .object([
             "visible": .bool(window != nil && window?.isHidden == false),
             "active": .bool(UIApplication.shared.applicationState == .active),

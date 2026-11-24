@@ -12,7 +12,7 @@ namespace MeowFilm.Capabilities;
 /// <summary>Film card play affordance, in the same composition tree as the artwork.</summary>
 public sealed class FilmPlayMark : Grid
 {
-    [ThreadStatic] private static SolidColorBrush? whiteBrush, activeFillBrush, transparentBrush;
+    [ThreadStatic] private static SolidColorBrush? activeFillBrush;
 
     public FilmPlayMark()
     {
@@ -21,7 +21,7 @@ public sealed class FilmPlayMark : Grid
         VerticalAlignment = VerticalAlignment.Center;
         var scale = new ScaleTransform();
         RenderTransform = scale; RenderTransformOrigin = new Point(.5, .5);
-        var stroke = whiteBrush ??= new SolidColorBrush(Colors.White);
+        var stroke = DesktopVisual.WhiteBrush;
         var ring = new Ellipse { Margin = new Thickness(2), Stroke = stroke, StrokeThickness = .8 };
         var glyph = new Microsoft.UI.Xaml.Shapes.Path
         {
@@ -33,7 +33,7 @@ public sealed class FilmPlayMark : Grid
         {
             ring.Fill = glyph.Fill = active
                 ? activeFillBrush ??= new SolidColorBrush(Color.FromArgb(255, 34, 197, 94))
-                : transparentBrush ??= new SolidColorBrush(Colors.Transparent);
+                : DesktopVisual.TransparentBrush;
             scale.ScaleX = scale.ScaleY = active ? 1.1 : 1;
         }
         PointerEntered += (_, _) => Update(true);

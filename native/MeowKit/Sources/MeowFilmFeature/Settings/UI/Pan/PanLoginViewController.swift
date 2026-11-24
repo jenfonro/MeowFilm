@@ -19,11 +19,16 @@ final class PanLoginViewController: FloatingCardDialogController {
     private let qrImageView = UIImageView()
     private let qrSpinner = UIActivityIndicatorView(style: .medium)
     private let qrProgressLabel = UILabel()
-    private let retryButton = UIButton(type: .system)
+    private lazy var retryButton = AccountCardButton(title: "重试", style: .primary) { [weak self] in
+        self?.model.retry()
+    }
 
     private let manualContainer = UIStackView()
     private var manualFields: [(field: PanCredentialField, section: SettingsInputSection, input: SettingsTextField)] = []
-    private let saveButton = UIButton(type: .system)
+    private lazy var saveButton = AccountCardButton(title: "保存", style: .primary) { [weak self] in
+        self?.view.endEditing(true)
+        self?.model.save()
+    }
 
     init(model: PanLoginModel, themeProvider: any PageThemeProviding, close: @escaping () -> Void) {
         self.model = model
@@ -80,12 +85,12 @@ final class PanLoginViewController: FloatingCardDialogController {
         qrProgressLabel.numberOfLines = 0
         qrProgressLabel.textAlignment = .center
         registerMutedLabel(qrProgressLabel)
-        configurePrimaryButton(retryButton, title: "重试", id: "pan.login.retry") { [weak self] in
-            self?.model.retry()
-        }
+        retryButton.accessibilityIdentifier = "pan.login.retry"
+        registerThemeable(retryButton)
         qrContainer.addArrangedSubview(qrBox)
         qrContainer.addArrangedSubview(qrProgressLabel)
         qrContainer.addArrangedSubview(retryButton)
+        retryButton.widthAnchor.constraint(equalTo: qrContainer.widthAnchor).isActive = true
         addBodyView(qrContainer)
 
         manualContainer.axis = .vertical
@@ -113,10 +118,8 @@ final class PanLoginViewController: FloatingCardDialogController {
             manualFields.append((field, section, input))
             manualContainer.addArrangedSubview(section)
         }
-        configurePrimaryButton(saveButton, title: "保存", id: "pan.login.save") { [weak self] in
-            self?.view.endEditing(true)
-            self?.model.save()
-        }
+        saveButton.accessibilityIdentifier = "pan.login.save"
+        registerThemeable(saveButton)
         manualContainer.addArrangedSubview(saveButton)
         addBodyView(manualContainer)
 
@@ -152,6 +155,7 @@ final class PanLoginViewController: FloatingCardDialogController {
     }
 
     override func dialogWillClose() {
+        super.dialogWillClose()
         observation?.cancel(); observation = nil
         model.close()
         qrImage = nil
@@ -164,33 +168,7 @@ final class PanLoginViewController: FloatingCardDialogController {
     override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded else { return }
-        let settings = theme.settings
-        qrSpinner.color = UIColor(settings.muted)
-        stylePrimaryButton(retryButton)
-        stylePrimaryButton(saveButton)
-    }
-
-    private func configurePrimaryButton(_ button: UIButton, title: String, id: String,
-                                        action: @escaping @MainActor () -> Void) {
-        var config = UIButton.Configuration.filled()
-        config.title = title
-        config.cornerStyle = .capsule
-        config.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 20, bottom: 12, trailing: 20)
-        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-            var out = incoming
-            out.font = .preferredFont(forTextStyle: .body)
-            return out
-        }
-        button.configuration = config
-        button.accessibilityIdentifier = id
-        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-        button.addAction(UIAction { _ in action() }, for: .touchUpInside)
-    }
-
-    private func stylePrimaryButton(_ button: UIButton) {
-        let settings = theme.settings
-        button.configuration?.baseBackgroundColor = UIColor(settings.accent)
-        button.configuration?.baseForegroundColor = UIColor(settings.onAccent)
+        qrSpinner.color = UIColor(theme.settings.muted)
     }
 
     private func render() {
@@ -244,8 +222,6 @@ final class PanLoginViewController: FloatingCardDialogController {
     }
 
     // MARK: - DebugDialogControllable
-
-    override var debugDialogTypeName: String { "PanLoginViewController" }
 
     override func debugDialogActions() -> [DebugDialogActionDescriptor] {
         var items: [DebugDialogActionDescriptor] = [

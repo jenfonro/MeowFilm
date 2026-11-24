@@ -1,10 +1,8 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
-using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 using MeowFilm.Desktop;
 
@@ -300,74 +298,11 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         page.Music.Presentation.Page.ProjectSearchResults(false);
     }
 
-    private static readonly ConditionalWeakTable<Button, TabChrome> TabChromes = new();
-
-    private void Tab_Loaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button button || button.DataContext is not SearchResultTab tab) return;
-        TabChromes.GetValue(button, static b => new TabChrome(b)).Attach(tab);
-    }
-
-    private sealed class TabChrome
-    {
-        private readonly Button button;
-        private SearchResultTab? observed;
-        private long enabledToken;
-        private IDisposable? theme;
-        private bool attached;
-
-        internal TabChrome(Button button)
-        {
-            this.button = button;
-            button.Unloaded += OnUnloaded;
-        }
-
-        internal void Attach(SearchResultTab tab)
-        {
-            if (observed is not null) observed.PropertyChanged -= TabChanged;
-            observed = tab;
-            observed.PropertyChanged += TabChanged;
-            if (!attached)
-            {
-                attached = true;
-                enabledToken = button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => Refresh());
-                theme = DesktopTheme.Observe(button, Refresh);
-            }
-            Refresh();
-        }
-
-        private void OnUnloaded(object sender, RoutedEventArgs args)
-        {
-            if (button.IsLoaded) return;
-            if (observed is not null) observed.PropertyChanged -= TabChanged;
-            observed = null;
-            if (!attached) return;
-            attached = false;
-            button.UnregisterPropertyChangedCallback(IsEnabledProperty, enabledToken);
-            enabledToken = 0;
-            theme?.Dispose();
-            theme = null;
-        }
-
-        private void TabChanged(object? sender, PropertyChangedEventArgs args) => Refresh();
-
-        private void Refresh()
-        {
-            if (observed is not { } tab) return;
-            bool contrast = DesktopTheme.GetIsHighContrast(button);
-            button.Foreground = contrast
-                ? SystemAppearance.GetElementBrush(button.IsEnabled
-                    ? Windows.UI.ViewManagement.UIElementType.WindowText : Windows.UI.ViewManagement.UIElementType.GrayText)
-                : (Brush)DesktopVisual.Resource(button, !button.IsEnabled ? "MeowFilm.Brush.Disabled"
-                    : tab.Selected ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Muted");
-        }
-    }
-
     private sealed record FilmGeometryAnchor(object Source, int Columns, double Row, bool AtEnd);
 
     private async void Tab_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Button { Tag: string tab }) await page.OpenTabAsync(tab);
+        if (sender is Microsoft.UI.Xaml.Controls.Primitives.ButtonBase { Tag: string tab }) await page.OpenTabAsync(tab);
     }
 
     private void RawList_Click(object sender, RoutedEventArgs e) => page.RawListMode = RawListToggle.IsChecked == true;

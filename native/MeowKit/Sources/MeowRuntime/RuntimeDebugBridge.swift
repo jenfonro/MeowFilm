@@ -77,19 +77,14 @@ extension RuntimeHTTPClient {
         module explicitModule: String?,
         operation explicitOperation: String?
     ) throws -> (module: String, operation: String) {
-        let resolved: (module: String, operation: String)
         if let explicitModule, !explicitModule.isEmpty,
            let explicitOperation, !explicitOperation.isEmpty {
-            resolved = (explicitModule, explicitOperation)
-        } else if let method, !method.isEmpty {
-            resolved = try resolveInvokeTarget(method)
-        } else {
-            throw DebugAPIError.invalidArgument("Missing 'method' or ('module' and 'operation')")
+            return (explicitModule, explicitOperation)
         }
-        guard isSafePathSegment(resolved.module), isSafePathSegment(resolved.operation) else {
-            throw DebugAPIError.invalidArgument("Invalid module or operation path segment")
+        if let method, !method.isEmpty {
+            return try resolveInvokeTarget(method)
         }
-        return resolved
+        throw DebugAPIError.invalidArgument("Missing 'method' or ('module' and 'operation')")
     }
 
     public func debugInvoke(
@@ -219,6 +214,9 @@ extension RuntimeHTTPClient {
 
     private static func resolveInvokeTarget(_ method: String) throws -> (module: String, operation: String) {
         let trimmed = method.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "runtime.settings.changed" {
+            return ("settings", "changed")
+        }
         if let slash = trimmed.firstIndex(of: "/") {
             let mod = String(trimmed[..<slash])
             let op = String(trimmed[trimmed.index(after: slash)...])
@@ -227,40 +225,27 @@ extension RuntimeHTTPClient {
             }
             return (mod, op)
         }
-        let knownPrefixes: [(prefix: String, module: String)] = [
-            ("music-platform.", "music-platform"),
+        let contractPrefixes: [(prefix: String, module: String)] = [
             ("music.platform.", "music-platform"),
             ("music.script.", "music"),
             ("cat.script.", "cat"),
             ("source.runtime.", "source"),
             ("tmdb.data.", "tmdb"),
             ("douban.data.", "douban"),
-            ("netease.token.", "netease"),
-            ("netease.", "netease"),
-            ("music.", "music"),
-            ("cat.", "cat"),
-            ("source.", "source"),
-            ("pan.", "pan"),
-            ("tmdb.", "tmdb"),
-            ("douban.", "douban"),
-            ("film.", "film")
+            ("netease.token.", "netease")
         ]
-        for entry in knownPrefixes where trimmed.hasPrefix(entry.prefix) {
+        for entry in contractPrefixes where trimmed.hasPrefix(entry.prefix) {
             let op = String(trimmed.dropFirst(entry.prefix.count))
             guard !op.isEmpty else { throw DebugAPIError.invalidArgument("Empty operation in method: \(method)") }
             return (entry.module, op)
         }
-        throw DebugAPIError.invalidArgument("Cannot map method '\(method)' to a registered runtime module")
-    }
-
-    private static func isSafePathSegment(_ segment: String) -> Bool {
-        guard !segment.isEmpty, segment != ".", segment != "..", !segment.contains("..") else { return false }
-        return segment.unicodeScalars.allSatisfy { scalar in
-            let v = scalar.value
-            return (v >= 0x30 && v <= 0x39) // 0-9
-                || (v >= 0x41 && v <= 0x5A) // A-Z
-                || (v >= 0x61 && v <= 0x7A) // a-z
-                || v == 0x2E || v == 0x2D || v == 0x5F // . - _
+        if let dot = trimmed.firstIndex(of: ".") {
+            let mod = String(trimmed[..<dot])
+            let op = String(trimmed[trimmed.index(after: dot)...])
+            if !mod.isEmpty, !op.isEmpty {
+                return (mod, op)
+            }
         }
+        throw DebugAPIError.invalidArgument("Invalid method format: \(method)")
     }
 }

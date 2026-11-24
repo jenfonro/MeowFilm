@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using System.Diagnostics;
 using System.IO;
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -29,11 +28,6 @@ public sealed class MusicAccountTransferFile : IDisposable
         }
         catch (OperationCanceledException) { throw; }
         catch { throw new MusicAccountException("TRANSFER_FILE"); }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(chunk);
-            CryptographicOperations.ZeroMemory(buffer.GetBuffer().AsSpan(0, (int)buffer.Length));
-        }
     }
     public async Task WriteAsync(Stream destination, CancellationToken token = default)
     {
@@ -88,28 +82,23 @@ public sealed class MusicAccountTransferFile : IDisposable
     internal static MusicAccountTransferFile Encode(IReadOnlyList<TransferEntry> entries)
     {
         using var buffer = new MemoryStream();
-        try
+        using (var writer = new Utf8JsonWriter(buffer))
         {
-            using (var writer = new Utf8JsonWriter(buffer))
+            writer.WriteStartObject(); writer.WriteString("format", "meowfilm.music-accounts"); writer.WriteNumber("version", 1);
+            writer.WriteStartArray("accounts");
+            foreach (var entry in entries)
             {
-                writer.WriteStartObject(); writer.WriteString("format", "meowfilm.music-accounts"); writer.WriteNumber("version", 1);
-                writer.WriteStartArray("accounts");
-                foreach (var entry in entries)
-                {
-                    writer.WriteStartObject(); writer.WriteString("platform", entry.Platform); writer.WriteString("userId", entry.UserId);
-                    writer.WriteStartObject("credentials");
-                    foreach (var part in entry.Fields) writer.WriteString(part.Key, part.Value);
-                    writer.WriteEndObject(); writer.WriteEndObject();
-                }
-                writer.WriteEndArray(); writer.WriteEndObject();
+                writer.WriteStartObject(); writer.WriteString("platform", entry.Platform); writer.WriteString("userId", entry.UserId);
+                writer.WriteStartObject("credentials");
+                foreach (var part in entry.Fields) writer.WriteString(part.Key, part.Value);
+                writer.WriteEndObject(); writer.WriteEndObject();
             }
-            return new(buffer.ToArray());
+            writer.WriteEndArray(); writer.WriteEndObject();
         }
-        finally { CryptographicOperations.ZeroMemory(buffer.GetBuffer().AsSpan(0, (int)buffer.Length)); }
+        return new(buffer.ToArray());
     }
     public void Dispose()
     {
-        if (bytes is { } value) CryptographicOperations.ZeroMemory(value);
         bytes = null;
     }
     public override string ToString() => "MusicAccountTransferFile (redacted)";

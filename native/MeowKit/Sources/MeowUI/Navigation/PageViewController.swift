@@ -526,7 +526,7 @@ open class PageViewController: UIViewController {
         prefersGrabberVisible: Bool = true,
         animated: Bool = true
     ) -> PageNavigationController {
-        let navigation = PageNavigationController(themeProvider: themeProvider)
+        let navigation = PageNavigationController()
         navigation.setViewControllers([root], animated: false)
         navigation.modalPresentationStyle = .pageSheet
         navigation.sheetPresentationController?.detents = detents

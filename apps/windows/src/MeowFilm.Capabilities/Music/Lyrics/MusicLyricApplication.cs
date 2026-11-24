@@ -25,11 +25,21 @@ public sealed class MusicLyricApplication(
     private readonly Dictionary<string, ScriptRead> scriptReads = new(StringComparer.Ordinal);
     private readonly HashSet<Task> operations = [];
     private readonly CancellationTokenSource lifetime = new();
+    private const int MaximumCacheEntries = 100;
+    private const int MaximumCacheBytes = 4 * 1024 * 1024;
     private int cacheBytes;
+    private long cacheClock;
     private long policyEpoch;
     private bool closed;
     private Task? disposal;
-    private sealed record Cached(string Platform, JsonElement Value, int Bytes, DateTimeOffset Until);
+    private sealed class Cached(string platform, JsonElement value, int bytes, DateTimeOffset until, long used)
+    {
+        internal readonly string Platform = platform;
+        internal readonly JsonElement Value = value;
+        internal readonly int Bytes = bytes;
+        internal readonly DateTimeOffset Until = until;
+        internal long Used = used;
+    }
     private sealed class Pending(string key, NativeLyricRequest request, long epoch, CancellationToken lifetime)
     {
         internal string Key = key;
@@ -245,7 +255,11 @@ public sealed class MusicLyricApplication(
             var key = Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { request, epoch })));
             if (cache.TryGetValue(key, out var cached))
             {
-                if (cached.Until > clock.GetUtcNow()) return cached.Value.Clone();
+                if (cached.Until > clock.GetUtcNow())
+                {
+                    cached.Used = ++cacheClock;
+                    return cached.Value.Clone();
+                }
                 cache.Remove(key); cacheBytes -= cached.Bytes;
             }
             if (!pending.TryGetValue(key, out entry!))
@@ -310,12 +324,25 @@ public sealed class MusicLyricApplication(
                     int bytes = Encoding.UTF8.GetByteCount(value.GetRawText());
                     if (bytes <= 1024 * 1024)
                     {
-                        cache[entry.Key] = new(entry.Request.Platform, value, bytes, clock.GetUtcNow().AddMinutes(10));
-                        cacheBytes += bytes;
-                        while (cache.Count > 100 || cacheBytes > 4 * 1024 * 1024)
+                        var now = clock.GetUtcNow();
+                        if (cache.Remove(entry.Key, out var previous))
+                            cacheBytes -= previous.Bytes;
+                        if (cache.Count >= MaximumCacheEntries || cacheBytes + bytes > MaximumCacheBytes)
                         {
-                            var oldest = cache.First(); cache.Remove(oldest.Key); cacheBytes -= oldest.Value.Bytes;
+                            foreach (var expired in cache.Where(pair => pair.Value.Until <= now).ToArray())
+                            {
+                                cache.Remove(expired.Key);
+                                cacheBytes -= expired.Value.Bytes;
+                            }
                         }
+                        while ((cache.Count >= MaximumCacheEntries || cacheBytes + bytes > MaximumCacheBytes) && cache.Count > 0)
+                        {
+                            var oldest = cache.MinBy(pair => pair.Value.Used);
+                            cache.Remove(oldest.Key);
+                            cacheBytes -= oldest.Value.Bytes;
+                        }
+                        cache[entry.Key] = new(entry.Request.Platform, value, bytes, now.AddMinutes(10), ++cacheClock);
+                        cacheBytes += bytes;
                     }
                 }
                 entry.Result.TrySetResult(result);
@@ -334,6 +361,31 @@ public sealed class MusicLyricApplication(
             }
             try { if (cancelled is not null) await cancelled.ConfigureAwait(false); }
             finally { entry.Cancellation.Dispose(); }
+        }
+    }
+
+    internal void ClearMemoryCache()
+    {
+        lock (gate)
+        {
+            cache.Clear();
+            cacheBytes = 0;
+        }
+    }
+
+    internal object GetCacheStats()
+    {
+        lock (gate)
+        {
+            return new
+            {
+                entryCount = cache.Count,
+                bytes = cacheBytes,
+                maximumEntries = MaximumCacheEntries,
+                maximumBytes = MaximumCacheBytes,
+                inFlightCount = pending.Count + scriptReads.Count,
+                closed
+            };
         }
     }
 

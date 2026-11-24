@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-
 namespace MeowFilm.Media;
 
 public enum NativeVideoFormat { Auto, Progressive, Hls, Dash }
@@ -25,37 +23,19 @@ public sealed class NativeClearKeySet : IDisposable
         try { pairs = new byte[checked(keysByKid.Count * 32)]; }
         catch (OverflowException) { throw new PlaybackException(PlaybackError.InvalidRequest); }
         byte[]? fallback = null;
-        try
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        int offset = 0;
+        foreach (var (kid, key) in keysByKid)
         {
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            int offset = 0;
-            foreach (var (kid, key) in keysByKid)
-            {
-                var id = Decode(kid, uuid: true);
-                byte[]? value = null;
-                try
-                {
-                    value = Decode(key, uuid: false);
-                    if (!seen.Add(Convert.ToHexString(id)))
-                        throw new PlaybackException(PlaybackError.InvalidRequest);
-                    id.CopyTo(pairs, offset); value.CopyTo(pairs, offset + 16);
-                    offset += 32;
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(id);
-                    if (value is not null) CryptographicOperations.ZeroMemory(value);
-                }
-            }
-            if (defaultKey is not null) fallback = Decode(defaultKey, uuid: false);
-            return new(pairs, fallback);
+            var id = Decode(kid, uuid: true);
+            var value = Decode(key, uuid: false);
+            if (!seen.Add(Convert.ToHexString(id)))
+                throw new PlaybackException(PlaybackError.InvalidRequest);
+            id.CopyTo(pairs, offset); value.CopyTo(pairs, offset + 16);
+            offset += 32;
         }
-        catch
-        {
-            CryptographicOperations.ZeroMemory(pairs);
-            if (fallback is not null) CryptographicOperations.ZeroMemory(fallback);
-            throw;
-        }
+        if (defaultKey is not null) fallback = Decode(defaultKey, uuid: false);
+        return new(pairs, fallback);
     }
 
     private static byte[] Decode(string text, bool uuid)
@@ -85,8 +65,6 @@ public sealed class NativeClearKeySet : IDisposable
         lock (_gate)
         {
             _consumed = true;
-            if (_pairs is not null) CryptographicOperations.ZeroMemory(_pairs);
-            if (_defaultKey is not null) CryptographicOperations.ZeroMemory(_defaultKey);
             _pairs = null; _defaultKey = null;
         }
     }

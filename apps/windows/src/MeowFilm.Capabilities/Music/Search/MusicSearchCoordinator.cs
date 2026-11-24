@@ -439,10 +439,40 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         var key = new CacheKey(query.Kind, platform, query.Keyword, chunk.Page, chunk.Pages, MusicSearchPaging.For(platform).PageSize);
         EraseLocked(key);
         if (result.Bytes > CacheBudgetBytes / 4) return;
+        var now = clock.GetUtcNow();
+        if (cacheBytes + result.Bytes > CacheBudgetBytes)
+        {
+            foreach (var expired in cache.Where(pair => pair.Value.Expires <= now).Select(pair => pair.Key).ToArray())
+                EraseLocked(expired);
+        }
         while (cacheBytes + result.Bytes > CacheBudgetBytes && cache.Count > 0)
             EraseLocked(cache.MinBy(pair => pair.Value.Used).Key);
-        cache[key] = new(result.Page!, clock.GetUtcNow() + query.Options.CacheTime, result.Bytes, result.CheckedAt, result.Order, result.Generation) { Used = ++cacheUse };
+        cache[key] = new(result.Page!, now + query.Options.CacheTime, result.Bytes, result.CheckedAt, result.Order, result.Generation) { Used = ++cacheUse };
         cacheBytes += result.Bytes;
+    }
+
+    internal void ClearMemoryCache()
+    {
+        lock (gate)
+        {
+            cache.Clear();
+            cacheBytes = 0;
+        }
+    }
+
+    internal object GetCacheStats()
+    {
+        lock (gate)
+        {
+            return new
+            {
+                entryCount = cache.Count,
+                bytes = cacheBytes,
+                maximumBytes = CacheBudgetBytes,
+                activeQueries = queries.Count,
+                closed
+            };
+        }
     }
 
     private void EraseLocked(CacheKey key) { if (cache.Remove(key, out var entry)) cacheBytes -= entry.Bytes; }

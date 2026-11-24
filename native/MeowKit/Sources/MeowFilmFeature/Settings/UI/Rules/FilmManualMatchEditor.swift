@@ -202,17 +202,9 @@ final class FilmManualMatchEditor: SettingsFormViewController {
         do {
             let value = try item()
             let owner = self.owner
-            task = Task { [weak self] in
-                defer { self?.task = nil; self?.update() }
-                do {
-                    try await owner.saveManual(value)
-                    if let self, self.isPageActive, self.navigationController?.topViewController === self {
-                        self.navigationController?.popViewController(animated: true)
-                    }
-                }
-                catch { self?.enqueueError(error.localizedDescription, retry: { [weak self] in self?.save() }) }
+            performMutation(retry: { [weak self] in self?.save() }) {
+                try await owner.saveManual(value)
             }
-            update()
         } catch { enqueueError(error.localizedDescription) }
     }
 
@@ -221,18 +213,26 @@ final class FilmManualMatchEditor: SettingsFormViewController {
         presentPageConfirmation(title: "删除人工匹配", message: original?.name, confirmTitle: "确认", destructive: true) { [weak self] in
             guard let self, task == nil else { return }
             let owner = self.owner, id = self.id
-            task = Task { [weak self] in
-                defer { self?.task = nil; self?.update() }
-                do {
-                    try await owner.removeManual(id: id)
-                    if let self, self.isPageActive, self.navigationController?.topViewController === self {
-                        self.navigationController?.popViewController(animated: true)
-                    }
-                }
-                catch { self?.enqueueError(error.localizedDescription, retry: { [weak self] in self?.remove() }) }
+            self.performMutation(retry: { [weak self] in self?.remove() }) {
+                try await owner.removeManual(id: id)
             }
-            update()
         }
+    }
+
+    private func performMutation(retry: @escaping @MainActor () -> Void,
+                                 operation: @escaping @MainActor () async throws -> Void) {
+        task = Task { [weak self] in
+            defer { self?.task = nil; self?.update() }
+            do {
+                try await operation()
+                if let self, self.isPageActive, self.navigationController?.topViewController === self {
+                    self.navigationController?.popViewController(animated: true)
+                }
+            } catch {
+                self?.enqueueError(error.localizedDescription, retry: retry)
+            }
+        }
+        update()
     }
 }
 #endif

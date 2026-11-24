@@ -137,7 +137,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     /// Adapters with an authoritative stream do not need an extra UI echo.
     /// Other account adapters publish after their actual mutation completes.
     public func accountSessionsChanged(_ platform: MusicAccountPlatform? = nil) {
-        guard !(accounts is any MusicAccountSessionsObserving), isAvailable, !isClosed else { return }
+        guard !(accounts is any MusicAccountSessionsObserving), !isClosed else { return }
         publishAccountSessionChanges(platform.map({ [$0] }) ?? MusicAccountPlatform.allCases)
     }
 
@@ -159,7 +159,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             let changes = await source.accountSessionChanges()
             for await platform in changes {
                 guard let self, !Task.isCancelled, !self.isClosed else { return }
-                if self.isAvailable { self.publishAccountSessionChanges([platform]) }
+                self.publishAccountSessionChanges([platform])
             }
         }
     }
@@ -176,13 +176,13 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         activeNativeAttemptID == nil ? nil : candidate?.isCachedAudio
     }
     func chorus(actualDuration: Double) async throws -> MusicChorusPoint? {
-        guard isAvailable, !isClosed, let candidate, nativeAttempt != nil,
+        guard !isClosed, let candidate, nativeAttempt != nil,
               let provider = service as? any MusicChorusProviding else { return nil }
         let epoch = lifecycle, selection = selectionID
         let point = try await provider.chorus(attemptID: candidate.attemptId, actualDuration: actualDuration)
         try Task.checkCancellation()
         guard lifecycle == epoch, selectionID == selection, self.candidate?.attemptId == candidate.attemptId,
-              isAvailable, !isClosed else { throw MusicServiceError.staleResult }
+              !isClosed else { throw MusicServiceError.staleResult }
         return point
     }
     var metadataOccurrenceID: String? {
@@ -228,7 +228,11 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var collectionCatalogueID = UUID()
     public var accountAccessGeneration: UUID { lifecycle }
     public private(set) var searchAccessGeneration = UUID() {
-        didSet { searchResultsCache = MusicSearchResultsCache.make() }
+        didSet {
+            let previous = searchResultsCache
+            searchResultsCache = MusicSearchResultsCache.make()
+            Task { await previous.invalidate() }
+        }
     }
     var searchResultsCache = MusicSearchResultsCache.make()
     var sourceIntent = MusicSourceIntent.automatic
@@ -384,7 +388,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             artistNames: current.artistNames, sourcePosition: current.sourcePosition)
     }
     public var canNavigate: Bool {
-        isAvailable && !isClosed && !isClosing && service != nil && player != nil && current != nil &&
+        !isClosed && !isClosing && service != nil && player != nil && current != nil &&
         fmSource?.authorization.isActive != false &&
         !isResolving && !isNavigating && !isChangingQueue && !isChangingSimilarMode && !isChangingQueueRecommendations
     }
@@ -409,16 +413,15 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
 
     func enter() throws -> UUID {
         guard !isClosed, !isClosing else { throw MusicServiceError.closed }
-        guard isAvailable else { throw MusicServiceError.accessUnavailable }
         return lifecycle
     }
     func check(_ epoch: UUID) throws {
         try Task.checkCancellation()
-        guard isAvailable, !isClosed, lifecycle == epoch else { throw MusicServiceError.cancelled }
+        guard !isClosed, lifecycle == epoch else { throw MusicServiceError.cancelled }
     }
     func report(_ error: Error, epoch: UUID, operation: String? = nil,
                         kind: MusicRequestTrace.Operation = .playback, trace explicitTrace: MusicRequestTrace? = nil) {
-        guard lifecycle == epoch, !isClosed, isAvailable else { return }
+        guard lifecycle == epoch, !isClosed else { return }
         let failure = MusicServiceError.sanitized(error)
         let trace = explicitTrace ?? MusicRequestTrace.current ?? MusicRequestTrace(kind,
             platform: kind == .playback || kind == .audio
@@ -449,7 +452,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
     func invalidateSelection(stopMedia: Bool, reason: MusicPlaybackFeedbackReport.Reason = .interrupt,
                              preservingQueueIntent intent: MusicQueueAuthorization? = nil) {
-        let retainsPlayback = !stopMedia && isAvailable && !isClosed && nativeAttempt != nil &&
+        let retainsPlayback = !stopMedia && !isClosed && nativeAttempt != nil &&
             candidate?.occurrenceId == current?.id && terminalAttempt == nil
         if remoteQueueIntent !== intent { cancelRemoteQueuePreparation() }
         if recommendationIntent !== intent && recommendationPlaybackIntent !== intent { recommendationPlaybackIntent?.revoke() }
@@ -585,6 +588,25 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         prepareForClose()
         await closingTask?.value
     }
+    public func debugCacheStats() async -> DebugJSONValue {
+        let searchStats = await searchResultsCache.stats()
+        return .object([
+            "lyricMemoryCache": playbackMetadata.debugLyricCacheStats(),
+            "searchResultsCache": .object([
+                "entryCount": .int(searchStats.entryCount),
+                "inFlightCount": .int(searchStats.inFlightCount),
+                "totalCost": .int(searchStats.totalCost),
+                "capacity": searchStats.capacity.map(DebugJSONValue.int) ?? .null,
+                "maximumCost": .int(searchStats.maximumCost)
+            ])
+        ])
+    }
+
+    public func debugClearMemoryCaches() async {
+        playbackMetadata.clearMemoryLyricCache()
+        await searchResultsCache.invalidate()
+    }
+
     private func completeClose(attemptID: String?) async {
         await searchPreferences.close()
         do { try await searchHistory.close() } catch { self.error = "搜索历史关闭失败" }
@@ -604,6 +626,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         metadataPreferencesRefreshRequested = false
         metadataPreferencesRefreshTask?.cancel()
         await playbackMetadata.close()
+        await searchResultsCache.invalidate()
         notifyCollectionPages(.access)
         navigationID = UUID(); playbackState.isNavigating = false; playbackState.isChangingQueue = false
         invalidateSelection(stopMedia: true)

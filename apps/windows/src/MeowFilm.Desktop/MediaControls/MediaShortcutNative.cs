@@ -12,11 +12,10 @@ internal static class MediaShortcutNative
     internal static readonly int RetirementMessage =
         unchecked((int)RegisterWindowMessageW("MeowFilm.Desktop.MediaShortcut.RetireRegistration"));
 
-    internal delegate nint Subclass(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data);
-    internal static bool Attach(nint hwnd, Subclass callback, nuint id) => SetWindowSubclass(hwnd, callback, id, 0);
-    internal static bool Detach(nint hwnd, Subclass callback, nuint id) => RemoveWindowSubclass(hwnd, callback, id);
+    internal static bool Attach(nint hwnd, NativeWin32.SubclassProc callback, nuint id) => NativeWin32.SetWindowSubclass(hwnd, callback, id, 0);
+    internal static bool Detach(nint hwnd, NativeWin32.SubclassProc callback, nuint id) => NativeWin32.RemoveWindowSubclass(hwnd, callback, id);
     internal static nint Continue(nint hwnd, uint message, nuint wParam, nint lParam) =>
-        DefSubclassProc(hwnd, message, wParam, lParam);
+        NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
 
     internal static (int Id, int Error) AllocateId()
     {
@@ -42,7 +41,7 @@ internal static class MediaShortcutNative
     internal static bool PostRetirement(nint hwnd, int id) =>
         RetirementMessage != 0 && PostMessageW(hwnd, RetirementMessage, id, 0);
 
-    internal static nint ForegroundWindow => GetForegroundWindow();
+    internal static nint ForegroundWindow => NativeWin32.GetForegroundWindow();
     internal static bool OwnsWindow(nint window, nint candidate)
     {
         for (nint current = candidate; current != 0; current = GetWindow(current, 4))
@@ -95,18 +94,8 @@ internal static class MediaShortcutNative
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool PostMessageW(nint hwnd, int message, nint wParam, nint lParam);
     [DllImport("user32.dll", ExactSpelling = true)]
-    private static extern nint GetForegroundWindow();
-    [DllImport("user32.dll", ExactSpelling = true)]
     private static extern nint GetWindow(nint hwnd, uint command);
     [DllImport("user32.dll", ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
-    [DllImport("comctl32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetWindowSubclass(nint hwnd, Subclass callback, nuint id, nuint data);
-    [DllImport("comctl32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool RemoveWindowSubclass(nint hwnd, Subclass callback, nuint id);
-    [DllImport("comctl32.dll", ExactSpelling = true)]
-    private static extern nint DefSubclassProc(nint hwnd, uint message, nuint wParam, nint lParam);
 }

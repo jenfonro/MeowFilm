@@ -9,6 +9,7 @@ namespace MeowFilm.Capabilities;
 public partial class MusicSourcesSettingsView : UserControl
 {
     private readonly HashSet<FrameworkElement> compactPlatformLists = [];
+    private IDisposable? visibility;
     private bool compactColumns;
     private bool rowsPending;
     private bool networkShowing, editShowing;
@@ -28,7 +29,6 @@ public partial class MusicSourcesSettingsView : UserControl
     {
         InitializeComponent();
         ModalStash.Children.Clear();
-        _ = DesktopVisual.ObserveVisibility(this, _ => UpdateActivation());
         IsEnabledChanged += (_, _) => UpdateActivation();
         SourceList.SelectionChanged += () => Settings?.SetSelectedSources(SourceList.Selected);
         SetColumns();
@@ -48,10 +48,17 @@ public partial class MusicSourcesSettingsView : UserControl
         UpdateActivation();
     }
 
-    private void View_Loaded(object sender, RoutedEventArgs e) => UpdateActivation();
+    private void View_Loaded(object sender, RoutedEventArgs e)
+    {
+        visibility?.Dispose();
+        visibility = DesktopVisual.ObserveVisibility(this, _ => UpdateActivation());
+        UpdateActivation();
+    }
     private void View_Unloaded(object sender, RoutedEventArgs e)
     {
         if (IsLoaded) return;
+        visibility?.Dispose();
+        visibility = null;
         UnbindRows();
         activeOwner?.RetireSourceManagement();
         activeOwner = null;

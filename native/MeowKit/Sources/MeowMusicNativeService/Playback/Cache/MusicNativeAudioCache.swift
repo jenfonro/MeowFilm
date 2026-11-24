@@ -11,6 +11,7 @@ struct MusicNativeAudioCacheAttempt: Sendable {
     let audio: MusicNativeAudio?
     let playbackAuthorization: MusicQueueAuthorization
     var source: (any MusicAudioFilePlayback)?
+    var readLease: MusicAudioFileReadLease? = nil
     var captureCompleted = false
     var fileVersion: MusicAudioFileCacheVersion?
 }
@@ -19,6 +20,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
     func retireAudioCacheAttempt() {
         if let value = audioCacheAttempt {
             value.source?.retire()
+            value.readLease?.release()
             value.playbackAuthorization.revoke()
             if value.source == nil || value.captureCompleted {
                 value.authorization.revoke()
@@ -45,7 +47,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         try check(own); try scope.authorization.check()
         if let previous = lastAudioCacheScope, previous != scope.scope {
             if audioCacheAttempt?.identity.isOfficial == true { retireAudioCacheAttempt() }
-            await audioFileCache?.clearOfficial()
+            try? await audioFileCache?.clearOfficial()
             try check(own); try await provider.checkNativeCacheScope(scope)
         }
         lastAudioCacheScope = scope.scope
@@ -76,6 +78,8 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         let exclusions = playback.sourceExclusions.filter { $0.songID == songID }
         let quality = selection?.quality ?? requestedQuality ?? playback.qualityRequest ?? "flac"
         guard preparing || selection != nil || !Self.officialQualities([quality], playback).isEmpty else { return nil }
+        var ownedLease: MusicAudioFileReadLease?
+        defer { ownedLease?.release() }
         var found: (MusicAudioFileCacheHit, MusicNativeCacheScope)?
         for official in [false, true] {
             let scope: MusicNativeCacheScope
@@ -102,6 +106,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
                     (selection == nil || selection!.installationId == identity.provider && selection!.siteId == identity.platform &&
                         selection!.sourceKey == identity.sourceKey)
             }
+            if let hit { ownedLease = hit.readLease }
             try check(own)
             if official, let provider = accounts as? any MusicNativeCacheScopeProviding { try await provider.checkNativeCacheScope(scope) }
             try check(own)
@@ -130,10 +135,12 @@ extension NativeMusicService: MusicCachedPlaybackServing {
             if preparing {
                 var cache = MusicNativeAudioCacheAttempt(attemptID: attemptID, identity: hit.identity,
                     authorization: authorization, scopeAuthorization: scope.authorization, accessRegistration: registration,
-                    expectedDuration: hit.duration, audio: nil, playbackAuthorization: MusicQueueAuthorization())
+                    expectedDuration: hit.duration, audio: nil, playbackAuthorization: MusicQueueAuthorization(),
+                    readLease: ownedLease)
                 cache.fileVersion = hit.version
                 preparedCacheSources[attemptID] = .init(playback: .init(candidate: candidate, selection: selected),
                     songID: song.songID, cache: cache, queueRevision: d.queue.revision, settingsRevision: d.playback.revision)
+                ownedLease = nil
                 return .init(candidate: candidate, selection: selected)
             }
             try authorization.perform {
@@ -142,8 +149,10 @@ extension NativeMusicService: MusicCachedPlaybackServing {
                                   selection: selected, ready: true, authorization: authorization)
                 audioCacheAttempt = .init(attemptID: attemptID, identity: hit.identity,
                     authorization: authorization, scopeAuthorization: scope.authorization, accessRegistration: registration,
-                    expectedDuration: hit.duration, audio: nil, playbackAuthorization: MusicQueueAuthorization())
+                    expectedDuration: hit.duration, audio: nil, playbackAuthorization: MusicQueueAuthorization(),
+                    readLease: ownedLease)
                 audioCacheAttempt?.fileVersion = hit.version
+                ownedLease = nil
             }
         } catch { authorization.revoke(); access.remove(registration); throw error }
         return .init(candidate: candidate, selection: selected)

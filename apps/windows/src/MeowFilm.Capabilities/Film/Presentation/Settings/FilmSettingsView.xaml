@@ -66,12 +66,12 @@
   </ResourceDictionary>
  </UserControl.Resources>
  <UserControl.Background><ThemeResource ResourceKey="Film.SettingsGround" /></UserControl.Background>
- <Grid x:Name="ContentFrame" Style="{ThemeResource MeowFilm.SettingsPage}">
+ <Grid x:Name="ContentFrame" Style="{StaticResource MeowFilm.SettingsPage}">
   <Grid.RowDefinitions>
    <RowDefinition Height="Auto" />
    <RowDefinition />
   </Grid.RowDefinitions>
-  <Border BorderThickness="0,0,0,1" BorderBrush="{ThemeResource MeowFilm.Brush.Border}">
+  <Border Style="{StaticResource MeowFilm.SettingsNavigationBar}">
    <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
     <StackPanel x:Name="SettingsNavigation" Orientation="Horizontal" AutomationProperties.Name="影视设置分类">
      <RadioButton Content="魔法匹配" Tag="rules" GroupName="FilmSettingsSection" IsChecked="True" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Section_Checked" AutomationProperties.Name="魔法匹配" KeyDown="Section_KeyDown" />
@@ -303,11 +303,11 @@
     <RowDefinition Height="Auto" />
     <RowDefinition />
    </Grid.RowDefinitions>
-   <StackPanel Style="{ThemeResource MeowFilm.ManagementTitleRow}">
+   <StackPanel Style="{StaticResource MeowFilm.ManagementTitleRow}">
     <TextBlock Text="猫源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" Margin="0,0,12,0" />
     <Button Content="添加本地文件" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{x:Bind CanEditSources, Mode=OneWay}" Click="ImportLocal_Click" AutomationProperties.Name="添加本地文件" />
     <Button Content="添加网络源" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{x:Bind CanEditSources, Mode=OneWay}" Click="ImportNetwork_Click" AutomationProperties.Name="添加网络猫源" />
-    <Button Content="删除所选" Style="{ThemeResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{x:Bind CanDeleteCats, Mode=OneWay}" Click="DeleteSelectedCats_Click" AutomationProperties.Name="删除选中猫源" />
+    <Button Content="删除所选" Style="{StaticResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{x:Bind CanDeleteCats, Mode=OneWay}" Click="DeleteSelectedCats_Click" AutomationProperties.Name="删除选中猫源" />
    </StackPanel>
    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{x:Bind HasSourceWork, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
     <TextBlock Text="{x:Bind SourceWork, Mode=OneWay}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
@@ -324,10 +324,10 @@
     <RowDefinition Height="Auto" />
     <RowDefinition />
    </Grid.RowDefinitions>
-   <StackPanel Style="{ThemeResource MeowFilm.ManagementTitleRow}">
+   <StackPanel Style="{StaticResource MeowFilm.ManagementTitleRow}">
     <TextBlock Text="视频源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" Margin="0,0,12,0" />
     <Button Content="检测所选" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{x:Bind CanDetectVideos, Mode=OneWay}" Click="DetectSelectedVideos_Click" AutomationProperties.Name="检测选中视频源" />
-    <Button Content="删除所选" Style="{ThemeResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{x:Bind CanDeleteVideos, Mode=OneWay}" Click="DeleteSelectedVideos_Click" AutomationProperties.Name="删除选中视频源" />
+    <Button Content="删除所选" Style="{StaticResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{x:Bind CanDeleteVideos, Mode=OneWay}" Click="DeleteSelectedVideos_Click" AutomationProperties.Name="删除选中视频源" />
    </StackPanel>
    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{x:Bind HasSourceWork, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
     <TextBlock Text="{x:Bind SourceWork, Mode=OneWay}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />

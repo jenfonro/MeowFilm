@@ -24,9 +24,15 @@ final class MusicCollectionStatusFooterView: UIView {
         previousButton.accessibilityIdentifier = "music.collection.previous"
         nextButton.accessibilityIdentifier = "music.collection.next"
         for button in [previousButton, nextButton] {
-            button.titleLabel?.font = .systemFont(ofSize: 14)
-            button.layer.cornerRadius = 8
-            button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+            var config = UIButton.Configuration.plain()
+            config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16)
+            config.background.cornerRadius = 8
+            config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+                var out = incoming
+                out.font = .systemFont(ofSize: 14)
+                return out
+            }
+            button.configuration = config
         }
         previousButton.addAction(
             UIAction { [weak self] _ in self?.onPrevious?() },
@@ -51,9 +57,9 @@ final class MusicCollectionStatusFooterView: UIView {
         skeletonVisible = visible
         label.text = text
         label.isHidden = text == nil
-        previousButton.setTitle(previousTitle, for: .normal)
+        previousButton.configuration?.title = previousTitle
         previousButton.isHidden = previousTitle == nil
-        nextButton.setTitle(nextTitle, for: .normal)
+        nextButton.configuration?.title = nextTitle
         nextButton.isHidden = nextTitle == nil
         hasContent = loading || text != nil || previousTitle != nil || nextTitle != nil
         isHidden = !hasContent
@@ -65,8 +71,8 @@ final class MusicCollectionStatusFooterView: UIView {
         skeleton.configure(loading: isLoading, visible: skeletonVisible, theme: theme)
         label.textColor = UIColor(theme.muted)
         for button in [previousButton, nextButton] {
-            button.tintColor = UIColor(theme.ink)
-            button.backgroundColor = UIColor(theme.chip)
+            button.configuration?.baseForegroundColor = UIColor(theme.ink)
+            button.configuration?.background.backgroundColor = UIColor(theme.chip)
         }
     }
 

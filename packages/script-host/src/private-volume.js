@@ -564,7 +564,6 @@ export class PrivateVolume {
       for (const id of [...this.descriptors.keys()]) {
         try { this.closeDescriptor(id, false); } catch (error) { this.failure ??= error; }
       }
-      try { this.source.fill(0); } catch (error) { this.failure ??= error; }
       this.source = Buffer.alloc(0);
       this.onWrite = null;
       this.currentScope = null;

@@ -5,8 +5,6 @@ import { storageError } from '../engine/errors.js';
 export const DATA_APPLICATION_ID = 0x4d464442;
 export const CACHE_APPLICATION_ID = 0x4d464348;
 export const SCHEMA_VERSION = 1;
-export const SCHEMA_TARGETS = Object.freeze(['standalone', 'windows', 'ios']);
-export const DATABASE_ROLES = Object.freeze(['data', 'cache']);
 
 const ROLE_SPEC = Object.freeze({
   data: Object.freeze({
@@ -17,7 +15,6 @@ const ROLE_SPEC = Object.freeze({
     synchronousLevel: 2,
     initializeLock: 'data-initialize.lock',
     maintenanceLock: 'data-maintenance.lock',
-    allowBackup: true,
     urls: Object.freeze({
       standalone: new URL('../../generated/schema-data-standalone.sql', import.meta.url),
       windows: new URL('../../generated/schema-data-windows.sql', import.meta.url),
@@ -32,7 +29,6 @@ const ROLE_SPEC = Object.freeze({
     synchronousLevel: 1,
     initializeLock: 'cache-initialize.lock',
     maintenanceLock: 'cache-maintenance.lock',
-    allowBackup: false,
     urls: Object.freeze({
       standalone: new URL('../../generated/schema-cache-standalone.sql', import.meta.url),
       windows: new URL('../../generated/schema-cache-windows.sql', import.meta.url),
@@ -78,7 +74,6 @@ export function loadSchemaIdentity(target = 'standalone', role = 'data') {
       synchronousLevel: spec.synchronousLevel,
       initializeLock: spec.initializeLock,
       maintenanceLock: spec.maintenanceLock,
-      allowBackup: spec.allowBackup,
     })).catch(error => {
       cache.delete(cacheKey);
       throw error;

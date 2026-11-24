@@ -246,9 +246,8 @@ struct Owner {
         renderer.reset();
         avformat_close_input(&format);
         mfk_io_close_all(&input);
-        if (input.keys) { SecureZeroMemory(input.keys, input.key_count * sizeof(mfk_clear_key)); free(input.keys); }
-        SecureZeroMemory(input.default_key, sizeof(input.default_key));
-        if (input.uri) { SecureZeroMemory(input.uri, strlen(input.uri)); free(input.uri); }
+        free(input.keys);
+        free(input.uri);
     }
 
     void log(int level, const char *component, const char *message) const
@@ -1630,10 +1629,7 @@ int prepare(Owner &owner, double position, void *display_window)
             location ? reinterpret_cast<char *>(location) : owner.input.uri, forced, &options);
     }
     mfk_clear_dictionary(&options);
-    if (location) {
-        SecureZeroMemory(location, strlen(reinterpret_cast<char *>(location)));
-        av_free(location);
-    }
+    av_free(location);
     if (owner.interrupted()) return MFK_CANCELLED;
     if (result < 0) {
         char errbuf[128]{};

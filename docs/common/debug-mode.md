@@ -41,7 +41,7 @@
 规则：
 - 未传 `--debug` 时，其他 `--debug-*` 参数被忽略且不开启任何调试行为。
 - `--data-root <path>` 仅在同时传入 `--debug` 时生效，防止非调试场景被外部参数改写数据根路径。
-- 参数解析失败时（如端口非法）在标准错误输出简明诊断并拒绝启动，不静默回退。
+- 参数解析失败时（如端口非法，或 `--debug-dir` 与 `--data-root` 路径相等／互为父子目录）在标准错误输出简明诊断并拒绝启动，不静默回退。
 
 ### 2.2 端侧参数传入方式
 
@@ -502,20 +502,20 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | 方法与路径 | 说明 |
 | --- | --- |
 | `GET /debug/v1/sessions` | 列出 `<debugRoot>/sessions/` 中所有会话（含当前活跃标识、启动时间、目录大小、日志总行数、错误数与可下载文件相对路径数组 `files`） |
-| `GET /debug/v1/files/<relpath>` | 只读下载当前会话（或 `?sessionId=<id>` 指定历史会话）内的会话文件（如 `session.json`、`logs/*`、`blobs/*`、`dumps/*`、`screenshots/*`）；iOS 真机在线拉取主力入口 |
+| `GET /debug/v1/files/<relpath>` | 只读下载当前会话（或 `?sessionId=<id>` 指定历史会话）内的任意文件；iOS 真机在线拉取主力入口 |
 | `GET /debug/v1/logs/categories` | 返回当前会话（或 `?sessionId=<id>` 指定历史会话）各日志分类文件大小、行数、按级别计数及最新 `seq` |
 | `GET /debug/v1/logs/tail` | 查询参数：`cat`（必填或 `all`）、`limit`（默认 `100`，上限 `2000`）、`sinceSeq`、`level`、`sub`、`event`、`opId`、`traceId`、`q`（子串过滤）、`sessionId`（可选历史会话）；返回 `{ sessionId?, cat, count, events }` |
 | `GET /debug/v1/blobs/<sha256>` | 按 `sha256` 直接返回完整未折叠原文（`text/plain`、`application/json` 或原始二进制）；支持 `?sessionId=<id>` |
 | `POST /debug/v1/runtime/invoke` | `{ "method": "music.platform.home", "input": {}, "timeoutMs"?: 30000 }`（支持标准前缀、短前缀、`module/operation` 或显式 `{ "module", "operation" }`）；直接经当前活跃 Node Runtime 通道调用任意已注册模块方法，返回 `{ module, operation, path, httpStatus, durationMs, response }` 并自动写入 `runtime-bridge` 与对应模块日志 |
-| `POST /debug/v1/storage/query` | `{ "db"?: "data" \| "cache", "sql": "SELECT ...", "params"?: [], "maxRows"?: 200 }`（`db` 默认 `"data"`，`maxRows >= 1`）；**只读查询**（在独立只读连接、`PRAGMA query_only=ON` 与 SQLite 原生 `sqlite3_stmt_readonly` 门禁下执行单条只读语句），统一返回 `{ db, columns, rows: [{ col: val }], rowCount, truncated, durationMs }`（二进制字段统一 raw base64，不加前缀），方便直查双库 SQLite 状态 |
+| `POST /debug/v1/storage/query` | `{ "db"?: "data" \| "cache", "sql": "SELECT ...", "params"?: [], "maxRows"?: 200 }`（`db` 默认 `"data"`，`maxRows` 夹取范围 `1..5000`）；在独立只读连接（`ReadOnly` + `PRAGMA query_only = ON`）上执行只读查询，统一返回 `{ db, columns, rows: [{ col: val }], rowCount, truncated, durationMs }`（二进制字段统一 raw base64，不加前缀），方便直查双库 SQLite 状态 |
 
 ### 6.8 底层内存、堆栈与异常诊断（Diagnostics）
 
 | 方法与路径 | 说明 |
 | --- | --- |
-| `GET /debug/v1/diag/summary` | 聚合原生 + Node 运行时核心指标：<br>• 原生进程：内存（Win `WorkingSetBytes`/`PrivateMemoryBytes`/`ManagedHeapBytes` + GC 代次计数；iOS `physFootprintBytes`/`residentBytes`）、线程数、句柄/FD 数、活跃业务租约计数（AudioKernel / FilmKernel / VideoKernel / AetherKernel / ImageCache / MediaLease / RuntimeSessions）<br>• Node 进程：透传 `GET /v1/debug/diagnostics` 全部数据 |
+| `GET /debug/v1/diag/summary` | 聚合原生 + Node 运行时核心指标：<br>• 原生进程：内存（Win `WorkingSetBytes`/`PrivateMemoryBytes`/`ManagedHeapBytes` + GC 代次计数；iOS `physFootprintBytes`/`residentBytes`）、线程数、句柄/FD 数、活跃业务租约与全量缓存指标（AudioKernel / FilmKernel / VideoKernel / AetherKernel / 图片与特效缓存 / 音乐音频、展示、URL、高潮、匹配发现、调色板、首页快照与内存缓存 / RuntimeSessions）<br>• Node 进程：透传 `GET /v1/debug/diagnostics` 全部数据（含 `film.cache`、`film.data.metadataCache`、`film.media.cachePool` 与 `music-platform` LRU 统计） |
 | `GET /debug/v1/diag/threads` | 抓取当前原生进程全线程堆栈快照（Windows：托管与原生线程堆栈 + 线程池/UI 线程卡顿状态；iOS：Mach 线程列表 + `backtrace_symbols` / 符号地址），并附带 Node 活跃异步请求/Worker 清单 |
-| `POST /debug/v1/diag/gc` | 触发原生 GC（Windows `GC.Collect(full)`；iOS 释放可回收缓存 + 触发 `autoreleasepool`/内存清理）+ Node `POST /v1/debug/gc`，返回前后内存对比 |
+| `POST /debug/v1/diag/gc` | 释放三端可回收内存缓存（Windows 图片内存缓存 + `GC.Collect(full)`；iOS 图片/特效/歌词/搜索内存缓存 + `URLCache` + `autoreleasepool`；Node `film`/`music-platform` 内存缓存 + `globalThis.gc()`），返回清理项与前后内存对比 |
 | `POST /debug/v1/diag/dump` | 生成原生转储落盘至 `dumps/`：<br>• Windows：`{ "mode"?: "mini" \| "heap" }`，通过 `dbghelp.dll` `MiniDumpWriteDump` 生成 `.dmp`<br>• iOS：生成线程堆栈 + Mach VM 内存区域摘要 + 活跃对象/租约诊断报告 `.json` |
 | `POST /debug/v1/diag/node/heapsnapshot` | 调用 Node `POST /v1/debug/heapsnapshot` 生成 `.heapsnapshot`（Chrome DevTools 可直接加载） |
 | `POST /debug/v1/diag/node/cpu-profile` | `{ "durationMs"?: 5000 }`，调用 Node `POST /v1/debug/cpu-profile` 生成 `.cpuprofile` |

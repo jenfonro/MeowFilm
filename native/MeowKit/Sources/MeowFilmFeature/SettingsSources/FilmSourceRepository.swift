@@ -126,7 +126,7 @@ struct FilmSourceRepository: Sendable {
         try Self.validate(value)
         return try await database.transaction { db in
             let current = try db.ownerRevision(Self.ownerKey)
-            guard current == Int64(expected), current < 9_007_199_254_740_991 else {
+            guard current == Int64(expected) else {
                 throw FilmSourceError(code: "STORAGE_CONFLICT")
             }
 

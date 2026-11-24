@@ -17,7 +17,6 @@ typedef struct {
 struct mfk_io {
     const AVClass *options_class;
     char *location;
-    uint32_t location_size;
     mfk_input *owner;
     AVIOContext *context;
     uint64_t handle;
@@ -51,15 +50,6 @@ int mfk_interrupted(void *opaque)
     mfk_input *owner = opaque;
     return InterlockedCompareExchange(&owner->cancelled, 0, 0) ||
            owner->callbacks.interrupted(owner->callbacks.opaque);
-}
-
-static void erase_location(char **location, uint32_t *size)
-{
-    if (*location) {
-        if (size && *size > 0) SecureZeroMemory(*location, *size);
-        av_freep(location);
-    }
-    if (size) *size = 0;
 }
 
 static int host_read(mfk_io *io, uint8_t *buffer, int size)
@@ -110,17 +100,14 @@ static int io_read(void *opaque, uint8_t *buffer, int size)
     mfk_crypto *c = io->crypto;
     if (c->error) return c->error;
     if (c->plain_offset == c->plain_count) {
-        SecureZeroMemory(c->plain, sizeof(c->plain));
         int result = crypto_fill(io);
         if (result < 0) {
             c->error = result;
-            SecureZeroMemory(c->plain, sizeof(c->plain));
             return result;
         }
     }
     int count = size < c->plain_count - c->plain_offset ? size : c->plain_count - c->plain_offset;
     memcpy(buffer, c->plain + c->plain_offset, count);
-    SecureZeroMemory(c->plain + c->plain_offset, count);
     c->plain_offset += count;
     return count;
 }
@@ -194,11 +181,10 @@ int mfk_io_open(AVFormatContext *format, AVIOContext **out, const char *uri,
     }
     if (result < 0) { free(io); return AVERROR(EIO); }
     io->location = location_size ? av_mallocz(location_size) : NULL;
-    io->location_size = io->location ? location_size : 0;
     if (!io->location || owner->callbacks.location(owner->callbacks.opaque, io->handle,
                                                    io->location, location_size) < 0) {
         int error = mfk_interrupted(owner) ? AVERROR_EXIT : (io->location ? AVERROR(EIO) : AVERROR(ENOMEM));
-        erase_location(&io->location, &io->location_size);
+        av_freep(&io->location);
         owner->callbacks.close(owner->callbacks.opaque, io->handle);
         free(io); return error;
     }
@@ -206,7 +192,7 @@ int mfk_io_open(AVFormatContext *format, AVIOContext **out, const char *uri,
     io->context = buffer
         ? avio_alloc_context(buffer, MFK_IO_BUFFER, 0, io, io_read, NULL, io_seek) : NULL;
     if (!io->context) {
-        av_free(buffer); erase_location(&io->location, &io->location_size);
+        av_free(buffer); av_freep(&io->location);
         owner->callbacks.close(owner->callbacks.opaque, io->handle);
         free(io); return AVERROR(ENOMEM);
     }
@@ -225,7 +211,6 @@ int mfk_io_open(AVFormatContext *format, AVIOContext **out, const char *uri,
                     !unhex(key->value, key_bytes) &&
                     !unhex(iv->value, io->crypto->iv) &&
                     av_aes_init(io->crypto->aes, key_bytes, 128, 1) >= 0;
-        SecureZeroMemory(key_bytes, sizeof(key_bytes));
         if (!valid) { mfk_io_close(format, *out); *out = NULL; return AVERROR_INVALIDDATA; }
         io->context->seekable = 0;
     }
@@ -241,13 +226,11 @@ int mfk_io_close(AVFormatContext *format, AVIOContext *context)
     while (*current && *current != io) current = &(*current)->next;
     if (*current) *current = io->next;
     owner->callbacks.close(owner->callbacks.opaque, io->handle);
-    if (io->crypto && context->buffer) SecureZeroMemory(context->buffer, context->buffer_size);
     av_freep(&context->buffer);
     avio_context_free(&context);
-    erase_location(&io->location, &io->location_size);
+    av_free(io->location);
     if (io->crypto) {
-        if (io->crypto->aes) { SecureZeroMemory(io->crypto->aes, av_aes_size); av_free(io->crypto->aes); }
-        SecureZeroMemory(io->crypto, sizeof(*io->crypto));
+        if (io->crypto->aes) av_free(io->crypto->aes);
         free(io->crypto);
     }
     free(io);
@@ -261,9 +244,6 @@ void mfk_io_close_all(mfk_input *owner)
 
 void mfk_clear_dictionary(AVDictionary **dictionary)
 {
-    AVDictionaryEntry *entry = NULL;
-    while ((entry = av_dict_get(*dictionary, "", entry, AV_DICT_IGNORE_SUFFIX)))
-        SecureZeroMemory(entry->value, strlen(entry->value));
     av_dict_free(dictionary);
 }
 
@@ -282,7 +262,6 @@ int mfk_key_options(mfk_input *owner, AVDictionary **options)
         char kid[33], key[33];
         to_hex(owner->keys[i].kid, kid); to_hex(owner->keys[i].key, key);
         result = av_dict_set(&pairs, kid, key, 0);
-        SecureZeroMemory(key, sizeof(key));
         if (result < 0) break;
     }
     char *serialized = NULL;
@@ -291,14 +270,13 @@ int mfk_key_options(mfk_input *owner, AVDictionary **options)
         result = av_dict_set(options, "decryption_keys", serialized, 0);
         if (result >= 0) result = av_dict_set(options, "cenc_decryption_keys", serialized, 0);
     }
-    if (serialized) { SecureZeroMemory(serialized, strlen(serialized)); av_free(serialized); }
+    if (serialized) av_free(serialized);
     mfk_clear_dictionary(&pairs);
     if (result >= 0 && owner->has_default) {
         char key[33];
         to_hex(owner->default_key, key);
         result = av_dict_set(options, "decryption_key", key, 0);
         if (result >= 0) result = av_dict_set(options, "cenc_decryption_key", key, 0);
-        SecureZeroMemory(key, sizeof(key));
     }
     return result;
 }

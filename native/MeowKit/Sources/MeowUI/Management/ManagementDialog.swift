@@ -6,7 +6,6 @@ import MeowDebug
 /// Built directly on `FloatingCardDialogController` with unified `DebugDialogControllable` support.
 @MainActor
 open class ManagementDialog: FloatingCardDialogController {
-    public var body: UIStackView { bodyStack }
     public var submit: (() async throws -> Bool)?
     public var accepted: (() -> Void)?
     public var cancelled: (() -> Void)?
@@ -120,10 +119,6 @@ open class ManagementDialog: FloatingCardDialogController {
         addBodyView(section)
     }
 
-    public func showError(_ message: String) {
-        setErrorMessage(message)
-    }
-
     private func commit() {
         guard !didResolve, !hasActiveDialogTask(key: "submit") else { return }
         view.endEditing(true)
@@ -153,7 +148,7 @@ open class ManagementDialog: FloatingCardDialogController {
             },
             onError: { [weak self] error in
                 guard let self, !self.cancelling else { return }
-                self.showError(error.localizedDescription)
+                self.setErrorMessage(error.localizedDescription)
             }
         ) { [weak self] in
             if try await submit() {
@@ -183,8 +178,6 @@ open class ManagementDialog: FloatingCardDialogController {
     }
 
     // MARK: - DebugDialogControllable
-
-    open override var debugDialogTypeName: String { String(describing: type(of: self)) }
 
     open override func debugDialogActions() -> [DebugDialogActionDescriptor] {
         [

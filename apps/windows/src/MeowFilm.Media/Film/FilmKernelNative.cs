@@ -250,8 +250,6 @@ internal static class FilmKernelNative
         {
             if (pairs.IsAllocated) pairs.Free();
             if (fallback.IsAllocated) fallback.Free();
-            CryptographicOperations.ZeroMemory(keys);
-            if (defaultKey is not null) CryptographicOperations.ZeroMemory(defaultKey);
         }
     }
 

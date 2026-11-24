@@ -634,7 +634,7 @@ export class CatRuntime {
       const state = statSync(spec.localPath);
       requireValue(state.isFile(), 'CORRUPT_STORAGE');
       const bytes = readFileSync(spec.localPath);
-      if (hash(bytes) !== spec.localHash) { bytes.fill(0); throw fault('STORAGE_CONFLICT'); }
+      if (hash(bytes) !== spec.localHash) throw fault('STORAGE_CONFLICT');
       return Promise.resolve(bytes);
     } catch (error) { return Promise.reject(safeError(error, 'CORRUPT_STORAGE')); }
   }
@@ -668,7 +668,6 @@ export class CatRuntime {
         this.settled.add(id);
       }
     } finally {
-      bytes?.fill(0);
       this.managementTasks.delete(task);
       scope.close();
     }
@@ -935,10 +934,8 @@ export class CatRuntime {
         task, { bytes: prepared.value.bytes });
     }, 'STALE_SESSION', async task => {
       const bytes = await this.downloadSource(proposal.sourceUrl, task.scope.signal);
-      try {
-        const source = decodeSource(bytes);
-        return { source, bytes: this.validateSource(source) };
-      } finally { bytes.fill(0); }
+      const source = decodeSource(bytes);
+      return { source, bytes: this.validateSource(source) };
     });
   }
   downloadSource(sourceUrl, signal) {
@@ -969,37 +966,33 @@ export class CatRuntime {
     const accepted = this.installedSpec(installationId);
     requireValue(accepted.sourceType === 'local'
       ? typeof source === 'string' || bytes : source === undefined && contentHash === undefined);
-    try {
-      return await this.manage(installationId, signal, async (task, prepared) => {
-        const previous = this.installedSpec(installationId);
-        try {
-          task.scope.assertOpen();
-          if (prepared.error) throw prepared.error;
-          requireValue(previous.sourceType === 'local'
-            ? typeof source === 'string' || bytes : source === undefined);
-          return await this.replaceSource({ installationId, source: prepared.value.source, contentHash }, task,
-            { update: true, bytes: prepared.value.bytes });
-        } catch (error) {
-          // A post-rename failure may already have committed the candidate.
-          // Never turn that accepted version into a failed/rolled-back update.
-          const current = this.installedSpec(installationId);
-          if (same(current, previous)) await this.saveSpec(current, { ...current,
-            updateState: 'failed', updateError: task.scope.signal.aborted
-              ? task.scope.reason.code : safeError(error, 'STORAGE_ERROR').code });
-          throw task.scope.signal.aborted ? task.scope.reason : error;
-        }
-      }, 'STALE_SESSION', async task => {
-        const current = this.installedSpec(installationId);
-        requireValue(current.sourceType === 'local'
+    return await this.manage(installationId, signal, async (task, prepared) => {
+      const previous = this.installedSpec(installationId);
+      try {
+        task.scope.assertOpen();
+        if (prepared.error) throw prepared.error;
+        requireValue(previous.sourceType === 'local'
           ? typeof source === 'string' || bytes : source === undefined);
-        const downloaded = current.sourceType === 'network'
-          ? await this.downloadSource(current.sourceUrl, task.scope.signal) : null;
-        try {
-          const text = downloaded ? decodeSource(downloaded) : bytes ? decodeSource(bytes) : source;
-          return { source: text, bytes: this.validateSource(text, contentHash) };
-        } finally { downloaded?.fill(0); }
-      });
-    } finally { bytes?.fill(0); }
+        return await this.replaceSource({ installationId, source: prepared.value.source, contentHash }, task,
+          { update: true, bytes: prepared.value.bytes });
+      } catch (error) {
+        // A post-rename failure may already have committed the candidate.
+        // Never turn that accepted version into a failed/rolled-back update.
+        const current = this.installedSpec(installationId);
+        if (same(current, previous)) await this.saveSpec(current, { ...current,
+          updateState: 'failed', updateError: task.scope.signal.aborted
+            ? task.scope.reason.code : safeError(error, 'STORAGE_ERROR').code });
+        throw task.scope.signal.aborted ? task.scope.reason : error;
+      }
+    }, 'STALE_SESSION', async task => {
+      const current = this.installedSpec(installationId);
+      requireValue(current.sourceType === 'local'
+        ? typeof source === 'string' || bytes : source === undefined);
+      const downloaded = current.sourceType === 'network'
+        ? await this.downloadSource(current.sourceUrl, task.scope.signal) : null;
+      const text = downloaded ? decodeSource(downloaded) : bytes ? decodeSource(bytes) : source;
+      return { source: text, bytes: this.validateSource(text, contentHash) };
+    });
   }
   async replaceSource(proposal, task, { update = false, bytes } = {}) {
     const { installationId, source } = proposal;
@@ -1152,15 +1145,13 @@ export class CatRuntime {
         if (latest?.inputIdentity === identity)
           await this.saveSpec(latest, { ...latest, updateState: 'failed', updateError: safeError(error).code });
         throw error;
-      } finally { prepared.value?.bytes.fill(0); }
+      }
     }, 'STALE_SESSION', async task => {
       const current = this.installedSpec(installationId);
       requireValue(current.inputIdentity === identity, 'STALE_SESSION');
       const bytes = await this.configuredSource(current, task.scope.signal);
-      try {
-        const source = decodeSource(bytes);
-        return { identity: current.inputIdentity, source, bytes: this.validateSource(source) };
-      } finally { bytes.fill(0); }
+      const source = decodeSource(bytes);
+      return { identity: current.inputIdentity, source, bytes: this.validateSource(source) };
     });
   }
   async setEnabled(installationId, enabled, { signal } = {}) {
@@ -1392,18 +1383,6 @@ export class CatRuntime {
     }
   }
   async handle(request, response) {
-    response.setHeader('Access-Control-Allow-Origin', request.headers.origin ?? '*');
-    response.setHeader('Access-Control-Allow-Credentials', 'true');
-    response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
-    response.setHeader('Access-Control-Allow-Headers', request.headers['access-control-request-headers'] ?? '*');
-    response.setHeader('Access-Control-Expose-Headers', '*');
-    response.setHeader('Vary', 'Origin');
-    if (request.headers['access-control-request-private-network'] === 'true') {
-      response.setHeader('Access-Control-Allow-Private-Network', 'true');
-    }
-    if (request.method === 'OPTIONS' && request.headers['access-control-request-method']) {
-      response.writeHead(204); response.end(); return;
-    }
     const origin = `http://127.0.0.1:${this.server.address().port}`;
     const url = new URL(request.url, origin), parts = url.pathname.split('/').filter(Boolean);
     if (parts[0] === 'proxy') return this.forwardProxy(request, response, url, parts);
@@ -1430,25 +1409,14 @@ export class CatRuntime {
         for await (const chunk of request) chunks.push(chunk);
       })());
       let payload;
-      let combined;
       try {
-        if (chunks.length) {
-          combined = Buffer.concat(chunks);
-          payload = decodeJSONValue(combined);
-        } else payload = Object.fromEntries(url.searchParams);
+        payload = chunks.length ? decodeJSONValue(Buffer.concat(chunks)) : Object.fromEntries(url.searchParams);
       }
       catch { throw fault('INVALID_JSON'); }
-      finally {
-        combined?.fill(0);
-        for (const chunk of chunks) chunk.fill(0);
-      }
       const result = await this.invoke({ installationId, siteId, operation, payload }, { signal: scope.signal });
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
       response.end(typeof result === 'string' ? result : stringifyJSONValue(result));
     } catch (error) { failure = error; }
-    for (const chunk of chunks) {
-      try { chunk.fill(0); } catch (error) { failure ??= error; }
-    }
     chunks.length = 0;
     try { if (requestListening) request.off('aborted', abort); } catch (error) { failure ??= error; }
     try { if (responseListening) response.off('close', responseClosed); } catch (error) { failure ??= error; }
@@ -1460,7 +1428,7 @@ export class CatRuntime {
     let target = this.proxyTarget(url, parts);
     requireValue(target, 'STALE_SESSION');
     if (!['GET', 'HEAD'].includes(request.method)) {
-      response.writeHead(405, { allow: 'GET, HEAD, OPTIONS', 'content-length': 0 });
+      response.writeHead(405, { allow: 'GET, HEAD', 'content-length': 0 });
       response.end();
       return;
     }

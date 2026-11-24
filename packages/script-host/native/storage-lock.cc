@@ -64,23 +64,22 @@ napi_value Acquire(napi_env env, napi_callback_info info) {
 #ifdef _WIN32
     lock->handle = CreateFileW(reinterpret_cast<const wchar_t*>(path.c_str()),
       exclusive ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ, exclusive ? 0 : FILE_SHARE_READ,
-      nullptr, OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+      nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (lock->handle != INVALID_HANDLE_VALUE) {
       BY_HANDLE_FILE_INFORMATION information{};
       if (!GetFileInformationByHandle(lock->handle, &information) ||
-          information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) ||
-          information.nNumberOfLinks != 1 || GetFileType(lock->handle) != FILE_TYPE_DISK)
+          (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
         failure = "UNSAFE_PATH";
       else break;
       lock->Close();
     } else if (GetLastError() != ERROR_SHARING_VIOLATION && GetLastError() != ERROR_LOCK_VIOLATION)
       failure = "STORAGE_IO";
 #else
-    lock->handle = open(path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (lock->handle < 0) failure = "UNSAFE_PATH";
+    lock->handle = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (lock->handle < 0) failure = "STORAGE_IO";
     else {
       struct stat information{};
-      if (fstat(lock->handle, &information) != 0 || !S_ISREG(information.st_mode) || information.st_nlink != 1)
+      if (fstat(lock->handle, &information) != 0 || !S_ISREG(information.st_mode))
         failure = "UNSAFE_PATH";
       else if (flock(lock->handle, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) == 0) break;
       else if (errno != EWOULDBLOCK && errno != EAGAIN) failure = "STORAGE_IO";

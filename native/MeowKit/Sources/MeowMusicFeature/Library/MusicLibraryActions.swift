@@ -17,7 +17,6 @@ final class MusicLibraryActions {
 
     private func begin() throws -> (any MusicServing, UUID) {
         guard !access.isClosed else { throw MusicServiceError.closed }
-        guard access.isAvailable else { throw MusicServiceError.accessUnavailable }
         guard let service else { throw MusicServiceError.unavailable }
         try Task.checkCancellation()
         return (service, access.generation)
@@ -25,7 +24,7 @@ final class MusicLibraryActions {
 
     private func check(_ generation: UUID) throws {
         try Task.checkCancellation()
-        guard !access.isClosed, access.isAvailable, access.generation == generation else {
+        guard !access.isClosed, access.generation == generation else {
             throw MusicServiceError.cancelled
         }
     }

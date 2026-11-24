@@ -9,13 +9,10 @@ public protocol NativeMusicAudioCacheTransport: Sendable {
 
 public struct NativeMusicAudioCacheHTTPRequest: Sendable {
     public let url: URL
-    public let platform: String
-    public let scriptMedia: Bool
     public let headers: [String: String]
     let streaming: Bool
-    public init(url: URL, platform: String, scriptMedia: Bool = false, headers: [String: String] = [:], streaming: Bool = false) {
-        self.url = url; self.platform = platform; self.scriptMedia = scriptMedia; self.headers = headers
-        self.streaming = streaming
+    public init(url: URL, headers: [String: String] = [:], streaming: Bool = false) {
+        self.url = url; self.headers = headers; self.streaming = streaming
     }
 }
 
@@ -37,7 +34,7 @@ enum NativeMusicAudioCacheHTTPPolicy {
     static let inspectionMaximum: TimeInterval = 120
     static let maxRedirects = 10
 
-    static func permits(_ url: URL, platform: String = "", scriptMedia: Bool = false, streaming: Bool = false) -> Bool {
+    static func permits(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = url.host, !host.isEmpty else { return false }
         return true
@@ -50,9 +47,7 @@ enum NativeMusicAudioCacheHTTPPolicy {
     ]
 
     static func request(_ value: NativeMusicAudioCacheHTTPRequest) throws -> URLRequest {
-        guard permits(value.url, platform: value.platform, scriptMedia: value.scriptMedia, streaming: value.streaming) else {
-            throw NativeMusicAudioCacheFailure.miss
-        }
+        guard permits(value.url) else { throw NativeMusicAudioCacheFailure.miss }
         var parts = URLComponents(url: value.url, resolvingAgainstBaseURL: false)!
         parts.fragment = nil
         var request = URLRequest(url: parts.url!, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
@@ -73,13 +68,12 @@ enum NativeMusicAudioCacheHTTPPolicy {
     }
 
     static func redirect(_ response: HTTPURLResponse, proposed: URLRequest,
-                         platform: String, count: Int, scriptMedia: Bool = false, headers: [String: String] = [:], streaming: Bool = false) throws -> URLRequest {
+                         count: Int, headers: [String: String] = [:], streaming: Bool = false) throws -> URLRequest {
         guard (1...maxRedirects).contains(count), [301, 302, 303, 307, 308].contains(response.statusCode),
               let destination = proposed.url, permits(destination) else {
             throw NativeMusicAudioCacheFailure.miss
         }
-        return try request(.init(url: destination, platform: platform, scriptMedia: scriptMedia,
-                                 headers: headers, streaming: streaming))
+        return try request(.init(url: destination, headers: headers, streaming: streaming))
     }
 
     static func configuration() -> URLSessionConfiguration {
@@ -92,20 +86,16 @@ enum NativeMusicAudioCacheHTTPPolicy {
         return value
     }
 
-    static func length(_ response: NativeMusicAudioCacheHTTPResponse, platform: String, scriptMedia: Bool = false) throws -> Int64 {
-        guard let value = try length(response, platform: platform, scriptMedia: scriptMedia, streaming: false) else {
-            throw NativeMusicAudioCacheFailure.miss
-        }
-        return value
-    }
-
-    static func length(_ response: NativeMusicAudioCacheHTTPResponse, platform: String, scriptMedia: Bool, streaming: Bool) throws -> Int64? {
+    static func length(_ response: NativeMusicAudioCacheHTTPResponse, streaming: Bool) throws -> Int64? {
         guard [200, 206].contains(response.status), permits(response.url) else {
             throw NativeMusicAudioCacheFailure.miss
         }
         var headers: [String: String] = [:]
         for (key, value) in response.headers {
             headers[key.lowercased()] = value
+        }
+        guard headers["content-encoding"] == nil || headers["content-encoding"]?.lowercased() == "identity" else {
+            throw NativeMusicAudioCacheFailure.miss
         }
         let rawType = headers["content-type"] ?? ""
         let type = rawType.split(separator: ";", maxSplits: 1).first.map {
@@ -248,8 +238,7 @@ private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataD
         let allowed = !finished && !receivedResponse && count <= NativeMusicAudioCacheHTTPPolicy.maxRedirects
         lock.unlock()
         guard allowed, let redirected = try? NativeMusicAudioCacheHTTPPolicy.redirect(
-            response, proposed: request, platform: self.request.platform, count: count,
-            scriptMedia: self.request.scriptMedia, headers: self.request.headers,
+            response, proposed: request, count: count, headers: self.request.headers,
             streaming: self.request.streaming)
         else { completionHandler(nil); cancel(); return }
         completionHandler(redirected)

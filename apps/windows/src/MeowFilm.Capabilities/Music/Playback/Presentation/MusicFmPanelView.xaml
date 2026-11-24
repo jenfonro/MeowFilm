@@ -4,43 +4,120 @@
  xmlns:local="using:MeowFilm.Capabilities"
  xmlns:desktop="using:MeowFilm.Desktop">
  <UserControl.Resources>
-  <ControlTemplate x:Key="Player.FmButtonTemplate" TargetType="Button">
-   <Grid>
-    <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates"><VisualState x:Name="Normal"/><VisualState x:Name="PointerOver"/><VisualState x:Name="Pressed"/><VisualState x:Name="Disabled"/></VisualStateGroup></VisualStateManager.VisualStateGroups>
-    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
-     <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
-    </Border>
-   </Grid>
-  </ControlTemplate>
+  <ResourceDictionary>
+   <ResourceDictionary.ThemeDictionaries>
+    <ResourceDictionary x:Key="Default">
+     <SolidColorBrush x:Key="Fm.Brush.FgNormal" Color="#EBEAED"/>
+     <SolidColorBrush x:Key="Fm.Brush.FgMuted" Color="#C5C3C8"/>
+     <SolidColorBrush x:Key="Fm.Brush.ModeBg" Color="#12FFFFFF"/>
+     <SolidColorBrush x:Key="Fm.Brush.SceneBg" Color="#0CFFFFFF"/>
+     <SolidColorBrush x:Key="Fm.Brush.SelectedBg" Color="#32FFFFFF"/>
+     <SolidColorBrush x:Key="Fm.Brush.PointerBg" Color="#40FFFFFF"/>
+     <SolidColorBrush x:Key="Fm.Brush.PressedBg" Color="#55FFFFFF"/>
+     <SolidColorBrush x:Key="Fm.Brush.BorderDefault" Color="#24FFFFFF"/>
+     <SolidColorBrush x:Key="Fm.Brush.BorderSelected" Color="#C0FFFFFF"/>
+     <SolidColorBrush x:Key="Fm.Brush.PanelBorder" Color="#60FFFFFF"/>
+     <SolidColorBrush x:Key="Fm.Brush.SceneSurface" Color="#12FFFFFF"/>
+    </ResourceDictionary>
+    <ResourceDictionary x:Key="HighContrast">
+     <SolidColorBrush x:Key="Fm.Brush.FgNormal" Color="{ThemeResource SystemColorWindowTextColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.FgMuted" Color="{ThemeResource SystemColorWindowTextColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.ModeBg" Color="{ThemeResource SystemColorWindowColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.SceneBg" Color="{ThemeResource SystemColorWindowColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.SelectedBg" Color="{ThemeResource SystemColorHighlightColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.PointerBg" Color="{ThemeResource SystemColorHighlightColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.PressedBg" Color="{ThemeResource SystemColorHighlightColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.BorderDefault" Color="{ThemeResource SystemColorWindowTextColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.BorderSelected" Color="{ThemeResource SystemColorHighlightColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.PanelBorder" Color="{ThemeResource SystemColorWindowTextColor}"/>
+     <SolidColorBrush x:Key="Fm.Brush.SceneSurface" Color="{ThemeResource SystemColorWindowColor}"/>
+    </ResourceDictionary>
+   </ResourceDictionary.ThemeDictionaries>
+   <Style x:Key="Player.FmCloseButton" TargetType="Button">
+    <Setter Property="Width" Value="28"/><Setter Property="Height" Value="28"/>
+    <Setter Property="MinWidth" Value="28"/><Setter Property="MinHeight" Value="28"/>
+    <Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0"/>
+    <Setter Property="BorderThickness" Value="0"/><Setter Property="CornerRadius" Value="6"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Foreground" Value="{ThemeResource Fm.Brush.FgNormal}"/>
+    <Setter Property="FontFamily" Value="Segoe Fluent Icons"/>
+    <Setter Property="UseSystemFocusVisuals" Value="True"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+     <Grid>
+      <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates">
+       <VisualState x:Name="Normal"/>
+       <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource Fm.Brush.PointerBg}"/></VisualState.Setters></VisualState>
+       <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource Fm.Brush.PressedBg}"/></VisualState.Setters></VisualState>
+       <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
+      </VisualStateGroup></VisualStateManager.VisualStateGroups>
+      <Border x:Name="Surface" Background="{TemplateBinding Background}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
+       <ContentPresenter x:Name="Content" Content="{TemplateBinding Content}" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+      </Border>
+     </Grid>
+    </ControlTemplate></Setter.Value></Setter>
+   </Style>
+   <Style x:Key="Player.FmChoiceBase" TargetType="ToggleButton">
+    <Setter Property="HorizontalAlignment" Value="Stretch"/>
+    <Setter Property="HorizontalContentAlignment" Value="Center"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="CornerRadius" Value="9"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="BorderBrush" Value="{ThemeResource Fm.Brush.BorderDefault}"/>
+    <Setter Property="Foreground" Value="{ThemeResource Fm.Brush.FgNormal}"/>
+    <Setter Property="Background" Value="{ThemeResource Fm.Brush.ModeBg}"/>
+    <Setter Property="FontWeight" Value="Normal"/>
+    <Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+    <Setter Property="UseSystemFocusVisuals" Value="True"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
+     <Grid>
+      <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates">
+       <VisualState x:Name="Normal"/>
+       <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource Fm.Brush.PointerBg}"/></VisualState.Setters></VisualState>
+       <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource Fm.Brush.PressedBg}"/></VisualState.Setters></VisualState>
+       <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
+       <VisualState x:Name="Checked"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource Fm.Brush.SelectedBg}"/><Setter Target="Surface.BorderBrush" Value="{ThemeResource Fm.Brush.BorderSelected}"/><Setter Target="Content.Foreground" Value="{ThemeResource Fm.Brush.FgNormal}"/></VisualState.Setters></VisualState>
+       <VisualState x:Name="CheckedPointerOver"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource Fm.Brush.PointerBg}"/><Setter Target="Surface.BorderBrush" Value="{ThemeResource Fm.Brush.BorderSelected}"/><Setter Target="Content.Foreground" Value="{ThemeResource Fm.Brush.FgNormal}"/></VisualState.Setters></VisualState>
+       <VisualState x:Name="CheckedPressed"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource Fm.Brush.PressedBg}"/><Setter Target="Surface.BorderBrush" Value="{ThemeResource Fm.Brush.BorderSelected}"/><Setter Target="Content.Foreground" Value="{ThemeResource Fm.Brush.FgNormal}"/></VisualState.Setters></VisualState>
+       <VisualState x:Name="CheckedDisabled"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource Fm.Brush.SelectedBg}"/><Setter Target="Surface.BorderBrush" Value="{ThemeResource Fm.Brush.BorderSelected}"/><Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
+      </VisualStateGroup></VisualStateManager.VisualStateGroups>
+      <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
+       <ContentPresenter x:Name="Content" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+      </Border>
+     </Grid>
+    </ControlTemplate></Setter.Value></Setter>
+   </Style>
+   <Style x:Key="Player.FmSceneChoice" TargetType="ToggleButton" BasedOn="{StaticResource Player.FmChoiceBase}">
+    <Setter Property="Background" Value="{ThemeResource Fm.Brush.SceneBg}"/>
+    <Setter Property="Foreground" Value="{ThemeResource Fm.Brush.FgMuted}"/>
+   </Style>
+  </ResourceDictionary>
  </UserControl.Resources>
- <Border x:Name="PanelBorder" Width="368" Padding="14" CornerRadius="14" BorderThickness="1" BorderBrush="#60FFFFFF" RequestedTheme="Dark" TabFocusNavigation="Cycle">
+ <Border x:Name="PanelBorder" Width="368" Padding="14" CornerRadius="14" BorderThickness="1" BorderBrush="{ThemeResource Fm.Brush.PanelBorder}" RequestedTheme="Dark" TabFocusNavigation="Cycle">
   <Grid>
    <Grid.RowDefinitions>
     <RowDefinition Height="Auto"/>
     <RowDefinition Height="*"/>
    </Grid.RowDefinitions>
    <Grid Margin="0,0,0,12">
-    <TextBlock x:Name="FmTitle" Text="{x:Bind Queue.PlaybackFmTitle, Mode=OneWay}" FontSize="14" Foreground="#C5C3C8" VerticalAlignment="Center" TextAlignment="Center"/>
-    <Button x:Name="CloseFmButton" Template="{StaticResource Player.FmButtonTemplate}" Width="28" Height="28" MinWidth="28" MinHeight="28" Padding="0" Margin="0" BorderThickness="0" BorderBrush="Transparent" Background="Transparent" Foreground="#EBEAED" HorizontalAlignment="Right" Content="&#xE711;" FontFamily="Segoe Fluent Icons" Click="CloseFm_Click" AutomationProperties.Name="关闭频道选择"/>
+    <TextBlock x:Name="FmTitle" Text="{x:Bind Queue.PlaybackFmTitle, Mode=OneWay}" FontSize="14" Foreground="{ThemeResource Fm.Brush.FgMuted}" VerticalAlignment="Center" TextAlignment="Center"/>
+    <Button x:Name="CloseFmButton" Style="{StaticResource Player.FmCloseButton}" HorizontalAlignment="Right" Content="&#xE711;" Click="CloseFm_Click" AutomationProperties.Name="关闭频道选择"/>
    </Grid>
    <ScrollViewer x:Name="FmScroll" Grid.Row="1" Style="{StaticResource MeowFilm.OverlayScrollViewer}" MaxHeight="520">
     <StackPanel>
      <ItemsControl x:Name="FmModeChoices" ItemsSource="{x:Bind ModeChoices}">
       <ItemsControl.ItemTemplate>
        <DataTemplate x:DataType="local:MusicFmChoiceItem">
-        <Button Tag="{x:Bind}" Template="{StaticResource Player.FmButtonTemplate}"
-         MinHeight="64" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
-         Margin="0,0,0,10" CornerRadius="9" BorderThickness="1" Padding="12"
-         FontSize="16" UseSystemFocusVisuals="True"
+        <ToggleButton Tag="{x:Bind}" IsChecked="{x:Bind IsSelected}" Style="{StaticResource Player.FmChoiceBase}"
+         MinHeight="64" Margin="0,0,0,10" Padding="12" FontSize="16"
          AutomationProperties.Name="{x:Bind Name}" AutomationProperties.ItemStatus="{x:Bind ItemStatus}"
-         Loaded="ChoiceButton_Loaded" Click="Choice_Click">
-         <TextBlock Text="{x:Bind Name}" FontSize="16" TextAlignment="Center" TextWrapping="Wrap"/>
-        </Button>
+         Click="Choice_Click">
+         <TextBlock Text="{x:Bind Name}" FontSize="16" Foreground="{ThemeResource Fm.Brush.FgNormal}" TextAlignment="Center" TextWrapping="Wrap"/>
+        </ToggleButton>
        </DataTemplate>
       </ItemsControl.ItemTemplate>
      </ItemsControl>
-     <TextBlock x:Name="FmSceneCaption" Text="场景模式" FontSize="13" Foreground="#C5C3C8" Margin="0,12,0,12"/>
-     <Border x:Name="FmSceneSurface" CornerRadius="12" Padding="6" Background="#12FFFFFF">
+     <TextBlock x:Name="FmSceneCaption" Text="场景模式" FontSize="13" Foreground="{ThemeResource Fm.Brush.FgMuted}" Margin="0,12,0,12"/>
+     <Border x:Name="FmSceneSurface" CornerRadius="12" Padding="6" Background="{ThemeResource Fm.Brush.SceneSurface}">
       <ItemsControl x:Name="FmSceneChoices" ItemsSource="{x:Bind SceneChoices}">
        <ItemsControl.ItemsPanel>
         <ItemsPanelTemplate>
@@ -49,17 +126,15 @@
        </ItemsControl.ItemsPanel>
        <ItemsControl.ItemTemplate>
         <DataTemplate x:DataType="local:MusicFmChoiceItem">
-         <Button Tag="{x:Bind}" Template="{StaticResource Player.FmButtonTemplate}"
-          MinHeight="84" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
-          Margin="2" CornerRadius="9" BorderThickness="1" Padding="2,10,2,10"
-          FontSize="12" UseSystemFocusVisuals="True"
+         <ToggleButton Tag="{x:Bind}" IsChecked="{x:Bind IsSelected}" Style="{StaticResource Player.FmSceneChoice}"
+          MinHeight="84" Margin="2" Padding="2,10,2,10" FontSize="12"
           AutomationProperties.Name="{x:Bind Name}" AutomationProperties.ItemStatus="{x:Bind ItemStatus}"
-          Loaded="ChoiceButton_Loaded" Click="Choice_Click">
+          Click="Choice_Click">
           <StackPanel Spacing="10">
            <local:MusicPlaybackIcon Key="{x:Bind IconKey}" Width="25" Height="25" HorizontalAlignment="Center"/>
            <TextBlock Text="{x:Bind Name}" FontSize="12" TextAlignment="Center" TextWrapping="Wrap"/>
           </StackPanel>
-         </Button>
+         </ToggleButton>
         </DataTemplate>
        </ItemsControl.ItemTemplate>
       </ItemsControl>

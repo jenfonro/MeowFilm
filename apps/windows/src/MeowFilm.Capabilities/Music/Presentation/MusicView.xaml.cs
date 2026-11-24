@@ -26,6 +26,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private readonly DesktopHeaderAction refreshAction, renamePlaylistAction, deletePlaylistAction;
     private readonly UserScrollIntent songScrollIntent;
     private readonly MusicPagePresenter content;
+    private readonly ListView[] songLists;
     private readonly Dictionary<ListView, ScrollViewer> songScrolls = [];
     private readonly Dictionary<string, bool> favoriteCache = new(StringComparer.Ordinal);
     private long favoritesEpoch;
@@ -79,7 +80,8 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         });
         BodyPages.Children.Add(content);
         content.Show(Library.ContentPage);
-        foreach (var list in new[] { SongsGrid, SearchSongsGrid })
+        songLists = [SongsGrid, SearchSongsGrid];
+        foreach (var list in songLists)
         {
             if (ReferenceEquals(list, SearchSongsGrid)) ArtworkItemsScope.SetItemKeySelector(list, item => ((SongRow)item).Id);
             ArtworkItemsScope.SetItemResourcesSelector(list, item =>
@@ -215,7 +217,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
 
     private void RefreshAllSongRows(bool syncFavorite)
     {
-        foreach (var list in new[] { SongsGrid, SearchSongsGrid })
+        foreach (var list in songLists)
             for (int i = 0; i < list.Items.Count; i++) if (list.ContainerFromIndex(i) is ListViewItem row) RefreshSongRow(row, syncFavorite);
     }
 
@@ -366,83 +368,9 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
 
     private void DailyBranch_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string branch }) RunUiAction(() => Catalog.SwitchDailyBranchAsync(branch)); }
     private void DailyStyleOpen_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Catalog.OpenDailyStyleEditorAsync());
-    private void DailyStyleTag_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: MusicCatalogTag tag }) Catalog.ToggleDailyStyleTag(tag); }
+    private void DailyStyleTag_Click(object sender, RoutedEventArgs e) { if (sender is ButtonBase { Tag: MusicCatalogTag tag }) Catalog.ToggleDailyStyleTag(tag); }
 
-    private static readonly ConditionalWeakTable<Button, DailyTagChrome> DailyTagChromes = new();
     private static readonly ConditionalWeakTable<ListViewItem, SongContainerChrome> SongContainerChromes = new();
-
-    private void DailyTag_Loaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button { Tag: MusicCatalogTag tag } button) return;
-        DailyTagChromes.GetValue(button, static b => new DailyTagChrome(b)).Attach(tag);
-    }
-
-    private sealed class DailyTagChrome
-    {
-        private readonly Button button;
-        private MusicCatalogTag? tag;
-        private bool pointer, attached;
-        private long pressedToken, enabledToken;
-        private IDisposable? theme;
-
-        internal DailyTagChrome(Button button)
-        {
-            this.button = button;
-            button.Unloaded += OnUnloaded;
-        }
-
-        internal void Attach(MusicCatalogTag next)
-        {
-            tag = next;
-            if (!attached)
-            {
-                attached = true;
-                button.PointerEntered += OnEntered;
-                button.PointerExited += OnExited;
-                pressedToken = button.RegisterPropertyChangedCallback(ButtonBase.IsPressedProperty, (_, _) => Refresh());
-                enabledToken = button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => Refresh());
-                theme = DesktopTheme.Observe(button, Refresh);
-            }
-            Refresh();
-        }
-
-        private void OnUnloaded(object sender, RoutedEventArgs args)
-        {
-            if (button.IsLoaded) return;
-            pointer = false;
-            if (!attached) return;
-            attached = false;
-            button.PointerEntered -= OnEntered;
-            button.PointerExited -= OnExited;
-            button.UnregisterPropertyChangedCallback(ButtonBase.IsPressedProperty, pressedToken);
-            button.UnregisterPropertyChangedCallback(IsEnabledProperty, enabledToken);
-            pressedToken = enabledToken = 0;
-            theme?.Dispose();
-            theme = null;
-        }
-
-        private void OnEntered(object sender, PointerRoutedEventArgs args) { pointer = true; Refresh(); }
-        private void OnExited(object sender, PointerRoutedEventArgs args) { pointer = false; Refresh(); }
-
-        private void Refresh()
-        {
-            if (tag is null) return;
-            static Brush SystemBrush(UIElementType type) => SystemAppearance.GetElementBrush(type);
-            Brush Resource(string name) => (Brush)DesktopVisual.Resource(button, name);
-            if (DesktopTheme.GetIsHighContrast(button))
-            {
-                button.Background = SystemBrush(tag.Selected ? UIElementType.Highlight : UIElementType.ButtonFace);
-                button.Foreground = button.BorderBrush = SystemBrush(!button.IsEnabled ? UIElementType.GrayText : tag.Selected ? UIElementType.HighlightText : UIElementType.ButtonText);
-            }
-            else
-            {
-                button.Background = Resource(button.IsPressed ? "MeowFilm.Brush.Pressed" : pointer ? "MeowFilm.Brush.Hover" : "MeowFilm.Brush.InputSurface");
-                button.Foreground = Resource(!button.IsEnabled ? "MeowFilm.Brush.Disabled" : tag.Selected ? "MeowFilm.Brush.Accent" : "MeowFilm.Brush.Text");
-                button.BorderBrush = Resource(tag.Selected ? "MeowFilm.Brush.Accent" : "MeowFilm.Brush.Border");
-            }
-            AutomationProperties.SetItemStatus(button, tag.Selected ? "已选中" : "");
-        }
-    }
 
     private void DailyStyleCancel_Click(object sender, RoutedEventArgs e) => Catalog.CancelDailyStyleEditor();
     private void DailyStyleConfirm_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Catalog.ConfirmDailyStyleAsync());
@@ -568,10 +496,9 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         }
     }
 
-    private static readonly SolidColorBrush SelectedSongBackground = DesktopVisual.Brush("#E9F0F6");
-    private static readonly SolidColorBrush HoveredSongBackground = DesktopVisual.Brush("#FFFFFF");
-    private static readonly SolidColorBrush TransparentSongBackground = new(Microsoft.UI.Colors.Transparent);
-    private static readonly SolidColorBrush SelectedSongBorder = DesktopVisual.Brush("#9AAEBF");
+    [ThreadStatic] private static SolidColorBrush? selectedSongBackground, selectedSongBorder;
+    private static SolidColorBrush SelectedSongBackground => selectedSongBackground ??= DesktopVisual.Brush("#E9F0F6");
+    private static SolidColorBrush SelectedSongBorder => selectedSongBorder ??= DesktopVisual.Brush("#9AAEBF");
 
     private void RefreshSongRow(SelectorItem container, bool syncFavorite = false)
     {
@@ -587,7 +514,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         Brush foreground = contrast ? SystemBrush(container.IsSelected ? UIElementType.HighlightText : UIElementType.WindowText) : Resource("MeowFilm.Brush.Text");
         container.Foreground = foreground;
         container.Background = contrast ? SystemBrush(container.IsSelected ? UIElementType.Highlight : UIElementType.Window) :
-            container.IsSelected ? SelectedSongBackground : hovered ? HoveredSongBackground : TransparentSongBackground;
+            container.IsSelected ? SelectedSongBackground : hovered ? DesktopVisual.WhiteBrush : DesktopVisual.TransparentBrush;
         if (!ReferenceEquals(container, insertionRow))
         {
             container.BorderBrush = contrast ? foreground : focused ? Resource("MeowFilm.Brush.Text") : SelectedSongBorder;
@@ -711,7 +638,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         if (!ReferenceEquals(row, insertionRow) || after != insertAfter)
         {
             ClearInsertion(); insertionRow = row; insertAfter = after;
-            row.BorderBrush = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
+            row.BorderBrush = (Brush)DesktopVisual.Resource(row, "MeowFilm.Brush.Accent");
             row.BorderThickness = after ? new Thickness(0, 0, 0, 2) : new Thickness(0, 2, 0, 0);
         }
         e.AcceptedOperation = DataPackageOperation.Move; e.Handled = true;

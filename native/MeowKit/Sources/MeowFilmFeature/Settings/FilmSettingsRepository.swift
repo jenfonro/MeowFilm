@@ -219,7 +219,6 @@ public struct FilmPreferencesRecord: Equatable, Sendable {
 /// Single strongly-typed SQLite owner for all native film settings blocks.
 /// No `RuntimeValue` or JSON serialization exists in this persistence layer.
 public final class FilmSettingsRepository: @unchecked Sendable {
-    private static let maxSafeInteger: Int64 = 9_007_199_254_740_991
     private static let panProviders: Set<String> = ["baidu", "quark", "uc", "tianyi", "yidong"]
 
     let database: SQLiteDatabase
@@ -254,20 +253,18 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                 if let existing = before.value, existing == next {
                     return ((existing, before.revision), false)
                 }
-                let changed = try db.execute(
+                try db.execute(
                     "INSERT INTO tmdb_settings(singleton,api_base,image_base,api_key,access_token,language,region,include_adult,row_revision) " +
                     "VALUES(1,?,?,?,?,?,?,?,1) ON CONFLICT(singleton) DO UPDATE SET " +
                     "api_base=excluded.api_base,image_base=excluded.image_base,api_key=excluded.api_key," +
                     "access_token=excluded.access_token,language=excluded.language,region=excluded.region," +
-                    "include_adult=excluded.include_adult,row_revision=tmdb_settings.row_revision+1 " +
-                    "WHERE tmdb_settings.row_revision < 9007199254740991",
+                    "include_adult=excluded.include_adult,row_revision=tmdb_settings.row_revision+1",
                     [
                         .text(next.apiBase), .text(next.imageBase), .text(next.apiKey),
                         .text(next.accessToken), .text(next.language), .text(next.region),
                         .bool(next.includeAdult)
                     ]
                 )
-                guard changed == 1 else { throw FilmSettingsStorageError.conflict }
                 let nextRevision = try Self.advance(db, block: .tmdb)
                 return ((next, nextRevision), true)
             }
@@ -300,19 +297,17 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                 if let existing = before.value, existing == next {
                     return ((existing, before.revision), false)
                 }
-                let changed = try db.execute(
+                try db.execute(
                     "INSERT INTO douban_settings(singleton,api_base,search_base,image_base,api_proxy,image_proxy,cookie,row_revision) " +
                     "VALUES(1,?,?,?,?,?,?,1) ON CONFLICT(singleton) DO UPDATE SET " +
                     "api_base=excluded.api_base,search_base=excluded.search_base,image_base=excluded.image_base," +
                     "api_proxy=excluded.api_proxy,image_proxy=excluded.image_proxy,cookie=excluded.cookie," +
-                    "row_revision=douban_settings.row_revision+1 " +
-                    "WHERE douban_settings.row_revision < 9007199254740991",
+                    "row_revision=douban_settings.row_revision+1",
                     [
                         .text(next.apiBase), .text(next.searchBase), .text(next.imageBase),
                         .text(next.apiProxy), .text(next.imageProxy), .text(next.cookie)
                     ]
                 )
-                guard changed == 1 else { throw FilmSettingsStorageError.conflict }
                 let nextRevision = try Self.advance(db, block: .douban)
                 return ((next, nextRevision), true)
             }
@@ -346,15 +341,6 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         guard Self.panProviders.contains(provider) else { throw FilmSettingsStorageError.invalidData }
         let result = try await mapErrors {
             try await database.transaction { db -> ([FilmPanAccountRecord], Int64) in
-                guard let current = try db.queryOne(
-                    "SELECT account_revision, row_revision FROM pan_accounts WHERE provider=?",
-                    [.text(provider)],
-                    map: { (accountRev: try $0.int64(0), rowRev: try $0.int64(1)) }
-                ),
-                      current.accountRev < Self.maxSafeInteger,
-                      current.rowRev < Self.maxSafeInteger else {
-                    throw FilmSettingsStorageError.storageFailure
-                }
                 guard try db.execute(
                     "UPDATE pan_accounts SET account_revision=account_revision+1, row_revision=row_revision+1," +
                     "cookie=?, username=?, password=?, authorization=?, refreshed_at_ms=? WHERE provider=?",
@@ -387,9 +373,8 @@ public final class FilmSettingsRepository: @unchecked Sendable {
     ) throws -> (accounts: [FilmPanAccountRecord], revision: Int64) {
         guard Self.panProviders.contains(provider),
               mode == "replace" || mode == "refresh",
-              rowRevision >= 0, rowRevision < Self.maxSafeInteger,
+              rowRevision >= 0,
               accountRevision >= 0,
-              mode == "refresh" || accountRevision < Self.maxSafeInteger,
               mode != "refresh" || accountRevision > 0 else {
             throw FilmSettingsStorageError.invalidData
         }
@@ -529,13 +514,12 @@ public final class FilmSettingsRepository: @unchecked Sendable {
 
     private static func revision(_ db: SQLiteConnection, block: FilmSettingsBlock) throws -> Int64 {
         let rev = try db.ownerRevision(block.rawValue)
-        guard (0...maxSafeInteger).contains(rev) else { throw FilmSettingsStorageError.invalidData }
+        guard rev >= 0 else { throw FilmSettingsStorageError.invalidData }
         return rev
     }
 
     private static func advance(_ db: SQLiteConnection, block: FilmSettingsBlock) throws -> Int64 {
         let current = try db.ownerRevision(block.rawValue)
-        guard current < maxSafeInteger else { throw FilmSettingsStorageError.conflict }
         return try db.commitOwnerRevision(block.rawValue, expectedRevision: current)
     }
 
@@ -757,13 +741,11 @@ public final class FilmSettingsRepository: @unchecked Sendable {
 
     private static func saveRules(_ db: SQLiteConnection, value: FilmRulesRecord, previous: FilmRulesRecord?) throws {
         func bumpGroup(_ group: String) throws {
-            let changed = try db.execute(
+            try db.execute(
                 "INSERT INTO film_rule_groups(group_name, row_revision, overridden) VALUES(?, 1, 1) " +
-                "ON CONFLICT(group_name) DO UPDATE SET overridden=1, row_revision=film_rule_groups.row_revision+1 " +
-                "WHERE film_rule_groups.row_revision < 9007199254740991",
+                "ON CONFLICT(group_name) DO UPDATE SET overridden=1, row_revision=film_rule_groups.row_revision+1",
                 [.text(group)]
             )
-            guard changed == 1 else { throw FilmSettingsStorageError.conflict }
         }
         func upsertRule(_ group: String, position: Int, pattern: String, replacement: String?, flags: String?) throws {
             try db.upsert(

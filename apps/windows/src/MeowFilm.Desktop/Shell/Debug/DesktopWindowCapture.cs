@@ -52,7 +52,7 @@ public static class DesktopWindowCapture
 
     private static (byte[] Pixels, int Width, int Height) CaptureWindowPixels(nint hwnd)
     {
-        if (!GetWindowRect(hwnd, out var rect))
+        if (!NativeWin32.GetWindowRect(hwnd, out var rect))
             throw DebugApiException.Internal("Unable to query window bounds for screenshot.");
         int width = Math.Max(1, rect.Right - rect.Left);
         int height = Math.Max(1, rect.Bottom - rect.Top);
@@ -119,9 +119,6 @@ public static class DesktopWindowCapture
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct RectNative { public int Left, Top, Right, Bottom; }
-
-    [StructLayout(LayoutKind.Sequential)]
     private struct BitmapInfoHeader
     {
         public uint biSize;
@@ -132,7 +129,6 @@ public static class DesktopWindowCapture
         public uint biClrUsed, biClrImportant;
     }
 
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint hWnd, out RectNative rect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool PrintWindow(nint hwnd, nint hdcBlt, uint nFlags);
     [DllImport("user32.dll")] private static extern nint GetDC(nint hWnd);
     [DllImport("user32.dll")] private static extern int ReleaseDC(nint hWnd, nint hDC);

@@ -5,7 +5,7 @@ using System.Text;
 namespace MeowFilm.Platform.Files;
 
 public sealed record SelectedLyricSnapshotData(string Text, string Sha256, string Basename);
-public enum SelectedLyricSnapshotError { InvalidPath, Unavailable, UnsafeFile, TooLarge, InUse, Changed, ReadFailed, InvalidEncoding }
+public enum SelectedLyricSnapshotError { InvalidPath, Unavailable, TooLarge, InUse, ReadFailed, InvalidEncoding }
 public sealed class SelectedLyricSnapshotException(SelectedLyricSnapshotError error) : Exception(error.ToString())
 {
     public SelectedLyricSnapshotError Error { get; } = error;
@@ -22,10 +22,9 @@ public static class SelectedLyricSnapshot
         catch { throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.InvalidPath); }
         if (extension is not (".lrc" or ".qrc" or ".yrc" or ".txt"))
             throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.InvalidPath);
-        SelectedFileSnapshotData? snapshot = null;
         try
         {
-            snapshot = await SelectedFileSnapshot.ReadAsync(selectedPath, extension, cancellationToken).ConfigureAwait(false);
+            var snapshot = await SelectedFileSnapshot.ReadAsync(selectedPath, extension, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             var bytes = snapshot.Bytes.AsSpan();
             string text;
@@ -40,9 +39,7 @@ public static class SelectedLyricSnapshot
             else text = new UTF8Encoding(false, true).GetString(bytes);
             if (text.Length == 0 || text.Any(c => c < 32 && c is not ('\r' or '\n' or '\t')))
                 throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.InvalidEncoding);
-            string sha256;
-            try { sha256 = Convert.ToHexStringLower(SHA256.HashData(snapshot.Bytes)); }
-            catch { throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.ReadFailed); }
+            string sha256 = Convert.ToHexStringLower(SHA256.HashData(snapshot.Bytes));
             cancellationToken.ThrowIfCancellationRequested();
             return new(text, sha256, snapshot.Basename);
         }

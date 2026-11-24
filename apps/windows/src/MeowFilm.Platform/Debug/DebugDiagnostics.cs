@@ -101,6 +101,7 @@ public sealed class DebugDiagnostics : IDisposable
     {
         var nativeSnapshot = CaptureNativeMemorySnapshot();
         var leases = DebugLeaseRegistry.Snapshot();
+        var caches = await DebugCacheRegistry.SnapshotAsync(cancellationToken).ConfigureAwait(false);
         object nodeSummary;
         if (runtime is null || !runtime.IsConnected)
         {
@@ -121,6 +122,7 @@ public sealed class DebugDiagnostics : IDisposable
             uptimeMs = Math.Round(session.UptimeMs, 3),
             native = nativeSnapshot,
             leases,
+            caches,
             exceptionsCaptured = Interlocked.Read(ref exceptionCounter),
             firstChanceEnabled,
             node = nodeSummary
@@ -215,6 +217,7 @@ public sealed class DebugDiagnostics : IDisposable
     {
         var before = CaptureNativeMemorySnapshot();
         var started = Stopwatch.GetTimestamp();
+        var clearedMemoryCaches = DebugCacheRegistry.ClearMemoryCaches();
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
         GC.WaitForPendingFinalizers();
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
@@ -239,6 +242,7 @@ public sealed class DebugDiagnostics : IDisposable
             native = new
             {
                 durationMs = Math.Round(elapsedMs, 3),
+                clearedMemoryCaches,
                 before,
                 after
             },

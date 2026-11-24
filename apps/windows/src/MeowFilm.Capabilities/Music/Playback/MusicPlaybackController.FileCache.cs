@@ -170,7 +170,7 @@ public sealed partial class MusicPlaybackController
     private async Task InvalidatePlaybackFileCache(MusicRecovery state)
     {
         if (audioFileCache is null || state.Media is not { } media || FileIdentity(media) is not { } identity) return;
-        await audioFileCache.EraseAsync(identity.Scope, state.Song.Id, state.Token);
+        await audioFileCache.EraseAsync(identity.Scope, state.Song.Id, identity.Signature, state.Token);
     }
 
     private async Task<ResolvedMusic?> RefreshMissingPlaybackFileAsync(MusicRecovery state,
@@ -179,7 +179,7 @@ public sealed partial class MusicPlaybackController
         // Missing/corrupt bytes revoke this representation only. Do not turn an
         // optional file miss into a provider blacklist.
         if (audioFileCache is not null && FileIdentity(media) is { } identity)
-            await audioFileCache.EraseAsync(identity.Scope, state.Song.Id, token);
+            await audioFileCache.EraseAsync(identity.Scope, state.Song.Id, identity.Signature, token);
         try { return await session.RefreshAsync(media.Target!, token); }
         catch (MusicOperationException error) when (UnavailableSourceCandidate(error.Code))
         {

@@ -6,16 +6,6 @@ import UIKit
 /// `PageThemeable` dispatch (zero recursive `subviews` theme crawling).
 @MainActor
 open class SettingsFormViewController: PageViewController {
-    private final class WeakThemeable {
-        weak var value: (any PageThemeable)?
-        init(_ value: any PageThemeable) { self.value = value }
-    }
-
-    private final class WeakLabel {
-        weak var value: UILabel?
-        init(_ value: UILabel) { self.value = value }
-    }
-
     public let form = ManagementFormView()
     open var formHeader: UIView? { nil }
     open var formFooter: UIView? { nil }
@@ -24,8 +14,8 @@ open class SettingsFormViewController: PageViewController {
     private var formViewportSize = CGSize.zero
     private var needsFocusedFieldReveal = false
     private weak var activeField: UIView?
-    private var formThemeables: [WeakThemeable] = []
-    private var mutedLabels: [WeakLabel] = []
+    private var formThemeables = ThemeableRegistry()
+    private var mutedLabels = WeakLabelRegistry()
 
     open override func viewDidLoad() {
         super.viewDidLoad()
@@ -74,16 +64,12 @@ open class SettingsFormViewController: PageViewController {
     }
 
     public func registerThemeable(_ item: any PageThemeable) {
-        if !formThemeables.contains(where: { $0.value === item }) {
-            formThemeables.append(WeakThemeable(item))
-        }
+        formThemeables.register(item)
         if isViewLoaded { item.applyTheme(theme) }
     }
 
     public func registerMutedLabel(_ label: UILabel) {
-        if !mutedLabels.contains(where: { $0.value === label }) {
-            mutedLabels.append(WeakLabel(label))
-        }
+        mutedLabels.register(label)
         if isViewLoaded { label.textColor = UIColor(theme.settings.muted) }
     }
 
@@ -97,11 +83,8 @@ open class SettingsFormViewController: PageViewController {
             form.fields.layer.cornerRadius = 0
             form.fields.clipsToBounds = false
         }
-        formThemeables.removeAll { $0.value == nil }
-        for entry in formThemeables { entry.value?.applyTheme(theme) }
-        let muted = UIColor(theme.settings.muted)
-        mutedLabels.removeAll { $0.value == nil }
-        for entry in mutedLabels { entry.value?.textColor = muted }
+        formThemeables.apply(theme)
+        mutedLabels.applyColor(UIColor(theme.settings.muted))
         needsFocusedFieldReveal = true
         view.setNeedsLayout()
     }

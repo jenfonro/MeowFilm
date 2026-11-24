@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using MeowFilm.Media;
 
@@ -76,12 +75,8 @@ internal static class FilmVideoInput
         if (text.Length != 22 || text.Any(character => !(char.IsAsciiLetterOrDigit(character) || character is '-' or '_')))
             throw new FilmPlaybackException(PlaybackError.InvalidRequest);
         byte[] bytes = Convert.FromBase64String(text.Replace('-', '+').Replace('_', '/') + "==");
-        try
-        {
-            if (Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_') != text)
-                throw new FilmPlaybackException(PlaybackError.InvalidRequest);
-            return Convert.ToHexString(bytes);
-        }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
+        if (Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_') != text)
+            throw new FilmPlaybackException(PlaybackError.InvalidRequest);
+        return Convert.ToHexString(bytes);
     }
 }

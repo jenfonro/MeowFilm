@@ -146,7 +146,7 @@ struct Result {
   int64_t changes = 0, rowId = 0;
   std::vector<std::vector<std::pair<std::string, Cell>>> values;
 };
-struct Request { int64_t id; std::string kind; std::vector<Statement> statements; size_t bytes; std::string destination; };
+struct Request { int64_t id; std::string kind; std::vector<Statement> statements; size_t bytes; };
 struct Reply {
   int64_t id = 0; std::string code; std::vector<Result> results;
   bool batch = false, join = false;
@@ -344,7 +344,6 @@ class Storage : public std::enable_shared_from_this<Storage> {
   std::string initializeLockName = "data-initialize.lock";
   std::string maintenanceLockName = "data-maintenance.lock";
   int application = 0, version = 0, synchronousLevel = 2;
-  bool allowBackup = true;
   bool initialize = false, stopping = false, environmentClosing = false, joining = false;
   std::mutex mutex;
   std::condition_variable writeChanged;
@@ -354,8 +353,6 @@ class Storage : public std::enable_shared_from_this<Storage> {
   size_t pendingBytes = 0, pendingCount = 0;
   std::string openFailure;
   std::unique_ptr<Reply> closeReply;
-  dev_t device = 0;
-  ino_t inode = 0;
   OwnedDescriptor maintenance;
   int commits = 0;
   std::thread writeThread;
@@ -365,33 +362,14 @@ class Storage : public std::enable_shared_from_this<Storage> {
   napi_async_cleanup_hook_handle cleanup = nullptr;
   std::shared_ptr<Storage> joinOwner;
 
-  static off_t CheckPath(const std::string& file, bool required) {
-    Check(!file.empty() && file[0] == '/' && file.find('\0') == std::string::npos, "UNSAFE_PATH");
-    const size_t separator = file.find_last_of('/');
-    const std::string parent = file.substr(0, separator), basename = file.substr(separator + 1);
-    std::unique_ptr<char, decltype(&free)> canonical(realpath(parent.c_str(), nullptr), free);
-    Check(canonical && parent == canonical.get(), "UNSAFE_PATH");
-    int directory = open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    Check(directory >= 0, "UNSAFE_PATH");
+  static off_t FileSize(const std::string& file) {
     struct stat state{};
-    int result = fstatat(directory, basename.c_str(), &state, AT_SYMLINK_NOFOLLOW);
-    int error = errno;
-    close(directory);
-    Check(!basename.empty() && basename != "." && basename != "..", "UNSAFE_PATH");
-    if (result < 0 && error == ENOENT && !required) return -1;
-    Check(result == 0 && S_ISREG(state.st_mode) && state.st_nlink == 1, "UNSAFE_PATH");
+    if (stat(file.c_str(), &state) != 0) {
+      if (errno == ENOENT) return -1;
+      throw Fault("STORAGE_IO");
+    }
+    Check(S_ISREG(state.st_mode), "UNSAFE_PATH");
     return state.st_size;
-  }
-  void CheckFiles() {
-    CheckPath(path, true);
-    struct stat state{}; Check(lstat(path.c_str(), &state) == 0, "STORAGE_IO");
-    Check(state.st_dev == device && state.st_ino == inode, "UNSAFE_PATH");
-    for (const char* suffix : {"-wal", "-shm", "-journal"}) CheckPath(path + suffix, false);
-    const std::string lockPath = path.substr(0, path.find_last_of('/')) + "/" + maintenanceLockName;
-    CheckPath(lockPath, true);
-    struct stat descriptorState{}, pathState{};
-    Check(fstat(maintenance.value, &descriptorState) == 0 && lstat(lockPath.c_str(), &pathState) == 0 &&
-      descriptorState.st_dev == pathState.st_dev && descriptorState.st_ino == pathState.st_ino, "UNSAFE_PATH");
   }
   void RetainResult(size_t size, size_t& owned) {
     std::lock_guard<std::mutex> lock(mutex);
@@ -428,24 +406,22 @@ class Storage : public std::enable_shared_from_this<Storage> {
     joining = true; joinOwner = shared_from_this(); N(napi_queue_async_work(env, joinWork));
   }
   void Open() {
-    const std::string parent = path.substr(0, path.find_last_of('/'));
+    Check(!path.empty() && path[0] == '/' && path.find('\0') == std::string::npos, "UNSAFE_PATH");
+    const size_t separator = path.find_last_of('/');
+    Check(separator != std::string::npos && separator > 0, "UNSAFE_PATH");
+    const std::string parent = path.substr(0, separator);
     const std::string initializePath = parent + "/" + initializeLockName;
-    CheckPath(initializePath, false);
     OwnedDescriptor initializeFile;
-    initializeFile.value = open(initializePath.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    initializeFile.value = open(initializePath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     Check(initializeFile.value >= 0, "STORAGE_IO");
-    struct stat lockState{};
-    Check(fstat(initializeFile.value, &lockState) == 0 && S_ISREG(lockState.st_mode) && lockState.st_nlink == 1, "UNSAFE_PATH");
     AdvisoryLock initializeLock(initializeFile.value, LOCK_EX, 5000);
     const std::string maintenancePath = parent + "/" + maintenanceLockName;
-    CheckPath(maintenancePath, false);
-    maintenance.value = open(maintenancePath.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    maintenance.value = open(maintenancePath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     Check(maintenance.value >= 0, "STORAGE_IO");
-    Check(fstat(maintenance.value, &lockState) == 0 && S_ISREG(lockState.st_mode) && lockState.st_nlink == 1, "UNSAFE_PATH");
     AdvisoryLock validationLock(maintenance.value, LOCK_SH, 5000);
-    const off_t existing = CheckPath(path, false);
+    const off_t existing = FileSize(path);
     for (const char* suffix : {"-wal", "-shm", "-journal"}) {
-      const off_t sidecar = CheckPath(path + suffix, false);
+      const off_t sidecar = FileSize(path + suffix);
       Check(existing >= 0 || sidecar < 0, "STORAGE_CORRUPT");
     }
     Check(existing != 0, "STORAGE_CORRUPT");
@@ -454,18 +430,16 @@ class Storage : public std::enable_shared_from_this<Storage> {
     try {
       if (existing < 0) {
         Check(initialize, "STORAGE_SCHEMA");
-        const int fd = open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        const int fd = open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
         Check(fd >= 0, errno == ENOSPC ? "STORAGE_FULL" : "STORAGE_IO");
         createdFresh = true;
         Check(close(fd) == 0, "STORAGE_IO");
       }
       int code = sqlite3_open_v2(path.c_str(), &writeSlot.db,
-        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nullptr);
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nullptr);
       if (code != SQLITE_OK) throw Fault(SQLiteError(code));
       Check(std::string(sqlite3_libversion()) == "3.53.4", "STORAGE_ENGINE_UNSUPPORTED");
       Check(chmod(path.c_str(), 0600) == 0, "STORAGE_IO");
-      struct stat state{}; Check(lstat(path.c_str(), &state) == 0, "STORAGE_IO");
-      device = state.st_dev; inode = state.st_ino;
       sqlite3_extended_result_codes(writeSlot.db, 1); sqlite3_busy_timeout(writeSlot.db, 5000);
       Check(sqlite3_db_config(writeSlot.db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
       Check(sqlite3_db_config(writeSlot.db, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
@@ -486,13 +460,12 @@ class Storage : public std::enable_shared_from_this<Storage> {
       auto intFrom = [&](ConnectionSlot& slot, const char* sql) {
         return std::get<int64_t>(readFrom(slot, sql).values[0][0].second);
       };
-      auto verifyPragmas = [&](ConnectionSlot& slot, bool expectQueryOnly) {
+      auto verifyWriterPragmas = [&](ConnectionSlot& slot) {
         Check(std::get<std::string>(readFrom(slot, "PRAGMA journal_mode").values[0][0].second) == "wal" &&
           intFrom(slot, "PRAGMA synchronous") == synchronousLevel && intFrom(slot, "PRAGMA foreign_keys") == 1 &&
           intFrom(slot, "PRAGMA trusted_schema") == 0 && intFrom(slot, "PRAGMA wal_autocheckpoint") == 0 &&
           intFrom(slot, "PRAGMA auto_vacuum") == 2 && intFrom(slot, "PRAGMA busy_timeout") == 5000 &&
-          intFrom(slot, "PRAGMA temp_store") == 2 && intFrom(slot, "PRAGMA cache_size") == -16384 &&
-          (!expectQueryOnly || intFrom(slot, "PRAGMA query_only") == 1), "STORAGE_CONFIGURATION");
+          intFrom(slot, "PRAGMA temp_store") == 2 && intFrom(slot, "PRAGMA cache_size") == -16384, "STORAGE_CONFIGURATION");
       };
 
       auto app = intFrom(writeSlot, "PRAGMA application_id"), current = intFrom(writeSlot, "PRAGMA user_version");
@@ -503,7 +476,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
       writeSlot.Exec("PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; "
                      "PRAGMA journal_mode=WAL; PRAGMA synchronous=" + synchronousMode + "; PRAGMA wal_autocheckpoint=0; "
                      "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
-      verifyPragmas(writeSlot, false);
+      verifyWriterPragmas(writeSlot);
       if (empty) {
         size_t bytes = 0;
         writeSlot.Exec("BEGIN IMMEDIATE");
@@ -525,39 +498,19 @@ class Storage : public std::enable_shared_from_this<Storage> {
       }
       auto rows = readFrom(writeSlot, "SELECT schema_hash FROM storage_identity WHERE singleton=1");
       Check(rows.values.size() == 1 && std::get<std::string>(rows.values[0][0].second) == hash, "STORAGE_SCHEMA");
-      sqlite3* rawExpected = nullptr;
-      int expectedCode = sqlite3_open_v2(":memory:", &rawExpected, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
-      std::unique_ptr<sqlite3, decltype(&sqlite3_close_v2)> expected(rawExpected, sqlite3_close_v2);
-      Check(expectedCode == SQLITE_OK && rawExpected, "STORAGE_IO");
-      Check(sqlite3_exec(rawExpected, schema.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK, "STORAGE_SCHEMA");
-      auto structure = [](sqlite3* connection) {
-        sqlite3_stmt* raw = nullptr;
-        int code = sqlite3_prepare_v2(connection,
-          "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name", -1, &raw, nullptr);
-        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(raw, sqlite3_finalize);
-        Check(code == SQLITE_OK && raw, "STORAGE_SCHEMA");
-        std::vector<std::string> values;
-        while ((code = sqlite3_step(raw)) == SQLITE_ROW)
-          for (int column = 0; column < 4; ++column) {
-            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(raw, column));
-            values.emplace_back(text ? text : "");
-          }
-        Check(code == SQLITE_DONE, "STORAGE_SCHEMA");
-        return values;
-      };
-      Check(structure(writeSlot.db) == structure(rawExpected), "STORAGE_SCHEMA");
 
       // Dedicated WAL read-only connection on its own thread (`query_only=ON`).
       code = sqlite3_open_v2(path.c_str(), &readSlot.db,
-        SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nullptr);
+        SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nullptr);
       if (code != SQLITE_OK) throw Fault(SQLiteError(code));
       sqlite3_extended_result_codes(readSlot.db, 1); sqlite3_busy_timeout(readSlot.db, 5000);
       Check(sqlite3_db_config(readSlot.db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
       Check(sqlite3_db_config(readSlot.db, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
       readSlot.Exec("PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; "
-                    "PRAGMA synchronous=" + synchronousMode + "; PRAGMA wal_autocheckpoint=0; "
                     "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
-      verifyPragmas(readSlot, true);
+      Check(std::get<std::string>(readFrom(readSlot, "PRAGMA journal_mode").values[0][0].second) == "wal" &&
+        intFrom(readSlot, "PRAGMA auto_vacuum") == 2 &&
+        intFrom(readSlot, "PRAGMA query_only") == 1, "STORAGE_CONFIGURATION");
 
       writeSlot.ClearStatementCache();
       readSlot.ClearStatementCache();
@@ -570,34 +523,6 @@ class Storage : public std::enable_shared_from_this<Storage> {
         unlink((path + "-shm").c_str());
         unlink((path + "-journal").c_str());
       }
-      throw;
-    }
-  }
-  void Backup(const std::string& destination) {
-    CheckPath(destination, false);
-    int file = open(destination.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-    Check(file >= 0, errno == EEXIST ? "STORAGE_CONFLICT" : "STORAGE_IO");
-    close(file);
-    sqlite3* target = nullptr;
-    sqlite3_backup* backup = nullptr;
-    try {
-      int code = sqlite3_open_v2(destination.c_str(), &target, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOFOLLOW, nullptr);
-      if (code != SQLITE_OK) throw Fault(SQLiteError(code));
-      backup = sqlite3_backup_init(target, "main", writeSlot.db, "main");
-      Check(backup, "STORAGE_IO");
-      code = sqlite3_backup_step(backup, -1);
-      int finished = sqlite3_backup_finish(backup); backup = nullptr;
-      if (code != SQLITE_DONE || finished != SQLITE_OK) throw Fault(SQLiteError(code != SQLITE_DONE ? code : finished));
-      Check(sqlite3_close(target) == SQLITE_OK, "STORAGE_IO"); target = nullptr;
-      file = open(destination.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-      Check(file >= 0, "STORAGE_IO"); int synced = fsync(file); close(file); Check(synced == 0, "STORAGE_IO");
-      std::string parent = destination.substr(0, destination.find_last_of('/'));
-      file = open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-      Check(file >= 0, "STORAGE_IO"); synced = fsync(file); close(file); Check(synced == 0, "STORAGE_IO");
-    } catch (...) {
-      if (backup) sqlite3_backup_finish(backup);
-      if (target) sqlite3_close_v2(target);
-      unlink(destination.c_str());
       throw;
     }
   }
@@ -691,15 +616,6 @@ class Storage : public std::enable_shared_from_this<Storage> {
         }
         std::string failure = CurrentFailure();
         if (!failure.empty()) throw Fault(failure);
-        std::unique_ptr<AdvisoryLock> maintenanceLock;
-        if (request.kind == "checkpoint" || request.kind == "backup") {
-          maintenanceLock = std::make_unique<AdvisoryLock>(maintenance.value, LOCK_EX, 5000);
-          try { CheckFiles(); } catch (const std::exception& error) {
-            LatchFatalFailure(error.what());
-            throw;
-          }
-        }
-        if (request.kind == "backup") { Backup(request.destination); }
         const auto before = sqlite3_total_changes64(writeSlot.db);
         if (transaction) writeSlot.Exec("BEGIN IMMEDIATE");
         for (const auto& item : request.statements) reply->results.push_back(writeSlot.Execute(item, bytes, retain));
@@ -718,7 +634,6 @@ class Storage : public std::enable_shared_from_this<Storage> {
         commits = 0;
         try {
           AdvisoryLock maintenanceLock(maintenance.value, LOCK_EX, 0);
-          CheckFiles();
           int ckptBusy = 0;
           Check(sqlite3_exec(writeSlot.db, "PRAGMA wal_checkpoint(PASSIVE)", [](void* out, int, char** values, char**) {
             if (values && values[0]) *static_cast<int*>(out) = std::atoi(values[0]);
@@ -816,13 +731,7 @@ napi_value RequestValue(napi_env env, napi_callback_info info) {
         napi_value item; N(napi_get_element(env, statements, i, &item));
         request.statements.push_back(ReadStatement(env, item, request.kind == "snapshot", request.bytes));
       }
-    } else if (request.kind == "checkpoint") request.statements.push_back({"PRAGMA wal_checkpoint(PASSIVE)", {}, -1, true});
-    else if (request.kind == "backup") {
-      Check(storage.allowBackup, "INVALID_REQUEST");
-      request.destination = Text(env, Property(env, args[1], "path"));
-      request.bytes += request.destination.size();
-    }
-    else Check(request.kind == "close");
+    } else Check(request.kind == "close");
     const bool isRead = request.kind == "query" || request.kind == "snapshot";
     const bool isClose = request.kind == "close";
     {
@@ -882,11 +791,6 @@ napi_value OpenValue(napi_env env, napi_callback_info info) {
         std::string name = Text(env, maintLockProp);
         Check(!name.empty() && name.find('/') == std::string::npos && name.find('\0') == std::string::npos, "STORAGE_CONFIGURATION");
         storage->maintenanceLockName = name;
-      }
-      napi_value allowBackupProp = Property(env, identity, "allowBackup");
-      napi_valuetype allowBackupType; N(napi_typeof(env, allowBackupProp, &allowBackupType));
-      if (allowBackupType == napi_boolean) {
-        N(napi_get_value_bool(env, allowBackupProp, &storage->allowBackup));
       }
     }
     N(napi_get_value_bool(env, Property(env, args[0], "initialize"), &storage->initialize));

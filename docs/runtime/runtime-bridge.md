@@ -6,7 +6,7 @@
 
 `apps/runtime/entry.mjs` 导出 `createRuntime(config)` 和 `startRuntime(config)`。App 启动方提供生命周期 `sessionId`（UUID）及应用专用 `dataRoot`；各持久化业务 owner 分别管理自己的私有目录。`createRuntime` 返回 `{start(),close(),baseUrl}`，`startRuntime` 返回已监听的同一对象。生命周期 session 由启动方持有，作为运行代次和处理器上下文，不作为 HTTP 访问凭据。调用方持有会话存活句柄并负责终止时调用 `close()`；一次 HTTP keep-alive 断开不代表整个会话结束。
 
-监听系统分配的端口，绑定全部可用接口；返回的 `baseUrl` 使用本机 `http://127.0.0.1:<port>`，外部可用设备地址和同一端口访问。普通外部请求无需启动密钥、session 或认证头。服务端不按域名、Host 或 Origin 拒绝请求，浏览器响应开放 `Access-Control-Allow-Origin: *`，OPTIONS 预检允许公开 HTTP 方法与调用方请求头，也响应浏览器的私网访问预检。
+监听系统分配的端口，绑定全部可用接口；返回的 `baseUrl` 使用本机 `http://127.0.0.1:<port>`，外部可用设备地址和同一端口访问。普通外部请求无需启动密钥、session 或认证头，服务端不按域名、Host 或 Origin 拒绝请求。
 
 调用方可传 `X-Meow-Request-Id: <UUID>`，缺失时由服务端生成，响应通过同名头回传并允许浏览器读取。显式畸形 ID 和重复进行中的 ID 按协议错误拒绝；已完成 ID 不保留历史结果或做自动重放。内部单调序号用于请求归属，HTTP ID 不是授权凭据。
 

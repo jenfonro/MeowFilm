@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Media;
@@ -173,8 +172,6 @@ public sealed partial class FilmPlayback
                 try { owner = FilmKernelNative.Create(ref table, Address, Format, keys, defaultKey); }
                 finally
                 {
-                    CryptographicOperations.ZeroMemory(keys);
-                    if (defaultKey is not null) CryptographicOperations.ZeroMemory(defaultKey);
                     keys = []; defaultKey = null;
                 }
             }
@@ -239,8 +236,6 @@ public sealed partial class FilmPlayback
                 {
                     cancellation.Dispose();
                     lifetime.Dispose();
-                    CryptographicOperations.ZeroMemory(keys);
-                    if (defaultKey is not null) CryptographicOperations.ZeroMemory(defaultKey);
                 }
             }
         }

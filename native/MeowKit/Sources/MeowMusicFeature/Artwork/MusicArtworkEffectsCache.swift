@@ -90,33 +90,68 @@ struct MusicBrowseSampledPalette: Equatable, Sendable {
 /// Owned by `MusicArtworkImages` so derived caches share exact lifecycle and retirement boundaries.
 @MainActor
 final class MusicArtworkEffectsCache {
+    private final class BlurBox: NSObject {
+        let key: String
+        let image: UIImage
+        init(key: String, image: UIImage) { self.key = key; self.image = image }
+    }
+
     private final class PaletteBox: NSObject {
+        let key: String
         let value: MusicBrowseSampledPalette
-        init(_ value: MusicBrowseSampledPalette) { self.value = value }
+        init(key: String, value: MusicBrowseSampledPalette) { self.key = key; self.value = value }
+    }
+
+    private final class EvictionDelegate: NSObject, NSCacheDelegate {
+        var onEvict: (@Sendable (String) -> Void)?
+        func cache(_ cache: NSCache<AnyObject, AnyObject>, willEvictObject obj: Any) {
+            if let blur = obj as? BlurBox { onEvict?(blur.key) }
+            else if let palette = obj as? PaletteBox { onEvict?(palette.key) }
+        }
     }
 
     private static let sharedBlurContext = CIContext(options: [.cacheIntermediates: false])
 
-    private let blurCache: NSCache<NSString, UIImage> = {
-        let cache = NSCache<NSString, UIImage>()
-        cache.countLimit = 24
-        cache.totalCostLimit = 24 * 1_024 * 1_024
-        return cache
-    }()
-    private let paletteCache: NSCache<NSString, PaletteBox> = {
-        let cache = NSCache<NSString, PaletteBox>()
-        cache.countLimit = 256
-        return cache
-    }()
+    private let blurCache = NSCache<NSString, BlurBox>()
+    private let paletteCache = NSCache<NSString, PaletteBox>()
+    private let blurDelegate = EvictionDelegate()
+    private let paletteDelegate = EvictionDelegate()
+    private var blurCosts: [String: Int] = [:]
+    private var blurEstimatedBytes: Int64 = 0
+    private var paletteKeys: Set<String> = []
+    private var blurFlights: [String: Task<UIImage?, Never>] = [:]
+    private var paletteFlights: [String: Task<MusicBrowseSampledPalette?, Never>] = [:]
+    private var generation = UUID()
     private var blurHits: Int64 = 0
     private var blurMisses: Int64 = 0
     private var paletteHits: Int64 = 0
     private var paletteMisses: Int64 = 0
 
+    init() {
+        blurCache.countLimit = 24
+        blurCache.totalCostLimit = 24 * 1_024 * 1_024
+        blurCache.delegate = blurDelegate
+        blurDelegate.onEvict = { [weak self] key in
+            Task { @MainActor [weak self] in
+                guard let self, self.blurCache.object(forKey: key as NSString) == nil,
+                      let cost = self.blurCosts.removeValue(forKey: key) else { return }
+                self.blurEstimatedBytes = max(0, self.blurEstimatedBytes - Int64(cost))
+            }
+        }
+        paletteCache.countLimit = 256
+        paletteCache.delegate = paletteDelegate
+        paletteDelegate.onEvict = { [weak self] key in
+            Task { @MainActor [weak self] in
+                guard let self, self.paletteCache.object(forKey: key as NSString) == nil else { return }
+                self.paletteKeys.remove(key)
+            }
+        }
+    }
+
     func cachedBlur(forKey key: String) -> UIImage? {
         if let hit = blurCache.object(forKey: key as NSString) {
             blurHits += 1
-            return hit
+            return hit.image
         }
         return nil
     }
@@ -124,26 +159,41 @@ final class MusicArtworkEffectsCache {
     func blurredImage(for image: UIImage, key: String, radius: Double = 3) async -> UIImage? {
         if let hit = blurCache.object(forKey: key as NSString) {
             blurHits += 1
-            return hit
+            return hit.image
         }
         blurMisses += 1
+        if let existing = blurFlights[key] {
+            return await existing.value
+        }
         guard let cgSource = image.cgImage else { return image }
         let scale = image.scale
         let orientation = image.imageOrientation
-        let rendered: UIImage? = await Task.detached(priority: .userInitiated) {
-            let input = CIImage(cgImage: cgSource)
-            guard let filter = CIFilter(name: "CIGaussianBlur") else { return nil }
-            filter.setValue(input.clampedToExtent(), forKey: kCIInputImageKey)
-            filter.setValue(radius, forKey: kCIInputRadiusKey)
-            guard let output = filter.outputImage?.cropped(to: input.extent),
-                  let cgImage = MusicArtworkEffectsCache.sharedBlurContext.createCGImage(output, from: input.extent) else {
-                return nil
-            }
-            return UIImage(cgImage: cgImage, scale: scale, orientation: orientation)
-        }.value
+        let currentGen = generation
+        let task = Task<UIImage?, Never> {
+            await Task.detached(priority: .userInitiated) {
+                let input = CIImage(cgImage: cgSource)
+                guard let filter = CIFilter(name: "CIGaussianBlur") else { return nil }
+                filter.setValue(input.clampedToExtent(), forKey: kCIInputImageKey)
+                filter.setValue(radius, forKey: kCIInputRadiusKey)
+                guard let output = filter.outputImage?.cropped(to: input.extent),
+                      let cgImage = MusicArtworkEffectsCache.sharedBlurContext.createCGImage(output, from: input.extent) else {
+                    return nil
+                }
+                return UIImage(cgImage: cgImage, scale: scale, orientation: orientation)
+            }.value
+        }
+        blurFlights[key] = task
+        let rendered = await task.value
+        if blurFlights[key] == task { blurFlights.removeValue(forKey: key) }
         guard !Task.isCancelled, let rendered else { return nil }
-        let cost = Int(rendered.size.width * rendered.scale * rendered.size.height * rendered.scale * 4)
-        blurCache.setObject(rendered, forKey: key as NSString, cost: max(1, cost))
+        if generation == currentGen {
+            let cost = max(1, Int(rendered.size.width * rendered.scale * rendered.size.height * rendered.scale * 4))
+            if let old = blurCosts.updateValue(cost, forKey: key) {
+                blurEstimatedBytes = max(0, blurEstimatedBytes - Int64(old))
+            }
+            blurEstimatedBytes += Int64(cost)
+            blurCache.setObject(BlurBox(key: key, image: rendered), forKey: key as NSString, cost: cost)
+        }
         return rendered
     }
 
@@ -161,24 +211,47 @@ final class MusicArtworkEffectsCache {
             return box.value
         }
         paletteMisses += 1
+        if let existing = paletteFlights[key] {
+            return await existing.value
+        }
         guard let cgImage = image.cgImage else { return nil }
-        let sampled: MusicBrowseSampledPalette? = await Task.detached(priority: .utility) {
-            MusicBrowseSampledPalette.sample(cgImage: cgImage)
-        }.value
+        let currentGen = generation
+        let task = Task<MusicBrowseSampledPalette?, Never> {
+            await Task.detached(priority: .utility) {
+                MusicBrowseSampledPalette.sample(cgImage: cgImage)
+            }.value
+        }
+        paletteFlights[key] = task
+        let sampled = await task.value
+        if paletteFlights[key] == task { paletteFlights.removeValue(forKey: key) }
         guard !Task.isCancelled, let sampled else { return nil }
-        paletteCache.setObject(PaletteBox(sampled), forKey: key as NSString)
+        if generation == currentGen {
+            paletteKeys.insert(key)
+            paletteCache.setObject(PaletteBox(key: key, value: sampled), forKey: key as NSString)
+        }
         return sampled
     }
 
     func clear() {
+        generation = UUID()
+        blurFlights.removeAll()
+        paletteFlights.removeAll()
         blurCache.removeAllObjects()
         paletteCache.removeAllObjects()
+        blurCosts.removeAll()
+        blurEstimatedBytes = 0
+        paletteKeys.removeAll()
     }
 
     func debugStats() -> DebugJSONValue {
         .object([
+            "blurCount": .int(blurCosts.count),
+            "blurEstimatedBytes": .integer(blurEstimatedBytes),
+            "blurActiveFlights": .int(blurFlights.count),
             "blurHits": .integer(blurHits),
             "blurMisses": .integer(blurMisses),
+            "paletteCount": .int(paletteKeys.count),
+            "paletteActiveFlights": .int(paletteFlights.count),
             "paletteHits": .integer(paletteHits),
             "paletteMisses": .integer(paletteMisses),
         ])

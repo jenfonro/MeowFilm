@@ -23,7 +23,6 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        table.isEditing = true
         observe(owner.accessChanges) { [weak self] in
             guard let self, owner.isClosed else { return }
             clearErrorSource("metadata")

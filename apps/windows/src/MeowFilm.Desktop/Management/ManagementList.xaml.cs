@@ -135,7 +135,7 @@ public sealed partial class ManagementList : UserControl
         if (Header.Visibility == Visibility.Visible && columns.SequenceEqual(value)) return;
         columns = value.ToArray(); sharedWidths = []; ApplyColumns(Header);
         while (Header.Children.Count > columns.Count + 1) Header.Children.RemoveAt(Header.Children.Count - 1);
-        var mutedStyle = TryFindAppStyle("MeowFilm.MutedText");
+        var mutedStyle = DesktopVisual.TryAppStyle("MeowFilm.MutedText");
         for (int index = 0; index < columns.Count; index++)
         {
             TextBlock title;
@@ -215,20 +215,17 @@ public sealed partial class ManagementList : UserControl
 
     public static Button Button(string title, Action action, string styleKey = "MeowFilm.QuietButton")
     {
-        var button = new Button { Content = title, Padding = new(12, 8, 12, 8), MinHeight = 36, Margin = new(4, 0, 0, 0), Style = TryFindAppStyle(styleKey) };
+        var button = new Button { Content = title, Padding = new(12, 8, 12, 8), MinHeight = 36, Margin = new(4, 0, 0, 0), Style = DesktopVisual.TryAppStyle(styleKey) };
         AutomationProperties.SetName(button, title); button.Click += (_, _) => action(); return button;
     }
 
     public static Button RowButton(string title, Action action, string styleKey = "MeowFilm.ManagementRowButton")
     {
-        var button = new Button { Content = title, Style = TryFindAppStyle(styleKey) };
+        var button = new Button { Content = title, Style = DesktopVisual.TryAppStyle(styleKey) };
         AutomationProperties.SetName(button, title); button.Click += (_, _) => action(); return button;
     }
 
     public static void OpenMenu(Button button) => (button.ContextFlyout as MenuFlyout)?.ShowAt(button, new FlyoutShowOptions { Placement = FlyoutPlacementMode.Bottom });
-
-    internal static Style? TryFindAppStyle(string key) =>
-        Application.Current?.Resources.TryGetValue(key, out var value) == true ? value as Style : null;
 }
 
 internal sealed class ManagementRowState(ManagementList owner, ManagementRow row, bool selected)

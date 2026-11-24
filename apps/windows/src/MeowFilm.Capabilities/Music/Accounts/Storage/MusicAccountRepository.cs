@@ -159,9 +159,7 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
         AppendField(sb, account.Profile?.DisplayName);
         AppendField(sb, account.Profile?.Avatar);
         byte[] bytes = Encoding.UTF8.GetBytes(sb.ToString());
-        string fingerprint;
-        try { fingerprint = Convert.ToHexStringLower(SHA256.HashData(bytes)); }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
+        string fingerprint = Convert.ToHexStringLower(SHA256.HashData(bytes));
         return new StoredAccount
         {
             Generation = account.Generation,

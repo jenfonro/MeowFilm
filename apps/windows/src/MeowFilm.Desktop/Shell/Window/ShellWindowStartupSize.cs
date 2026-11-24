@@ -17,7 +17,7 @@ internal readonly record struct ShellWindowStartupSize(
 
     internal static void ApplyToPrimaryScreen(DesktopWindow window, nint handle)
     {
-        var size = Calculate(GetSystemMetrics(0), GetSystemMetrics(1), GetDpiForWindow(handle));
+        var size = Calculate(GetSystemMetrics(0), GetSystemMetrics(1), NativeWin32.GetDpiForWindow(handle));
         window.MinWidth = size.MinWidth;
         window.MinHeight = size.MinHeight;
         window.Resize(size.Width, size.Height);
@@ -27,6 +27,4 @@ internal readonly record struct ShellWindowStartupSize(
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);
-    [DllImport("user32.dll")]
-    private static extern uint GetDpiForWindow(nint handle);
 }

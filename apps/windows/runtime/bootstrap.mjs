@@ -12,9 +12,7 @@ const DEBUG_ERROR_SYMBOL = Symbol.for('meowfilm.windowsBootstrapDebug');
 
 /** Same fixed identity as native AppDataPaths, delivered only through the private pipe. */
 export function windowsScriptDataRoot(input) {
-  if (typeof input !== 'string' || !isAbsolute(input) || /^[/\\]{2}/.test(input) ||
-    /[\u0000-\u001f]/.test(input) ||
-    process.platform === 'win32' && (!/^[A-Za-z]:[\\/]/.test(input) || input.slice(2).includes(':')))
+  if (typeof input !== 'string' || !isAbsolute(input))
     throw new BridgeError('INVALID_REQUEST');
   return resolve(input);
 }

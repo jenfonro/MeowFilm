@@ -66,7 +66,7 @@ import Combine
         self.owner = owner; generation = owner.accountAccessGeneration
     }
     func matches(_ owner: MusicViewModel) -> Bool {
-        active && self.owner === owner && owner.isAvailable && !owner.isClosed &&
+        active && self.owner === owner && !owner.isClosed &&
         owner.accountAccessGeneration == generation
     }
     func check(_ owner: MusicViewModel) throws {
@@ -172,7 +172,7 @@ enum MusicCollectionOwnerChange {
     public var playAllTitle: String {
         isPlayingCollection ? "暂停播放" : isCurrentCollection ? "继续播放" : "播放全部"
     }
-    public var isAvailable: Bool { model.isAvailable && !model.isClosed }
+    public var isAvailable: Bool { !model.isClosed }
     public var canAct: Bool {
         visible && isAvailable && !isMissing && !isLoading && !isActing &&
         !needsReload && collection != nil && binding?.matches(model) == true

@@ -51,6 +51,8 @@ public static class AppLauncher
                 try
                 {
                     var debugRoot = debugOptions.DebugDir ?? AppDataPaths.DefaultDebugRoot(AppIdentity.StorageId);
+                    if (DebugLaunchOptions.PathsOverlap(paths.Documents, debugRoot))
+                        throw new InvalidOperationException("Debug directory must not overlap data root.");
                     debugSession = new DebugSession(debugOptions, debugRoot, paths.Documents);
                     DebugLog.Current = debugSession;
                     debugDiagnostics = new DebugDiagnostics(debugSession);
@@ -197,6 +199,7 @@ public static class AppLauncher
             IStorageDatabase? cacheStore = null;
             AppRuntimeConnectionHost? runtime = null;
             ArtworkService? artwork = null;
+            IDisposable? artworkDebugRegistration = null;
             AppAppearance? appearance = null;
             AppMediaControlSettings? mediaControls = null;
             AppClosePreferences? closePreferences = null;
@@ -216,7 +219,12 @@ public static class AppLauncher
                         modules.Cast<IAsyncDisposable>(), ReferenceEqualityComparer.Instance),
                 [
                     new(() => windowAttachment?.DisposeAsync() ?? ValueTask.CompletedTask),
-                    new(() => artwork?.DisposeAsync() ?? ValueTask.CompletedTask),
+                    new(() =>
+                    {
+                        artworkDebugRegistration?.Dispose();
+                        artworkDebugRegistration = null;
+                        return artwork?.DisposeAsync() ?? ValueTask.CompletedTask;
+                    }),
                     new(() => disposeResources?.Invoke() ?? ValueTask.CompletedTask),
                     new(() => runtime?.DisposeAsync() ?? ValueTask.CompletedTask, InterruptsPendingOperations: true),
                     new(() => cacheStore?.DisposeAsync() ?? ValueTask.CompletedTask),
@@ -232,6 +240,7 @@ public static class AppLauncher
                 await Task.Run(userData.Open, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 Directory.CreateDirectory(paths.Documents);
+                paths.SweepTempDirectory();
                 var dataDb = NativeDatabase.OpenData(paths.Documents);
                 dataStore = dataDb;
                 Volatile.Write(ref activeDataStore, dataDb);
@@ -297,6 +306,14 @@ public static class AppLauncher
                         });
                     }
                 }, cacheDirectory: Path.Combine(paths.Caches, "artwork-v1"));
+                if (DebugLog.IsEnabled)
+                {
+                    var globalArtwork = artwork;
+                    artworkDebugRegistration = DebugCacheRegistry.Register(
+                        "artwork.global",
+                        _ => Task.FromResult<object?>(globalArtwork.GetStats()),
+                        clearMemory: () => globalArtwork.ClearMemory());
+                }
                 ArtworkScope.SetLoader(shell.Root, artwork);
                 windowAttachment = attachWindow?.Invoke(shell, modules);
                 cancellationToken.ThrowIfCancellationRequested();
@@ -332,28 +349,42 @@ public static class AppLauncher
 
                 async Task CloseProcessAsync()
                 {
-                    // Drain playback/business sessions, native playback threads, PiP windows,
-                    // window attachments, Node runtime, and databases strictly in topological order.
-                    if (stopPlayback is not null)
-                    {
-                        try { await stopPlayback(); }
-                        catch (Exception error)
-                        {
-                            cleanDrain = false;
-                            DebugLog.Error(DebugCategories.Lifecycle, "app.exit", "stop_playback.failed", error: error);
-                            System.Diagnostics.Trace.TraceError("APP_STOP_PLAYBACK_FAILED");
-                        }
-                    }
-                    try
-                    {
-                        await lifecycle.CloseAsync();
-                    }
-                    catch (Exception error)
+                    var drainTask = DrainShutdownAsync();
+                    var completed = await Task.WhenAny(drainTask, Task.Delay(TimeSpan.FromSeconds(8)));
+                    if (!ReferenceEquals(completed, drainTask))
                     {
                         cleanDrain = false;
-                        DebugLog.Error(DebugCategories.Lifecycle, "app.exit", "lifecycle.close_failed", error: error);
-                        System.Diagnostics.Trace.TraceError("APP_SHUTDOWN_FAILED");
+                        DebugLog.Warn(DebugCategories.Lifecycle, "app.exit", "shutdown.drain_timeout",
+                            new { timeoutMs = 8000, runtimePid = runtime.RuntimePid });
+                        try
+                        {
+                            if (runtime.RuntimePid is { } pid)
+                            {
+                                using var child = System.Diagnostics.Process.GetProcessById(pid);
+                                if (!child.HasExited) child.Kill(entireProcessTree: true);
+                            }
+                        }
+                        catch { /* Runtime child may already have exited. */ }
+                        return;
                     }
+                    try { await drainTask; }
+                    catch (Exception ex)
+                    {
+                        cleanDrain = false;
+                        DebugLog.Warn(DebugCategories.Lifecycle, "app.exit", "shutdown.drain_error", error: ex);
+                        System.Diagnostics.Trace.TraceError("APP_EXIT_DRAIN_FAILED");
+                    }
+                }
+
+                async Task DrainShutdownAsync()
+                {
+                    try { await (stopPlayback?.Invoke() ?? Task.CompletedTask); }
+                    catch (Exception ex)
+                    {
+                        cleanDrain = false;
+                        DebugLog.Warn(DebugCategories.Lifecycle, "app.exit", "shutdown.stop_playback_error", error: ex);
+                    }
+                    await lifecycle.CloseAsync();
                 }
 
                 async Task ReopenAsync()

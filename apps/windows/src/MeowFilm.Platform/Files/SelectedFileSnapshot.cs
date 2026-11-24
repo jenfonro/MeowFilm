@@ -8,7 +8,7 @@ namespace MeowFilm.Platform.Files;
 internal sealed record SelectedFileSnapshotData(byte[] Bytes, string Basename);
 internal enum SelectedFileSnapshotError
 {
-    InvalidPath, Unavailable, UnsafeFile, TooLarge, InUse, Changed, ReadFailed
+    InvalidPath, Unavailable, TooLarge, InUse, ReadFailed
 }
 internal sealed class SelectedFileSnapshotException(SelectedFileSnapshotError error) : Exception(error.ToString())
 {
@@ -47,8 +47,8 @@ internal static class SelectedFileSnapshot
         }
         catch (OperationCanceledException) { throw new OperationCanceledException(cancellation); }
         catch (SelectedFileSnapshotException) { throw; }
-        catch (FileNotFoundException) { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.Unavailable); }
-        catch (DirectoryNotFoundException) { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.Unavailable); }
+        catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException)
+        { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.Unavailable); }
         catch (IOException error) when ((error.HResult & 0xFFFF) is 32 or 33)
         { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.InUse); }
         catch { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.ReadFailed); }

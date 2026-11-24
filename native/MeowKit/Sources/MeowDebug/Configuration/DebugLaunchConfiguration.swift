@@ -37,6 +37,7 @@ public enum DebugArgumentError: Error, LocalizedError, Sendable, Equatable {
     case invalidPort(String)
     case invalidBindAddress(String)
     case invalidPath(String, String)
+    case overlappingPaths(String, String)
     case invalidModules(String)
     case invalidNonNegativeInt(String, String)
     case invalidPositiveInt(String, String)
@@ -48,6 +49,7 @@ public enum DebugArgumentError: Error, LocalizedError, Sendable, Equatable {
         case .invalidPort(let raw): return "invalid --debug-port value: \(raw) (expected 0..65535)"
         case .invalidBindAddress(let raw): return "invalid --debug-bind value: \(raw)"
         case .invalidPath(let opt, let raw): return "invalid \(opt) path (must be absolute without control chars): \(raw)"
+        case .overlappingPaths(let debug, let data): return "--debug-dir (\(debug)) must not overlap with --data-root (\(data))"
         case .invalidModules(let raw): return "invalid --debug-modules value: \(raw)"
         case .invalidNonNegativeInt(let opt, let raw): return "invalid \(opt) value: \(raw) (expected >= 0)"
         case .invalidPositiveInt(let opt, let raw): return "invalid \(opt) value: \(raw) (expected >= 1)"
@@ -204,8 +206,9 @@ public struct DebugLaunchConfiguration: Sendable, Equatable {
                 port = parsed
             case "--debug-bind":
                 let raw = try value().trimmingCharacters(in: .whitespacesAndNewlines)
-                guard Self.isValidBindAddress(raw) else { throw DebugArgumentError.invalidBindAddress(raw) }
-                bindAddress = raw
+                let normalized = raw.lowercased() == "localhost" ? "127.0.0.1" : raw
+                guard Self.isValidBindAddress(normalized) else { throw DebugArgumentError.invalidBindAddress(raw) }
+                bindAddress = normalized
             case "--debug-dir":
                 let raw = try value()
                 guard Self.isValidAbsolutePath(raw) else { throw DebugArgumentError.invalidPath(flag, raw) }
@@ -243,6 +246,20 @@ public struct DebugLaunchConfiguration: Sendable, Equatable {
             index += 1
         }
 
+        let effectiveDebugRoot = debugRootOverride ?? (try? Self.defaultDebugRoot())
+        let effectiveDataRoot: URL?
+        if let dataRootOverride {
+            effectiveDataRoot = dataRootOverride
+        } else if let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            effectiveDataRoot = support.standardizedFileURL.appendingPathComponent("meowfilm", isDirectory: true)
+        } else {
+            effectiveDataRoot = nil
+        }
+        if let effectiveDebugRoot, let effectiveDataRoot,
+           Self.pathsOverlap(effectiveDebugRoot, effectiveDataRoot) {
+            throw DebugArgumentError.overlappingPaths(effectiveDebugRoot.path, effectiveDataRoot.path)
+        }
+
         return DebugLaunchConfiguration(
             port: port,
             bindAddress: bindAddress,
@@ -256,6 +273,12 @@ public struct DebugLaunchConfiguration: Sendable, Equatable {
                 firstChanceExceptions: firstChance
             )
         )
+    }
+
+    private static func pathsOverlap(_ a: URL, _ b: URL) -> Bool {
+        let pa = a.standardizedFileURL.path.hasSuffix("/") ? String(a.standardizedFileURL.path.dropLast()) : a.standardizedFileURL.path
+        let pb = b.standardizedFileURL.path.hasSuffix("/") ? String(b.standardizedFileURL.path.dropLast()) : b.standardizedFileURL.path
+        return pa == pb || pa.hasPrefix(pb + "/") || pb.hasPrefix(pa + "/")
     }
 
     public static func parseModules(_ csv: String) throws -> [String] {

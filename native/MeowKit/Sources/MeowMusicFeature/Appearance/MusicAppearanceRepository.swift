@@ -71,7 +71,7 @@ enum MusicAppearanceRepository {
     }
 
     static func savePreferences(_ value: MusicAppearancePreferences, _ db: SQLiteConnection) throws {
-        let changed = try db.execute(
+        try db.execute(
             "INSERT INTO music_appearance(scope,revision,playlist_view,player_theme,color_mode,color_palette) " +
             "VALUES(?,1,?,?,?,?) " +
             "ON CONFLICT(scope) DO UPDATE SET " +
@@ -79,8 +79,7 @@ enum MusicAppearanceRepository {
             "playlist_view=excluded.playlist_view," +
             "player_theme=excluded.player_theme," +
             "color_mode=excluded.color_mode," +
-            "color_palette=excluded.color_palette " +
-            "WHERE music_appearance.revision < 9007199254740991",
+            "color_palette=excluded.color_palette",
             [
                 .text(scopeKey),
                 .text(value.playlistView.rawValue),
@@ -89,7 +88,6 @@ enum MusicAppearanceRepository {
                 .text(encodePalette(value.colorPalette)),
             ]
         )
-        guard changed == 1 else { throw SQLiteStorageError.conflict }
         try db.upsert(
             "ios_music_appearance_extras",
             columns: ["scope", "lock_lyric", "lyric_translation", "lyric_background"],
@@ -106,6 +104,15 @@ enum MusicAppearanceRepository {
     static func resetPreferences(_ db: SQLiteConnection) throws {
         // Cascades to ios_music_appearance_extras.
         try db.execute("DELETE FROM music_appearance WHERE scope=?", [.text(scopeKey)])
+    }
+
+    static func clearColors(_ cacheDb: SQLiteConnection) throws {
+        try cacheDb.execute("DELETE FROM ios_music_song_palettes")
+        try cacheDb.execute("DELETE FROM ios_music_palette_state")
+    }
+
+    static func colorCount(_ cacheDb: SQLiteConnection) throws -> Int {
+        try cacheDb.queryOne("SELECT count(*) FROM ios_music_song_palettes") { try $0.integer(0) } ?? 0
     }
 
     static func saveColors(_ colors: [(key: String, palette: PageColorway)], last: PageColorway?, _ cacheDb: SQLiteConnection) throws {

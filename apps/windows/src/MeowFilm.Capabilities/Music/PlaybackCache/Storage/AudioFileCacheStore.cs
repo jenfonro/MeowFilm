@@ -88,6 +88,21 @@ internal static class AudioFileCacheStore
             """,
             row => (row.GetString(0), row.GetString(1), row.GetInt64(2), row.GetInt64(3)));
 
+    internal static IReadOnlyList<(string FileName, long FileSize)> ReadOfficialFiles(DatabaseSession db) =>
+        db.Query("""
+            SELECT file_name,file_size
+            FROM windows_music_audio_files
+            WHERE info_kind='official'
+            """,
+            row => (row.GetString(0), row.GetInt64(1)));
+
+    internal static void DeleteOfficial(DatabaseSession db) =>
+        db.Execute("DELETE FROM windows_music_audio_files WHERE info_kind='official'");
+
+    internal static (int Count, long TotalBytes) ReadStats(DatabaseSession db) =>
+        db.Query("SELECT count(*), coalesce(sum(file_size), 0) FROM windows_music_audio_files",
+            row => (row.GetInt32(0), row.GetInt64(1)))[0];
+
     internal static void Save(DatabaseSession db, string resourceKey, AudioFileCacheRecord? value)
     {
         if (value is null)

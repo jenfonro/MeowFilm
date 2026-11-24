@@ -1212,7 +1212,6 @@ class AdapterRequest extends Writable {
     catch (next) { failed(next); }
     try { this.controller?.abort(error ?? fault('CANCELLED')); }
     catch (next) { failed(next); }
-    for (const chunk of this.chunks) chunk.fill(0);
     this.chunks = [];
     this.headers = {};
     this.options = null;

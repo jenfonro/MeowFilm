@@ -37,7 +37,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         self.window = window
         self.assembly = assembly
         self.resetUserData = resetUserData
-        navigation = PageNavigationController(themeProvider: assembly.appearance)
+        navigation = PageNavigationController()
         root = MeowfilmRootContainerViewController(navigation: navigation, themeProvider: assembly.appearance)
         super.init()
     }
@@ -331,7 +331,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                             score: item.score, subtitle: item.subtitle, metadataSeed: item.metadataSeed,
                             businessID: item.businessID, playbackTarget: item.playbackTarget)
         let model: FilmPlaybackModel
-        do { model = try assembly.makeFilmPlayback(item: item, kind: kind, entrySurface: entrySurface) }
+        do { model = try assembly.makeFilmPlayback(item: item, entrySurface: entrySurface) }
         catch {
             (navigation.topViewController as? PageViewController)?.enqueueError(error.localizedDescription)
             return

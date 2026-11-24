@@ -14,7 +14,7 @@ extension MusicViewModel {
     /// Physical output loss cancels pending playback even before a native
     /// attempt exists. A retained handoff candidate alone is not active work.
     public func onOutputUnavailable() {
-        guard isAvailable, !isClosed, !isClosing else { return }
+        guard !isClosed, !isClosing else { return }
         let sourceWork = pendingSourceSelection != nil || isResolving || resolutionTask != nil ||
             candidateDiscoveryTask != nil || cachedAudioLookup != nil || sourceRecoveryTask != nil ||
             cachedAudioRecoveryTask != nil || remoteAudioRecoveryTask != nil
@@ -37,7 +37,7 @@ extension MusicViewModel {
     public func togglePlayback() async {
         let pendingPlay = hasPendingPlayCommand
         cancelPlayPauseCommands()
-        guard isAvailable, !isClosed, !isClosing else { return }
+        guard !isClosed, !isClosing else { return }
         if pendingPlay || isChangingSimilarMode || isChangingQueueRecommendations || navigationPlaybackIntent != nil {
             recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
             if !pausePlaybackRecovery() {
@@ -57,7 +57,7 @@ extension MusicViewModel {
         }
         let own = lifecycle, token = selectionID, control = playbackControlRevision
         await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
-        guard isAvailable, !isClosed, lifecycle == own, selectionID == token, playbackControlRevision == control else { return }
+        guard !isClosed, lifecycle == own, selectionID == token, playbackControlRevision == control else { return }
         if let fmSource, !fmSource.authorization.isActive {
             cancelFMNavigation(); stopFM(); invalidateSelection(stopMedia: true)
             error = MusicServiceError.staleAccess.localizedDescription; return
@@ -82,7 +82,7 @@ extension MusicViewModel {
     /// Resolve toggle before waiting: native playback may still be paused while
     /// the current owner is admitting an earlier explicit play.
     public func acceptPlayPause(_ request: PlaybackPlayPauseCommand, attempt: PlayAttempt) -> Bool {
-        guard isAvailable, !isClosed, !isClosing, attempt.owner == "music", let current, let candidate,
+        guard !isClosed, !isClosing, attempt.owner == "music", let current, let candidate,
               candidate.occurrenceId == current.id, candidate.resourceId == attempt.resourceID,
               let nativeAttempt, nativeAttempt.id == attempt.id,
               nativeAttempt.resourceID == attempt.resourceID else { return false }
@@ -172,7 +172,7 @@ extension MusicViewModel {
     }
     @discardableResult
     public func seek(to seconds: Double) -> Bool {
-        guard isAvailable, !isClosed, !isClosing, terminalAttempt == nil, seconds.isFinite, seconds >= 0,
+        guard !isClosed, !isClosing, terminalAttempt == nil, seconds.isFinite, seconds >= 0,
               let nativeAttempt else { return false }
         guard candidate?.fileAuthorization?.isActive != false, candidate?.playbackAuthorization?.isActive != false else {
             invalidateSelection(stopMedia: true); error = MusicServiceError.staleAccess.localizedDescription; return false
@@ -183,14 +183,14 @@ extension MusicViewModel {
     }
 
     public func loadLyrics(occurrenceId: String) async {
-        guard isAvailable, !isClosed, current?.id == occurrenceId else { return }
+        guard !isClosed, current?.id == occurrenceId else { return }
         beginPlaybackMetadata(refreshSources: true)
         await playbackMetadata.flush()
     }
 
     /// Preferred product binding. No View.onChange and no polling.
     public func onPlaybackEvent(_ event: PlaybackEvent) {
-        guard isAvailable, !isClosed, event.attempt.owner == "music",
+        guard !isClosed, event.attempt.owner == "music",
               event.snapshot.owner == "music", event.snapshot.resourceID == event.attempt.resourceID,
               let candidate, candidate.resourceId == event.attempt.resourceID else { return }
         if let nativeAttempt, nativeAttempt.id != event.attempt.id { return }
@@ -283,7 +283,7 @@ extension MusicViewModel {
         recordPlaybackFact(fact, after: nil)
     }
     private func recordPlaybackFact(_ fact: MusicPlaybackFact, after observation: Task<Void, Never>?) {
-        guard isAvailable, !isClosed, let candidate, fact.attemptId == candidate.attemptId,
+        guard !isClosed, let candidate, fact.attemptId == candidate.attemptId,
               fact.occurrenceId == candidate.occurrenceId, fact.resourceId == candidate.resourceId,
               fact.position.isFinite, fact.position >= 0, terminalAttempt != fact.attemptId else { return }
         guard candidate.fileAuthorization?.isActive != false,

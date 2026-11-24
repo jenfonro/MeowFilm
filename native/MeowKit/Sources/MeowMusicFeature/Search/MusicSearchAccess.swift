@@ -63,7 +63,7 @@ import Foundation
 
     private func checkSearchAccess(_ generation: UUID? = nil) throws {
         try Task.checkCancellation()
-        guard isAvailable, !isClosed else { throw MusicServiceError.accessUnavailable }
+        guard !isClosed else { throw MusicServiceError.accessUnavailable }
         if let generation, generation != searchAccessGeneration { throw MusicServiceError.staleAccess }
     }
 }

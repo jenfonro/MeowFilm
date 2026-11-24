@@ -8,8 +8,13 @@ const fault = code => Object.assign(new Error(code), { code });
 /** External TMDB/Douban dynamic responses stored cleanly as bounded typed value trees. */
 export function createMetadataStorage(dataRoot, now) {
   const database = openDatabase(dataRoot, { role: 'cache' });
+  let reads = 0;
+  let writes = 0;
+  let removals = 0;
+  let invalidations = 0;
 
   async function read(key) {
+    reads++;
     const [[entry], components, nodes] = await database.snapshot([
       {
         sql: 'SELECT parent_signature,summary_parent_signature FROM metadata_cache_entries WHERE cache_key=?',
@@ -57,6 +62,7 @@ export function createMetadataStorage(dataRoot, now) {
 
   async function save(key, state, estimatedBytes) {
     const request = state.request;
+    const at = now();
     const baseNodes = encodeValueNodes(state.value, { maxNodes: MAX_CACHE_NODES });
     const summaryNodes = state.summaryValue === undefined
       ? []
@@ -70,7 +76,7 @@ export function createMetadataStorage(dataRoot, now) {
         params: [
           key, request.provider,
           state.parentSignature ?? null, state.summaryParentSignature ?? null,
-          now(), estimatedBytes,
+          at, estimatedBytes,
         ],
       },
       ...Object.entries(state.components).map(([name, row]) => ({
@@ -82,6 +88,14 @@ export function createMetadataStorage(dataRoot, now) {
         ? nodeInserts('metadata_cache_value_nodes', ['cache_key', 'slot_name'], [key, 'summary'], summaryNodes)
         : []),
       {
+        sql: `DELETE FROM metadata_cache_entries WHERE NOT EXISTS (
+          SELECT 1 FROM metadata_cache_components c
+          WHERE c.cache_key = metadata_cache_entries.cache_key
+            AND (c.expires_at_ms IS NULL OR c.expires_at_ms > ?)
+        )`,
+        params: [at],
+      },
+      {
         sql: `DELETE FROM metadata_cache_entries WHERE cache_key IN (
           SELECT cache_key FROM (
             SELECT cache_key, row_number() OVER (ORDER BY updated_at_ms DESC, cache_key) AS rank_pos,
@@ -92,14 +106,16 @@ export function createMetadataStorage(dataRoot, now) {
       },
     ];
     await database.transaction(statements);
+    writes++;
   }
 
   return {
     ready: database.ready,
     read,
     save,
-    remove: key => database.execute('DELETE FROM metadata_cache_entries WHERE cache_key=?', [key]),
-    invalidate: provider => database.execute('DELETE FROM metadata_cache_entries WHERE provider=?', [provider]),
+    remove: key => { removals++; return database.execute('DELETE FROM metadata_cache_entries WHERE cache_key=?', [key]); },
+    invalidate: provider => { invalidations++; return database.execute('DELETE FROM metadata_cache_entries WHERE provider=?', [provider]); },
+    stats: () => ({ reads, writes, removals, invalidations }),
     close: () => database.close(),
   };
 }

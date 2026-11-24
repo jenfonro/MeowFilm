@@ -94,15 +94,21 @@ public final class ArtworkImages {
             let saved = await byteCache.read(url)
             try Task.checkCancellation()
             guard byteCache.revision == revision else { throw CancellationError() }
-            if let saved, saved.expiresAt > Date(), saved.data.count <= maximumBytes,
-               let value = ArtworkImageDecoder.decode(saved.data) {
-                try Task.checkCancellation()
-                return .init(
-                    image: value,
-                    data: saved.data,
-                    expiresAt: saved.expiresAt,
-                    cacheInMemory: saved.data.count <= maximumBytes
-                )
+            if let saved {
+                if saved.expiresAt > Date(), saved.data.count <= maximumBytes,
+                   let value = ArtworkImageDecoder.decode(saved.data) {
+                    try Task.checkCancellation()
+                    return .init(
+                        image: value,
+                        data: saved.data,
+                        expiresAt: saved.expiresAt,
+                        cacheInMemory: saved.data.count <= maximumBytes
+                    )
+                }
+                // Evict corrupt/oversized/expired disk bytes immediately instead of retrying broken data.
+                if let revision {
+                    await byteCache.remove(url, revision: revision)
+                }
             }
         }
         try Task.checkCancellation()

@@ -63,14 +63,14 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         table.estimatedRowHeight = SettingsVisualMetrics.rowHeight
         table.contentInsetAdjustmentBehavior = .never
         table.delegate = self
-        table.register(MusicSearchPlatformCell.self, forCellReuseIdentifier: MusicSearchPlatformCell.reuseIdentifier)
+        table.register(SettingsTableCell.self, forCellReuseIdentifier: SettingsTableCell.reuseIdentifier)
         table.accessibilityIdentifier = "music.search.\(kind.rawValue).platformTable"
         addBodyView(table)
 
         dataSource = DataSource(tableView: table) { [weak self] tableView, indexPath, platform in
             let cell = tableView.dequeueReusableCell(
-                withIdentifier: MusicSearchPlatformCell.reuseIdentifier, for: indexPath
-            ) as! MusicSearchPlatformCell
+                withIdentifier: SettingsTableCell.reuseIdentifier, for: indexPath
+            ) as! SettingsTableCell
             self?.configure(cell: cell, platform: platform, index: indexPath.row)
             return cell
         }
@@ -99,7 +99,7 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         guard isViewLoaded, dataSource != nil else { return }
         for indexPath in table.indexPathsForVisibleRows ?? [] {
             guard let platform = dataSource.itemIdentifier(for: indexPath),
-                  let cell = table.cellForRow(at: indexPath) as? MusicSearchPlatformCell else { continue }
+                  let cell = table.cellForRow(at: indexPath) as? SettingsTableCell else { continue }
             configure(cell: cell, platform: platform, index: indexPath.row)
         }
     }
@@ -123,27 +123,27 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         if forceReconfigure && !applied {
             for indexPath in table.indexPathsForVisibleRows ?? [] {
                 guard let platform = dataSource.itemIdentifier(for: indexPath),
-                      let cell = table.cellForRow(at: indexPath) as? MusicSearchPlatformCell else { continue }
+                      let cell = table.cellForRow(at: indexPath) as? SettingsTableCell else { continue }
                 configure(cell: cell, platform: platform, index: indexPath.row)
             }
         }
         table.invalidateIntrinsicContentSize()
     }
 
-    private func configure(cell: MusicSearchPlatformCell, platform: MusicPublicBrowsePlatform, index: Int) {
+    private func configure(cell: SettingsTableCell, platform: MusicPublicBrowsePlatform, index: Int) {
         let enabled = desiredEnabled.contains(platform)
         let first = index == 0
         let last = index == order.count - 1
-        cell.configure(
-            platform: platform,
-            enabled: enabled,
-            theme: theme,
-            first: first,
-            last: last,
-            identifier: "music.search.\(kind.rawValue).platform.\(platform.rawValue)"
-        ) { [weak self] nextEnabled in
-            self?.setEnabled(platform, enabled: nextEnabled)
-        }
+        let row = SettingsListRow(
+            id: "music.search.\(kind.rawValue).platform.\(platform.rawValue)",
+            title: platform.title,
+            leadingIcon: .asset(platform.settingsLogoName),
+            accessory: .toggle(isOn: enabled, enabled: true) { [weak self] nextEnabled in
+                self?.setEnabled(platform, enabled: nextEnabled)
+            },
+            canMove: true
+        )
+        cell.configure(row: row, theme: theme, first: first, last: last)
     }
 
     private func enqueueMutation(_ updated: [MusicPublicBrowsePlatform]) -> Task<Void, Never> {
@@ -193,99 +193,6 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
     func tableView(_ tableView: UITableView, shouldIndentWhileEditingRowAt indexPath: IndexPath) -> Bool {
         false
     }
-
-    override var debugDialogTypeName: String { "MusicSearchPlatformsViewController" }
-}
-
-@MainActor
-private final class MusicSearchPlatformCell: UITableViewCell {
-    static let reuseIdentifier = "MusicSearchPlatformCell"
-
-    private let rowBackground = SettingsRowBackgroundView(selected: false)
-    private let logo = UIImageView()
-    private let title = UILabel()
-    private let switchInput = SettingsSwitch()
-    private var logoSize: [NSLayoutConstraint] = []
-    private var onChange: (@MainActor (Bool) -> Void)?
-
-    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
-        super.init(style: style, reuseIdentifier: reuseIdentifier)
-        backgroundColor = .clear
-        backgroundView = rowBackground
-        selectionStyle = .none
-        showsReorderControl = true
-        isAccessibilityElement = false
-
-        logo.contentMode = .scaleAspectFit
-        logo.isAccessibilityElement = false
-        title.numberOfLines = 0
-        title.adjustsFontForContentSizeCategory = true
-        title.isAccessibilityElement = false
-        title.setContentCompressionResistancePriority(.required, for: .vertical)
-        switchInput.setContentHuggingPriority(.required, for: .horizontal)
-        switchInput.setContentCompressionResistancePriority(.required, for: .horizontal)
-        switchInput.control.addTarget(self, action: #selector(enabledChanged), for: .valueChanged)
-
-        let row = UIStackView(arrangedSubviews: [logo, title, switchInput])
-        row.axis = .horizontal
-        row.alignment = .center
-        row.spacing = 12
-        row.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(row)
-        logoSize = [
-            logo.widthAnchor.constraint(equalToConstant: 20),
-            logo.heightAnchor.constraint(equalToConstant: 20),
-        ]
-        NSLayoutConstraint.activate(logoSize + [
-            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: SettingsVisualMetrics.rowHorizontalPadding),
-            row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: SettingsVisualMetrics.rowVerticalPadding),
-            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -SettingsVisualMetrics.rowVerticalPadding),
-            contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: SettingsVisualMetrics.rowHeight),
-        ])
-        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (cell: MusicSearchPlatformCell, _: UITraitCollection) in
-            cell.updateMetrics()
-        }
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        onChange = nil
-        logo.image = nil
-        switchInput.control.accessibilityLabel = nil
-        switchInput.control.accessibilityIdentifier = nil
-    }
-
-    func configure(platform: MusicPublicBrowsePlatform, enabled: Bool, theme: PageTheme,
-                   first: Bool, last: Bool, identifier: String,
-                   onChange: @escaping @MainActor (Bool) -> Void) {
-        rowBackground.update(theme: theme, first: first, last: last, selected: false, settings: true, showsSeparator: !last)
-        if let assetName = platform.settingsLogoName,
-           let image = UIImage(named: assetName, in: .main, compatibleWith: traitCollection) {
-            logo.image = image.withRenderingMode(.alwaysOriginal)
-        } else {
-            logo.image = UIImage(systemName: "music.note")
-        }
-        logo.tintColor = UIColor(theme.settings.muted)
-        title.text = platform.title
-        title.textColor = UIColor(theme.settings.ink)
-        updateMetrics()
-        switchInput.applyTheme(theme)
-        switchInput.control.isOn = enabled
-        switchInput.control.accessibilityLabel = platform.title
-        switchInput.control.accessibilityIdentifier = identifier
-        self.onChange = onChange
-    }
-
-    private func updateMetrics() {
-        title.font = .preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
-        for constraint in logoSize { constraint.constant = max(20, title.font.lineHeight) }
-    }
-
-    @objc private func enabledChanged() { onChange?(switchInput.control.isOn) }
 }
 
 @MainActor

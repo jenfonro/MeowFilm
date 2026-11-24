@@ -18,8 +18,6 @@ public partial class EntryCard : UserControl
     public event RoutedEventHandler? OpenRequested;
     public event RoutedEventHandler? PlayRequested;
     public ObservableCollection<EntryPreviewRow> PreviewItems { get; } = [];
-    [ThreadStatic] private static SolidColorBrush? whiteForegroundBrush;
-    private static SolidColorBrush WhiteForegroundBrush => whiteForegroundBrush ??= DesktopVisual.Brush("#FFFFFF");
 
     private INotifyPropertyChanged? observed;
     private IDisposable? theme;
@@ -111,7 +109,7 @@ public partial class EntryCard : UserControl
         }
         highContrast = nextContrast;
         if (!changed) return;
-        Foreground = highContrast ? SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.WindowText) : WhiteForegroundBrush;
+        Foreground = highContrast ? SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.WindowText) : DesktopVisual.WhiteBrush;
         Surface.Background = highContrast ? SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.Window) : entryPalette;
         var bottom = (Surface.Background as SolidColorBrush)?.Color ?? Microsoft.UI.Colors.Gray;
         BottomShade.Background = new LinearGradientBrush
