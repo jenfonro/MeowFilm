@@ -7,7 +7,7 @@
 授权保存在 App 共享 SQLite 的强类型平表 `windows_file_grants(grant_id, position, file_path, title)`，原生 owner 借用 `IStorageDatabase`，不持久化 JSON 信封或根行。
 
 - 每条授权按稳定主键 `grant_id` 索引保存 `position`、`file_path` 与 `title`。
-- `Path` 必须是规范化的普通本地绝对路径，不能是 UNC、设备路径或 reparse 路径，扩展名必须属于构造时固定白名单。
+- `Path` 必须是经 `Path.GetFullPath` 规范化的完全限定本地路径，扩展名必须属于构造时固定白名单。
 - `Title` 必须等于当前路径的无扩展名文件名。
 - `Id` 固定为 `local:` 加规范路径大写不变量 UTF-8 的 SHA-256 小写十六进制摘要。
 - 单项解析按主键读取，不为播放读取全部授权。

@@ -283,8 +283,9 @@ private final class MusicCacheAudioInput: AudioByteInput, @unchecked Sendable {
     }
     func cancelReads() { lock.lock(); cancelled = true; lock.unlock() }
     func resumeReads() { lock.lock(); if !closed { cancelled = false }; lock.unlock() }
+    private func markClosed() { lock.lock(); closed = true; lock.unlock() }
     // Borrowed pinned descriptor: its caller owns file close after inspect.
-    func close() async throws { lock.lock(); closed = true; lock.unlock() }
+    func close() async throws { markClosed() }
 }
 
 /// Fail-closed structural checks complement native decoders that may tolerate

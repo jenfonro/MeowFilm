@@ -156,11 +156,16 @@ final class PlaybackAudioInput: AudioByteInput, @unchecked Sendable {
         lock.unlock()
     }
 
-    func close() async throws {
+    private func markClosedAndSnapshotReads() -> [Task<Void, Never>] {
         lock.lock()
         closed = true
-        let reads = Array(reads.values)
+        let activeReads = Array(reads.values)
         lock.unlock()
+        return activeReads
+    }
+
+    func close() async throws {
+        let reads = markClosedAndSnapshotReads()
         cancelReads()
         source?.retire()
         route?.invalidate()

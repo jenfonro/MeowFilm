@@ -141,6 +141,13 @@ struct MeowfilmResources: Sendable {
         }
         try await musicSourceDiscoveryCache.clear()
         try musicHomeSnapshot.clear()
-        _ = try? await musicPlatform.clear(platform: nil)
+        do {
+            try await musicPlatform.clear(platform: nil)
+        } catch {
+            let failure = MusicPlatformClient.error(error)
+            if failure != .closed && failure != .unavailable && failure != .timeout {
+                throw error
+            }
+        }
     }
 }

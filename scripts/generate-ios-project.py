@@ -152,7 +152,7 @@ def generate():
     }
     info_file = "Info-Meowfilm.plist"
     (ROOT / "apps/ios" / info_file).write_bytes(plistlib.dumps(app_info, sort_keys=False))
-    # Local Simulator ad-hoc signing needs an application identity for Keychain.
+    # Local Simulator ad-hoc signing needs an application identity.
     # This file is selected ONLY by the Simulator SDK, never the unsigned
     # iphoneos beta or an AltStore/device signing configuration.
     simulator_entitlements = "Meowfilm-Simulator.entitlements"

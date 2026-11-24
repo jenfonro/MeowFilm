@@ -72,7 +72,7 @@ KV 不设单值、site 或安装的字节/键数配额，也不设键字符串�
 
 ## 网络与承载
 
-源码下载默认使用 `createSourceDownload({maxRedirects:0})`。保留 HTTPS `.js` URL、无凭据/fragment、拒绝重定向、只接受200、30秒期限。源码实际传输及显式解压不设人为字节配额；取消等待 request/response/socket/解压流的真实完成。
+源码下载默认使用 `createSourceDownload()`（默认 `maxRedirects: 5`）。保留 HTTP(S) `.js` URL、无凭据/fragment、重定向目标沿用同一 `sourceURL` 校验、只接受200、30秒期限。源码实际传输及显式解压不设人为字节配额；取消等待 request/response/socket/解压流的真实完成。
 
 普通 guest 网络仍使用 `createNodeNetwork`，只验证 HTTP(S) 语法，不设域名或私网授权名单，不设响应字节配额。LX request 的回调、字节和取消语义保持；followRedirect=false 禁止跳转，true 与 follow_max 遵守既有重定向上限，retry 不启动宿主重放。
 
