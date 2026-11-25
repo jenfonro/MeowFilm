@@ -21,7 +21,7 @@ public sealed partial class MusicLyricsController
 
     public string DesktopLyricText => !playbackPort.OwnsCurrent || !playback.HasMedia ? "未在播放" :
         ActiveLyricIndex is var index && index >= 0 ? Lyrics[index].Text :
-        lyricStatus.Length > 0 ? lyricStatus : CanCancelLyrics ? "正在加载歌词" :
+        lyricStatus.Length > 0 ? lyricStatus : IsLoadingLyrics || CanCancelLyrics ? "正在加载歌词" :
         Lyrics.Count > 0 ? "前奏" : "暂无歌词";
     public string DesktopLyricTranslation => showLyricTranslation && playbackPort.OwnsCurrent && playback.HasMedia &&
         ActiveLyricIndex is var index && index >= 0 ? Lyrics[index].Translation : "";

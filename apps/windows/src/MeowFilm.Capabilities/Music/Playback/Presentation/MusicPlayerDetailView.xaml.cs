@@ -192,10 +192,9 @@ public partial class MusicPlayerDetailView : UserControl
 
     internal bool BrowseLyric(VirtualKey key)
     {
-        if (!IsVisible || GetLyricScroll() is not { } scroll) return false;
+        if (!IsVisible || Lyrics.Lyrics.Count == 0 || GetLyricScroll() is not { } scroll) return false;
         if (key is VirtualKey.Home or VirtualKey.End)
         {
-            if (Lyrics.Lyrics.Count == 0) return false;
             BrowseLyrics(scroll, 0, key == VirtualKey.Home ? 0 : Lyrics.Lyrics.Count - 1);
             return true;
         }
@@ -211,7 +210,7 @@ public partial class MusicPlayerDetailView : UserControl
 
     internal bool BrowseLyricWheel(int delta)
     {
-        if (!IsVisible || GetLyricScroll() is not { } scroll) return false;
+        if (!IsVisible || Lyrics.Lyrics.Count == 0 || GetLyricScroll() is not { } scroll) return false;
         int lines = DesktopSystemSettings.WheelScrollLines;
         double distance = lines < 0 ? scroll.ViewportHeight : lines * 24d;
         BrowseLyrics(scroll, -delta / 120d * distance); return true;
@@ -357,29 +356,35 @@ public partial class MusicPlayerDetailView : UserControl
 
     private void OnCenteredRowSizeChanged(object sender, SizeChangedEventArgs e)
     {
+        if (GetLyricScroll() is { ViewportHeight: > 0 } scroll) SyncLyricSpaces(scroll);
         InvalidateLyricCenter();
         QueueLyricAlignment();
     }
 
-    private void UpdateLyricViewport()
+    private bool SyncLyricSpaces(ScrollViewer scroll)
     {
-        if (GetLyricScroll() is not { ViewportHeight: > 0 } scroll) return;
-        bool changed = false;
-        if (lyricViewportHeight != scroll.ViewportHeight)
-        {
-            InvalidateLyricCenter();
-            lyricViewportHeight = scroll.ViewportHeight;
-            changed = true;
-        }
         if (LyricList.ContainerFromIndex(0) is FrameworkElement { ActualHeight: > 0 } firstRow)
             lastFirstLyricHeight = firstRow.ActualHeight;
         if (Lyrics.Lyrics.Count > 0 && LyricList.ContainerFromIndex(Lyrics.Lyrics.Count - 1) is FrameworkElement { ActualHeight: > 0 } lastRow)
             lastLastLyricHeight = lastRow.ActualHeight;
         var leading = Math.Max(0, scroll.ViewportHeight / 2 - lastFirstLyricHeight / 2);
         var trailing = Math.Max(0, scroll.ViewportHeight / 2 - lastLastLyricHeight / 2);
+        bool changed = false;
         if (Math.Abs(LyricLeadingSpace.Height - leading) >= .5) { LyricLeadingSpace.Height = leading; changed = true; }
         if (Math.Abs(LyricTrailingSpace.Height - trailing) >= .5) { LyricTrailingSpace.Height = trailing; changed = true; }
-        if (changed && (Lyrics.HasLyricPreview || !lyricResumeTimer.IsEnabled)) QueueLyricAlignment();
+        return changed;
+    }
+
+    private void UpdateLyricViewport()
+    {
+        if (GetLyricScroll() is not { ViewportHeight: > 0 } scroll) return;
+        bool changed = lyricViewportHeight != scroll.ViewportHeight;
+        lyricViewportHeight = scroll.ViewportHeight;
+        if (SyncLyricSpaces(scroll) || changed)
+        {
+            InvalidateLyricCenter();
+            if (Lyrics.HasLyricPreview || !lyricResumeTimer.IsEnabled) QueueLyricAlignment();
+        }
     }
 
     private void SyncNeedle()
@@ -551,6 +556,7 @@ public partial class MusicPlayerDetailView : UserControl
             }
             return;
         }
+        if (SyncLyricSpaces(scroll)) scroll.UpdateLayout();
         var absoluteCenter = scroll.VerticalOffset +
             row.TransformToVisual(scroll).TransformPoint(new Point(0, row.ActualHeight / 2)).Y;
         var epoch = ++lyricMotionEpoch;

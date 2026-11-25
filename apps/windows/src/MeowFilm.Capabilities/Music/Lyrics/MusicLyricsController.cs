@@ -66,13 +66,12 @@ public sealed partial class MusicLyricsController : MusicController,
     public ObservableCollection<MusicLyricSourceRow> LyricSources { get; } = [];
     public bool LyricsEnabled { get; set; } = true;
     public bool IsLyrics => playerDetailOpen;
+    public bool IsLoadingLyrics => lyricLoadingIdentity is not null && Lyrics.Count == 0;
     public string LyricStatus => lyricStatus;
     public bool CanCancelLyrics => lyricCancellation is not null;
     public bool CanImportLocalLyrics => CanEdit && playbackPort.CurrentSong is not null;
     public bool CanRemoveLocalLyrics => CanImportLocalLyrics && hasLocalLyrics;
     public bool HasLyricPreview => lyricPreview is not null;
-    public MusicLyricRow? FirstLyric => Lyrics.Count > 0 ? Lyrics[0] : null;
-    public MusicLyricRow? LastLyric => Lyrics.Count > 0 ? Lyrics[^1] : null;
     public bool CanConfirmLyricPreview => HasLyricPreview && playbackPort.CanSeek;
     public string LyricPreviewTime => lyricPreview is { } row
         ? MusicPlaybackClock.FormatClock(LyricAudioPosition(row)).PadLeft(5, '0') : "";
@@ -120,6 +119,7 @@ public sealed partial class MusicLyricsController : MusicController,
 
     internal void LyricStatusBindings()
     {
+        Changed(nameof(IsLoadingLyrics));
         Changed(nameof(LyricStatus));
         LyricTimingBindings();
         DesktopLyricBindings();
@@ -128,13 +128,6 @@ public sealed partial class MusicLyricsController : MusicController,
 
     private void OnLyricRowsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        if (e.Action == NotifyCollectionChangedAction.Reset || e.NewStartingIndex == 0 || e.OldStartingIndex == 0)
-            Changed(nameof(FirstLyric));
-        var newTail = e.NewStartingIndex >= 0 && e.NewStartingIndex + (e.NewItems?.Count ?? 0) == Lyrics.Count;
-        var removedTail = e.Action == NotifyCollectionChangedAction.Remove && e.OldStartingIndex == Lyrics.Count;
-        var movedTail = e.Action == NotifyCollectionChangedAction.Move && e.OldStartingIndex == Lyrics.Count - 1;
-        if (e.Action == NotifyCollectionChangedAction.Reset || newTail || removedTail || movedTail)
-            Changed(nameof(LastLyric));
         if (suppressRowTimingNotifications) return;
         LyricTimingBindings();
         DesktopLyricBindings();
@@ -269,10 +262,12 @@ public sealed partial class MusicLyricsController : MusicController,
         Changed(nameof(SelectedLyricSource));
     }
 
-    internal void RetireLyrics(string status = "")
+    internal void RetireLyrics(string status = "") => RetireLyrics(status, null);
+
+    private void RetireLyrics(string status, LyricRequestIdentity? loading)
     {
         lyricEpoch++;
-        lyricLoadingIdentity = null;
+        lyricLoadingIdentity = loading;
         lyricPublishedIdentity = null;
         lyricCancellation?.Cancel();
         if (hasLocalLyrics) { hasLocalLyrics = false; Changed(nameof(CanRemoveLocalLyrics)); }
@@ -397,9 +392,8 @@ public sealed partial class MusicLyricsController : MusicController,
         }
 
         var previous = lyricLoadTail;
-        RetireLyrics("加载中…");
+        RetireLyrics("", identity);
         var epoch = lyricEpoch;
-        lyricLoadingIdentity = identity;
         var task = Read();
         lyricLoadTail = task;
         loadDrains.Add(task);
@@ -457,6 +451,8 @@ public sealed partial class MusicLyricsController : MusicController,
                 suppressRowTimingNotifications = true;
                 try { lyricRows.Publish(rows); }
                 finally { suppressRowTimingNotifications = false; }
+                lyricLoadingIdentity = null;
+                lyricPublishedIdentity = identity;
                 lyricStatus = rows.Length == 0 ? "暂无歌词" : "";
                 LyricStatusBindings();
                 published = true;
