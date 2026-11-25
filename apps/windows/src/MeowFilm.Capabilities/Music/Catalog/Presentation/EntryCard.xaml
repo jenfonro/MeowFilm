@@ -45,7 +45,7 @@
    </StackPanel>
   </Canvas>
   <Button x:Name="OpenButton" Grid.RowSpan="2" Click="Open_Click" IsEnabled="{x:Bind Card.CanOpen,Mode=OneWay,FallbackValue=False}" Background="Transparent" BorderThickness="0" Padding="0" Margin="0" MinWidth="0" MinHeight="0" UseSystemFocusVisuals="True" Template="{StaticResource MeowFilm.ContentButtonTemplate}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" AutomationProperties.Name="{x:Bind Card.Title,Mode=OneWay,TargetNullValue=''}"/>
-  <Button x:Name="PlayButton" Background="Transparent" BorderThickness="0" Padding="0" MinWidth="0" MinHeight="0" UseSystemFocusVisuals="True" Template="{StaticResource MeowFilm.ContentButtonTemplate}" Width="36" Height="36" Margin="0,0,10,10" HorizontalAlignment="Right" VerticalAlignment="Bottom" Click="Play_Click" IsEnabled="{x:Bind Card.CanPlay,Mode=OneWay,FallbackValue=False}" AutomationProperties.Name="{x:Bind Card.Title,Mode=OneWay,TargetNullValue=''}" Opacity="0">
+  <Button x:Name="PlayButton" Style="{StaticResource MeowFilm.GhostButton}" RequestedTheme="Dark" Width="36" Height="36" MinWidth="36" MinHeight="36" Padding="0" CornerRadius="18" Margin="0,0,10,10" HorizontalAlignment="Right" VerticalAlignment="Bottom" Click="Play_Click" IsEnabled="{x:Bind Card.CanPlay,Mode=OneWay,FallbackValue=False}" AutomationProperties.Name="{x:Bind Card.Title,Mode=OneWay,TargetNullValue=''}" Opacity="0">
    <local:CardPlayGlyph IsBusy="{x:Bind Card.IsPreparing,Mode=OneWay,FallbackValue=False}" Foreground="{x:Bind Foreground,Mode=OneWay}"/>
   </Button>
  </Grid>

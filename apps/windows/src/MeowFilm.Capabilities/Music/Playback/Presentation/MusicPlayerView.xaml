@@ -17,16 +17,16 @@
   <MenuFlyout x:Name="ModeMenu" Placement="Top" MenuFlyoutPresenterStyle="{StaticResource MeowFilm.ContextMenu}"/>
   <MenuFlyout x:Name="QualityMenu" Placement="Top" MenuFlyoutPresenterStyle="{StaticResource MeowFilm.ContextMenu}"/>
   <MenuFlyout x:Name="MoreMenu" Placement="Top" MenuFlyoutPresenterStyle="{StaticResource MeowFilm.ContextMenu}"/>
-  <Flyout x:Name="PlaylistPopup" Placement="Top">
+  <Flyout x:Name="PlaylistPopup" Placement="Top" FlyoutPresenterStyle="{StaticResource MeowFilm.PopupFlyoutPresenter}">
    <ScrollViewer MaxHeight="300" MinWidth="180"><ItemsControl ItemsSource="{x:Bind Library.Playlists}"><ItemsControl.ItemTemplate><DataTemplate x:DataType="local:PlaylistRow">
     <Button Tag="{x:Bind Id}" Content="{x:Bind Name}" Click="AddCurrent_Click" HorizontalAlignment="Stretch"/>
    </DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer>
   </Flyout>
-  <Flyout x:Name="VolumePopup" Placement="Top"><StackPanel Width="180">
+  <Flyout x:Name="VolumePopup" Placement="Top" FlyoutPresenterStyle="{StaticResource MeowFilm.PopupFlyoutPresenter}"><StackPanel Width="180">
    <TextBlock Text="音量" Margin="0,0,0,8"/>
    <Slider x:Name="VolumeSlider" Minimum="0" Maximum="100" StepFrequency="1" Value="{x:Bind ToVolumeDouble(Playback.Volume),Mode=TwoWay,BindBack=FromVolumeDouble}" PointerReleased="VolumeCommit_PointerReleased" KeyUp="VolumeCommit_KeyUp" AutomationProperties.Name="音量"/>
   </StackPanel></Flyout>
-  <Flyout x:Name="RatePopup" Placement="Top"><StackPanel Width="210">
+  <Flyout x:Name="RatePopup" Placement="Top" FlyoutPresenterStyle="{StaticResource MeowFilm.PopupFlyoutPresenter}"><StackPanel Width="210">
    <TextBlock Text="播放倍速" Margin="0,0,0,8"/>
    <Slider x:Name="RateSlider" Minimum="0.5" Maximum="3" StepFrequency="0.1" Value="{x:Bind Playback.PlaybackRate,Mode=OneWay}" IsEnabled="{x:Bind Playback.CanChangePlaybackRate,Mode=OneWay}" PointerReleased="Rate_PointerReleased" KeyUp="Rate_KeyUp" AutomationProperties.Name="播放倍速"/>
    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Button Content="−" FontSize="16" Click="RateDown_Click" IsEnabled="{x:Bind Playback.CanChangePlaybackRate,Mode=OneWay}" AutomationProperties.Name="降低播放倍速"/><Button Content="1.0×" FontSize="12" Click="RateReset_Click" IsEnabled="{x:Bind Playback.CanChangePlaybackRate,Mode=OneWay}" AutomationProperties.Name="恢复正常播放倍速"/><Button Content="+" FontSize="16" Click="RateUp_Click" IsEnabled="{x:Bind Playback.CanChangePlaybackRate,Mode=OneWay}" AutomationProperties.Name="提高播放倍速"/></StackPanel>

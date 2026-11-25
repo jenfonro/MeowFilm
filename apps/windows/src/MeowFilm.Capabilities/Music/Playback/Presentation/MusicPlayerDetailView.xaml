@@ -109,7 +109,7 @@
    <Grid x:Name="LyricViewport" Grid.Row="2" Margin="-76,0,0,0">
     <Grid x:Name="LyricFadeViewport">
    <local:MusicLyricList x:Name="LyricList" Background="Transparent" BorderThickness="0" Padding="0" Position="{x:Bind Lyrics.LyricPositionSeconds,Mode=OneWay}" IsPlaying="{x:Bind Playback.IsPlaying,Mode=OneWay}" PlaybackRate="{x:Bind Playback.AcceptedPlaybackRate,Mode=OneWay}" PresentationKey="{x:Bind Playback.PlaybackPresentationKey,Mode=OneWay}" ItemsSource="{x:Bind Lyrics.Lyrics}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Hidden" AutomationProperties.Name="歌词">
-     <ListView.Header><Border x:Name="LyricLeadingSpace"/></ListView.Header><ListView.Footer><Border x:Name="LyricTrailingSpace"/></ListView.Footer>
+     <ListView.Header><Border x:Name="LyricLeadingSpace" Height="0"/></ListView.Header><ListView.Footer><Border x:Name="LyricTrailingSpace" Height="0"/></ListView.Footer>
      <ListView.ItemContainerStyle><Style TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.ContentListItem}"><Setter Property="IsHitTestVisible" Value="False"/></Style></ListView.ItemContainerStyle>
      <ListView.ItemTemplate><DataTemplate x:DataType="local:MusicLyricRow"><local:MusicLyricRowView/></DataTemplate></ListView.ItemTemplate>
     </local:MusicLyricList>
@@ -120,7 +120,8 @@
      <StackPanel Orientation="Horizontal" Spacing="4"><FontIcon Glyph="&#xE768;" FontSize="9"/><TextBlock Text="{x:Bind Lyrics.LyricPreviewTime,Mode=OneWay}" FontSize="12"/></StackPanel>
      </Button>
     </Border>
-   <TextBlock x:Name="LyricState" Text="{x:Bind Lyrics.LyricStatus,Mode=OneWay}" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
+   <ProgressRing x:Name="LyricLoadingRing" x:Load="{x:Bind Lyrics.IsLoadingLyrics,Mode=OneWay}" Margin="76,0,16,0" IsActive="True" AutomationProperties.Name="正在加载歌词"/>
+   <TextBlock x:Name="LyricState" Text="{x:Bind Lyrics.LyricStatus,Mode=OneWay}" FontSize="20" Margin="76,0,16,0" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
    </Grid>
    <StackPanel x:Name="LyricControlRail" Grid.Column="1" Grid.Row="2" Margin="12,16,0,0" VerticalAlignment="Top">
     <StackPanel x:Name="LyricTimingRail">

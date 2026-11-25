@@ -86,6 +86,13 @@
    <SolidColorBrush x:Key="MeowFilm.Brush.WindowCaptionCloseHoverBackground" Color="#C42B1C"/>
    <SolidColorBrush x:Key="MeowFilm.Brush.WindowCaptionClosePressedBackground" Color="#B3261E"/>
    <SolidColorBrush x:Key="MeowFilm.Brush.WindowCaptionCloseHoverForeground" Color="#FFFFFF"/>
+   <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="#FFFFFF"/>
+   <SolidColorBrush x:Key="MenuFlyoutPresenterBorderBrush" Color="#D1D5DB"/>
+   <SolidColorBrush x:Key="MenuFlyoutItemBackgroundPointerOver" Color="#10000000"/>
+   <SolidColorBrush x:Key="MenuFlyoutItemBackgroundPressed" Color="#1C000000"/>
+   <SolidColorBrush x:Key="MenuFlyoutItemForeground" Color="#374151"/>
+   <SolidColorBrush x:Key="MenuFlyoutItemForegroundPointerOver" Color="#111827"/>
+   <SolidColorBrush x:Key="MenuFlyoutItemForegroundPressed" Color="#111827"/>
   </ResourceDictionary>
   <ResourceDictionary x:Key="HighContrast">
    <SolidColorBrush x:Key="MeowFilm.Brush.Window" Color="{ThemeResource SystemColorWindowColor}"/>
@@ -167,8 +174,8 @@
  <Style x:Key="MeowFilm.DialogHost" TargetType="Grid"><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.DialogScrim}"/></Style>
  <Style x:Key="MeowFilm.DialogFooter" TargetType="Border"><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/></Style>
  <Style x:Key="MeowFilm.FloatingSurface" TargetType="Border"><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.FloatingSurface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="10"/></Style>
- <Style x:Key="MeowFilm.MenuItem" TargetType="MenuFlyoutItem"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="Background" Value="Transparent"/><Setter Property="Padding" Value="8,7"/></Style>
- <Style x:Key="MeowFilm.ContextMenu" TargetType="MenuFlyoutPresenter"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="UseLayoutRounding" Value="True"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/></Style>
+ <Style x:Key="MeowFilm.MenuItem" TargetType="MenuFlyoutItem"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="Background" Value="Transparent"/><Setter Property="Padding" Value="8,7"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ContextMenu" TargetType="MenuFlyoutPresenter"><Setter Property="RequestedTheme" Value="Light"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.FloatingSurface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="10"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="UseLayoutRounding" Value="True"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
  <Style x:Key="MeowFilm.SettingsPage" TargetType="Grid"><Setter Property="Margin" Value="32,0,32,12"/></Style>
  <Style x:Key="MeowFilm.SettingsNavigationBar" TargetType="Border"><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="0,0,0,1"/></Style>
  <Style x:Key="MeowFilm.ManagementTitleRow" TargetType="StackPanel"><Setter Property="Orientation" Value="Horizontal"/><Setter Property="Margin" Value="0,8,0,8"/></Style>
@@ -448,11 +455,14 @@
    </Setter.Value>
   </Setter>
  </Style>
- <Style x:Key="MeowFilm.FlyoutPresenter" TargetType="FlyoutPresenter">
+ <Style x:Key="MeowFilm.PopupFlyoutPresenter" TargetType="FlyoutPresenter">
+  <Setter Property="RequestedTheme" Value="Light"/>
   <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.FloatingSurface}"/>
   <Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/>
   <Setter Property="BorderThickness" Value="1"/>
   <Setter Property="CornerRadius" Value="12"/>
+ </Style>
+ <Style x:Key="MeowFilm.FlyoutPresenter" TargetType="FlyoutPresenter" BasedOn="{StaticResource MeowFilm.PopupFlyoutPresenter}">
   <Setter Property="Padding" Value="0"/>
  </Style>
  <Style x:Key="MeowFilm.BareListViewItem" TargetType="ListViewItem">
@@ -480,6 +490,14 @@
   <Setter Property="Padding" Value="0"/>
   <Setter Property="MinHeight" Value="0"/>
  </Style>
+ <Style x:Key="MeowFilm.LoadingRing" TargetType="ProgressRing">
+  <Setter Property="Width" Value="32"/>
+  <Setter Property="Height" Value="32"/>
+  <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Accent}"/>
+  <Setter Property="HorizontalAlignment" Value="Center"/>
+  <Setter Property="VerticalAlignment" Value="Center"/>
+  <Setter Property="IsHitTestVisible" Value="False"/>
+ </Style>
  <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}"/>
  <Style TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}"/>
  <Style TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}"/>
@@ -487,4 +505,6 @@
  <Style TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}"/>
  <Style TargetType="MenuFlyoutItem" BasedOn="{StaticResource MeowFilm.MenuItem}"/>
  <Style TargetType="MenuFlyoutPresenter" BasedOn="{StaticResource MeowFilm.ContextMenu}"/>
+ <Style TargetType="FlyoutPresenter" BasedOn="{StaticResource MeowFilm.PopupFlyoutPresenter}"/>
+ <Style TargetType="ProgressRing" BasedOn="{StaticResource MeowFilm.LoadingRing}"/>
 </ResourceDictionary>

@@ -3,6 +3,7 @@ using System.Collections.Specialized;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Windows.Foundation;
 using Windows.System;
 using MeowFilm.Desktop;
 
@@ -152,13 +153,21 @@ public partial class Shelf : UserControl
     internal static (int Count, double Width) MeasureCards(double width, double target, double gap, bool banner = false)
     { int count = banner ? 2 : Math.Max(1, (int)Math.Floor((width + gap) / (target + gap))); return (count, Math.Max(1, (width + gap) / count)); }
 
-    private void UpdateLayoutMetrics()
+    protected override Size MeasureOverride(Size availableSize)
     {
-        if (!IsLoaded || !DesktopVisual.IsVisible(this) || ItemsHost.ActualWidth <= 0) return;
+        if (double.IsFinite(availableSize.Width) && availableSize.Width > 0) UpdateLayoutMetrics(availableSize.Width);
+        return base.MeasureOverride(availableSize);
+    }
+
+    private void UpdateLayoutMetrics() => UpdateLayoutMetrics(ItemsHost.ActualWidth);
+
+    private void UpdateLayoutMetrics(double hostWidth)
+    {
+        if (!IsLoaded || !DesktopVisual.IsVisible(this) || hostWidth <= 0) return;
         var (target, gap) = LayoutMetrics(); double previous = CardWidth, oldMaximum = MaximumOffset;
-        var (count, pitch) = MeasureCards(ItemsHost.ActualWidth, target, gap, IsBanner);
+        var (count, pitch) = MeasureCards(hostWidth, target, gap, IsBanner);
         if (ItemsHost.ItemsPanelRoot is ItemsWrapGrid grid) grid.ItemWidth = pitch;
-        if (count == visibleCards && pitch == previous) { UpdateButtons(); return; }
+        if (count == visibleCards && Math.Abs(pitch - previous) <= 0.01) { UpdateButtons(); return; }
         double old = targetOffset ?? PresentedOffset; visibleCards = count; CardWidth = pitch;
         for (int i = 0; i < ItemsHost.Items.Count; i++) if (ItemsHost.ContainerFromIndex(i) is ListViewItem item) SizeCard(item);
         double next = oldMaximum > .5 && oldMaximum - old < .5 ? MaximumOffset : Math.Round(old / previous) * pitch;

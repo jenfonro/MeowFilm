@@ -7,9 +7,16 @@
   <Setter Property="HorizontalAlignment" Value="Stretch"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/>
   <Setter Property="VerticalContentAlignment" Value="Stretch"/><Setter Property="Template" Value="{StaticResource MeowFilm.ContentButtonTemplate}"/>
  </Style>
- <Style x:Key="Card.ActionButton" TargetType="Button">
-  <Setter Property="Padding" Value="6"/><Setter Property="Margin" Value="2,0"/>
-  <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
+ <Style x:Key="Card.ActionButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}">
+  <Setter Property="MinWidth" Value="0"/><Setter Property="MinHeight" Value="28"/>
+  <Setter Property="Padding" Value="8,4"/><Setter Property="Margin" Value="2,0"/><Setter Property="CornerRadius" Value="14"/>
+ </Style>
+ <Style x:Key="Card.PlayButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}">
+  <Setter Property="RequestedTheme" Value="Dark"/>
+  <Setter Property="Width" Value="44"/><Setter Property="Height" Value="44"/>
+  <Setter Property="MinWidth" Value="44"/><Setter Property="MinHeight" Value="44"/>
+  <Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0"/><Setter Property="CornerRadius" Value="22"/>
+  <Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="VerticalAlignment" Value="Center"/>
  </Style>
  <ItemsPanelTemplate x:Key="DefaultStackPanel"><StackPanel/></ItemsPanelTemplate>
  <ItemsPanelTemplate x:Key="GridCardsPanel"><local:AdaptiveCardPanel MinimumCardWidth="124" MaximumCardWidth="168" RowGap="16"/></ItemsPanelTemplate>
@@ -76,7 +83,7 @@
       <art:ArtworkImage ResourceSlot="third" Address="{x:Bind ThirdPreviewCover,Mode=OneWay}" DisplayIdentity="{x:Bind ThirdPreviewIdentity,Mode=OneWay}" Width="80" Height="80" Stretch="UniformToFill" Margin="12,12,-6,-4"/>
       <art:ArtworkImage ResourceSlot="second" Address="{x:Bind SecondPreviewCover,Mode=OneWay}" DisplayIdentity="{x:Bind SecondPreviewIdentity,Mode=OneWay}" Width="80" Height="80" Stretch="UniformToFill" Margin="6,6,-3,-2"/>
       <art:ArtworkImage ResourceSlot="first" Address="{x:Bind FirstPreviewCover,Mode=OneWay}" DisplayIdentity="{x:Bind FirstPreviewIdentity,Mode=OneWay}" Width="80" Height="80" Stretch="UniformToFill"/>
-      <Button Style="{StaticResource Card.ActionButton}" Width="44" Height="44" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
+      <Button Style="{StaticResource Card.PlayButton}" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
      </Grid>
      <ItemsControl Grid.Column="1" Margin="0,0,12,0" ItemsSource="{x:Bind TopPreviewSongs,Mode=OneWay}"><ItemsControl.ItemTemplate><DataTemplate x:DataType="local:MusicRankPreview"><TextBlock Text="{x:Bind DisplayLine}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
     </Grid>
@@ -91,7 +98,7 @@
      <art:ArtworkImage Address="{x:Bind Cover,Mode=OneWay}" DisplayIdentity="{x:Bind SongId,Mode=OneWay}" Stretch="UniformToFill"/>
      <TextBlock Text="{x:Bind Title,Mode=OneWay}" FontSize="18" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="10" Visibility="{x:Bind HasCover,Mode=OneWay,Converter={StaticResource MeowFilm.Visible},ConverterParameter=Not}"/>
      <Border Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False" Opacity="0" local:CardMotion.HoverOpacity="True" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"/>
-     <Button Style="{StaticResource Card.ActionButton}" Width="44" Height="44" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
+     <Button Style="{StaticResource Card.PlayButton}" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
     </Grid></local:AspectRatioDecorator>
     <TextBlock Text="{x:Bind Title,Mode=OneWay}" FontSize="13" LineHeight="19" LineStackingStrategy="BlockLineHeight" MaxLines="2" Height="40" VerticalAlignment="Top" Margin="0,8,0,0" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
    </StackPanel></Button>
@@ -104,7 +111,7 @@
    <Grid CornerRadius="8" Background="#E7EAF0" local:CardClip.Radius="8">
     <art:ArtworkImage Address="{x:Bind Cover,Mode=OneWay}" DisplayIdentity="{x:Bind SongId,Mode=OneWay}" Stretch="UniformToFill"/>
     <TextBlock Text="{x:Bind Title,Mode=OneWay}" FontSize="18" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="10" Visibility="{x:Bind HasCover,Mode=OneWay,Converter={StaticResource MeowFilm.Visible},ConverterParameter=Not}"/>
-    <Button Style="{StaticResource Card.ActionButton}" Width="44" Height="44" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
+    <Button Style="{StaticResource Card.PlayButton}" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
    </Grid>
   </local:AspectRatioDecorator></Button></Grid>
  </DataTemplate>
@@ -114,7 +121,7 @@
    <Grid CornerRadius="8" Background="#E7EAF0" local:CardClip.Radius="8">
     <art:ArtworkImage Address="{x:Bind Cover,Mode=OneWay}" DisplayIdentity="{x:Bind SongId,Mode=OneWay}" Stretch="Uniform"/>
     <TextBlock Text="{x:Bind Title,Mode=OneWay}" FontSize="18" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="10" Visibility="{x:Bind HasCover,Mode=OneWay,Converter={StaticResource MeowFilm.Visible},ConverterParameter=Not}"/>
-    <Button Style="{StaticResource Card.ActionButton}" Width="44" Height="44" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
+    <Button Style="{StaticResource Card.PlayButton}" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
    </Grid>
   </local:AspectRatioDecorator></Button></Grid>
  </DataTemplate>
@@ -124,7 +131,7 @@
    <local:AspectRatioDecorator AspectRatio="1,1"><Grid CornerRadius="1000" Background="#E7EAF0" local:CardClip.Radius="1000">
     <art:ArtworkImage Address="{x:Bind Cover,Mode=OneWay}" DisplayIdentity="{x:Bind SongId,Mode=OneWay}" Stretch="UniformToFill"/>
     <TextBlock Text="{x:Bind Title,Mode=OneWay}" FontSize="18" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="10" Visibility="{x:Bind HasCover,Mode=OneWay,Converter={StaticResource MeowFilm.Visible},ConverterParameter=Not}"/>
-    <Button Style="{StaticResource Card.ActionButton}" Width="44" Height="44" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
+    <Button Style="{StaticResource Card.PlayButton}" Opacity="0" IsHitTestVisible="False" local:CardMotion.HoverOpacity="True" local:CardMotion.HoverHitTest="True" AutomationProperties.Name="播放" IsEnabled="{x:Bind CanPlay,Mode=OneWay}" Visibility="{x:Bind CanPlay,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Click="Play_Click"><local:CardPlayGlyph Foreground="White" IsBusy="{x:Bind IsPreparing,Mode=OneWay}"/></Button>
    </Grid></local:AspectRatioDecorator>
    <TextBlock Text="{x:Bind Title,Mode=OneWay}" FontSize="13" LineHeight="19" LineStackingStrategy="BlockLineHeight" MaxLines="2" Height="40" VerticalAlignment="Top" Margin="0,8,0,0" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
    <TextBlock Text="{x:Bind Subtitle,Mode=OneWay}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>

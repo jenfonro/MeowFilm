@@ -290,13 +290,12 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
     public string Title => Definition.Title;
     public ObservableCollection<FilmCardItem> Items { get; } = [];
     public bool HasItems => Items.Count > 0;
-    public bool ShowSkeleton => !HasItems && state is FilmSectionState.Pending or FilmSectionState.Loading;
-    public bool ShowStatus => !HasItems && !ShowSkeleton;
+    public bool ShowLoading => !HasItems && state is FilmSectionState.Pending or FilmSectionState.Loading;
+    public bool ShowStatus => !HasItems && !ShowLoading;
     public bool CanRetry => state is FilmSectionState.Failed or FilmSectionState.Cancelled;
     public bool CanRefresh => state != FilmSectionState.Loading;
     public string StatusText => state switch
     {
-        FilmSectionState.Pending or FilmSectionState.Loading => "加载中…",
         FilmSectionState.Failed => "栏目加载失败",
         FilmSectionState.Cancelled => "加载已取消",
         FilmSectionState.Ready when Items.Count == 0 => "暂无数据",
@@ -336,7 +335,7 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
     {
         Changed(nameof(HasItems));
         Changed(nameof(ShowStatus));
-        Changed(nameof(ShowSkeleton));
+        Changed(nameof(ShowLoading));
         Changed(nameof(CanRetry));
         Changed(nameof(CanRefresh));
         Changed(nameof(StatusText));
@@ -375,8 +374,8 @@ public sealed class FilmDataSection : INotifyPropertyChanged
     public IReadOnlyList<FilmFilterRow> FilterRows { get; }
     public ObservableCollection<FilmCardItem> Items { get; } = [];
     public bool HasItems => Items.Count > 0;
-    public bool ShowSkeleton => !HasItems && state is FilmSectionState.Pending or FilmSectionState.Loading;
-    public bool ShowStatus => !HasItems && !ShowSkeleton;
+    public bool ShowLoading => !HasItems && state is FilmSectionState.Pending or FilmSectionState.Loading;
+    public bool ShowStatus => !HasItems && !ShowLoading;
     public bool CanRetry => !HasItems && state is FilmSectionState.Failed or FilmSectionState.Cancelled;
     public bool CanRefresh => state != FilmSectionState.Loading;
     public bool ShowPageAction => HasItems &&
@@ -391,7 +390,6 @@ public sealed class FilmDataSection : INotifyPropertyChanged
     };
     public string StatusText => state switch
     {
-        FilmSectionState.Pending or FilmSectionState.Loading => "加载中…",
         FilmSectionState.Failed => "影片数据加载失败",
         FilmSectionState.Cancelled => "加载已取消",
         FilmSectionState.Ready when Items.Count == 0 => "暂无数据",
@@ -483,7 +481,7 @@ public sealed class FilmDataSection : INotifyPropertyChanged
     {
         Changed(nameof(HasItems));
         Changed(nameof(ShowStatus));
-        Changed(nameof(ShowSkeleton));
+        Changed(nameof(ShowLoading));
         Changed(nameof(CanRetry));
         Changed(nameof(CanRefresh));
         Changed(nameof(ShowPageAction));

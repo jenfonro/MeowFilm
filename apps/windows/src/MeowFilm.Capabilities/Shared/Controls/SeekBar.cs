@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -22,6 +23,7 @@ public sealed class SeekBar : Slider
     private const double UpperEnvelope = 43;
     private const double DriftRecalibrateThresholdSeconds = 0.25;
     [ThreadStatic] private static SolidColorBrush? defaultPlayedBrush, defaultRailBrush, headStrokeBrush, previewForegroundBrush;
+    [ThreadStatic] private static FontFamily? previewFontFamily;
     private static SolidColorBrush DefaultPlayedBrush => defaultPlayedBrush ??= DesktopVisual.Brush("#808080");
     private static SolidColorBrush DefaultRailBrush => defaultRailBrush ??= DesktopVisual.Brush("#0D000000");
     private static SolidColorBrush DefaultHeadBrush => DesktopVisual.WhiteBrush;
@@ -29,12 +31,14 @@ public sealed class SeekBar : Slider
     private static SolidColorBrush HeadStrokeBrush => headStrokeBrush ??= new(Color.FromArgb(51, 0, 0, 0));
     private static SolidColorBrush PreviewForegroundBrush => previewForegroundBrush ??= new(Microsoft.UI.Colors.Black);
     private static SolidColorBrush PreviewBackgroundBrush => DesktopVisual.WhiteBrush;
+    private static FontFamily PreviewFontFamily => previewFontFamily ??= new("Segoe UI");
 
-    public static readonly DependencyProperty ChorusSecondsProperty = Property(nameof(ChorusSeconds), typeof(double), double.NaN);
-    public static readonly DependencyProperty PlayedBrushProperty = Property(nameof(PlayedBrush), typeof(Brush), null);
-    public static readonly DependencyProperty RailBrushProperty = Property(nameof(RailBrush), typeof(Brush), null);
-    public static readonly DependencyProperty RailAtTopProperty = Property(nameof(RailAtTop), typeof(bool), false);
-    public static readonly DependencyProperty CacheFractionProperty = Property(nameof(CacheFraction), typeof(double), 0d);
+    public static readonly DependencyProperty ChorusSecondsProperty = VisualProperty(nameof(ChorusSeconds), typeof(double), double.NaN);
+    public static readonly DependencyProperty PlayedBrushProperty = VisualProperty(nameof(PlayedBrush), typeof(Brush), null);
+    public static readonly DependencyProperty RailBrushProperty = VisualProperty(nameof(RailBrush), typeof(Brush), null);
+    public static readonly DependencyProperty RailAtTopProperty = VisualProperty(nameof(RailAtTop), typeof(bool), false);
+    public static readonly DependencyProperty CacheFractionProperty = DependencyProperty.Register(nameof(CacheFraction), typeof(double), typeof(SeekBar),
+        new PropertyMetadata(0d, (owner, _) => ((SeekBar)owner).UpdateCacheWidth()));
     public static readonly DependencyProperty IsPlayingProperty = Property(nameof(IsPlaying), typeof(bool), false);
     public static readonly DependencyProperty PlaybackRateProperty = Property(nameof(PlaybackRate), typeof(double?), null);
     public static readonly DependencyProperty PresentationKeyProperty = DependencyProperty.Register(nameof(PresentationKey), typeof(string), typeof(SeekBar),
@@ -42,6 +46,9 @@ public sealed class SeekBar : Slider
 
     private static DependencyProperty Property(string name, Type type, object? value) => DependencyProperty.Register(name, type, typeof(SeekBar),
         new PropertyMetadata(value, (owner, _) => ((SeekBar)owner).RefreshFull(resample: true)));
+
+    private static DependencyProperty VisualProperty(string name, Type type, object? value) => DependencyProperty.Register(name, type, typeof(SeekBar),
+        new PropertyMetadata(value, (owner, _) => ((SeekBar)owner).RefreshFull(resample: false)));
 
     public double ChorusSeconds { get => (double)GetValue(ChorusSecondsProperty); set => SetValue(ChorusSecondsProperty, value); }
     public Brush? PlayedBrush { get => (Brush?)GetValue(PlayedBrushProperty); set => SetValue(PlayedBrushProperty, value); }
@@ -53,32 +60,31 @@ public sealed class SeekBar : Slider
     public string PresentationKey { get => (string)GetValue(PresentationKeyProperty); set => SetValue(PresentationKeyProperty, value); }
 
     private Canvas? surface;
-    private readonly Rectangle rail = new() { Height = 2 }, cache = new() { Height = 2, Opacity = .28 },
+    private readonly Rectangle rail = new() { Height = 2 }, cache = new() { Width = 0, Height = 2, Opacity = .28 },
         played = new() { Height = 2 }, shade = new() { Height = 40 },
-        lowerHit = new() { Fill = TransparentBrush };
+        lowerHit = new() { Height = 16, Fill = TransparentBrush };
     private readonly Ellipse marker = new() { Width = 4, Height = 4 },
         head = new() { Width = 14, Height = 14, Stroke = HeadStrokeBrush, StrokeThickness = 1 };
     private readonly Visual railVisual, cacheVisual, playedVisual, headVisual, shadeVisual;
     private LinearEasingFunction? linearEasing;
     private ScalarKeyFrameAnimation? playedScaleAnimation, headTranslationAnimation;
-    private bool progressAnimating;
-    private double animStartFraction;
-    private double animRate;
-    private double animMin, animMax, animWidth;
-    private long sampledAt;
-    private long hoverAnimUntil;
-    private float currentHoverScaleY = 1f;
-    private float currentHeadOpacity;
-    private float currentShadeOpacity;
+    private bool progressAnimating, previewTicking;
+    private double animStartFraction, animRate, animMin, animMax, animWidth;
+    private long sampledAt, hoverAnimUntil;
+    private float currentHoverScaleY = 1f, currentHeadOpacity, currentShadeOpacity;
     private Color? cachedShadeTone;
     private LinearGradientBrush? cachedShadeBrush;
-    private double lastRenderedFraction = double.NaN;
-    private double lastRenderedHeadX = double.NaN;
-    private double lastLayoutWidth = double.NaN;
-    private double lastLayoutHeight = double.NaN;
+    private double lastRenderedFraction = -1, lastRenderedHeadX = -1, lastLayoutWidth = -1, lastLayoutHeight = -1;
     private bool? lastRailAtTop;
     private IDisposable? visibility;
-    private readonly TextBlock previewText = new() { FontSize = 12, Foreground = PreviewForegroundBrush };
+    private readonly TextBlock previewText = new()
+    {
+        FontSize = 12,
+        FontFamily = PreviewFontFamily,
+        Foreground = PreviewForegroundBrush,
+        HorizontalAlignment = HorizontalAlignment.Center,
+        VerticalAlignment = VerticalAlignment.Center
+    };
     private readonly Border preview = new()
     {
         CornerRadius = new CornerRadius(16),
@@ -87,11 +93,11 @@ public sealed class SeekBar : Slider
         IsHitTestVisible = false,
         Visibility = Visibility.Collapsed
     };
-    private bool pointerGesture, pointerWithin;
-    private bool hoverExpanded, hoverShade;
-    private string? lastPreviewText;
+    private bool pointerGesture, pointerWithin, hoverExpanded, hoverShade;
+    private long lastPreviewSec = -1, lastPreviewMaxSec = -1;
+    private int lastPreviewLength;
     private Size lastPreviewSize;
-    private double lastPreviewLeft = double.NaN, lastPreviewTop = double.NaN;
+    private double lastPreviewLeft = -1, lastPreviewTop = double.NaN;
 
     internal bool IsScrubbing { get; private set; }
     internal double DisplayValue => progressAnimating
@@ -109,6 +115,7 @@ public sealed class SeekBar : Slider
             template is ControlTemplate controlTemplate)
             Template = controlTemplate;
         MinHeight = 0; Height = 16; SmallChange = 5; LargeChange = 15; IsTabStop = true;
+        Typography.SetNumeralAlignment(previewText, FontNumeralAlignment.Tabular);
         ElementCompositionPreview.SetIsTranslationEnabled(head, true);
         railVisual = ElementCompositionPreview.GetElementVisual(rail);
         cacheVisual = ElementCompositionPreview.GetElementVisual(cache);
@@ -127,10 +134,11 @@ public sealed class SeekBar : Slider
         SizeChanged += (_, _) => RefreshFull(resample: false);
         Loaded += (_, _) =>
         {
+            ResetPreviewCache();
             visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
-                if (!visible) { pointerWithin = false; CancelScrub(); StopProgressAnimation(); StopHover(); ClosePreview(); }
+                if (!visible) { pointerWithin = false; CancelScrub(); StopProgressAnimation(); RefreshHover(false, false, false); ClosePreview(); }
                 RefreshFull(resample: false);
             });
             RefreshFull(resample: true);
@@ -139,34 +147,36 @@ public sealed class SeekBar : Slider
         {
             if (IsLoaded) return;
             visibility?.Dispose(); visibility = null;
-            pointerWithin = false; CancelScrub(); StopProgressAnimation(); StopHover(); ClosePreview();
+            pointerWithin = false; CancelScrub(); StopProgressAnimation(); RefreshHover(false, false, false); ClosePreview();
             DisposeAnimations();
         };
         RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => { if (!(!IsEnabled && CancelScrub())) RefreshFull(resample: false); });
         RegisterPropertyChangedCallback(MaximumProperty, (_, _) => RefreshFull(resample: true));
         RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => RefreshFull(resample: false));
         ActualThemeChanged += (_, _) => RefreshFull(resample: false);
-        PointerEntered += (_, _) => SetPointerWithin(true);
-        PointerExited += (_, _) => SetPointerWithin(false);
-        PointerPressed += (_, e) =>
-        {
-            if (!IsEnabled || !e.GetCurrentPoint(this).IsInContact || !CapturePointer(e.Pointer)) return;
-            e.Handled = true; Focus(FocusState.Pointer); pointerGesture = true; BeginScrub();
-            UpdateScrub(ValueAt(e.GetCurrentPoint(this).Position.X));
-        };
-        PointerMoved += (_, e) =>
-        {
-            if (pointerGesture && IsScrubbing) UpdateScrub(ValueAt(e.GetCurrentPoint(this).Position.X));
-        };
-        PointerReleased += (_, e) =>
-        {
-            if (!pointerGesture) return;
-            e.Handled = true; UpdateScrub(ValueAt(e.GetCurrentPoint(this).Position.X)); EndScrub(true);
-        };
-        PointerCaptureLost += (_, _) => { if (pointerGesture) CancelScrub(); };
-        KeyDown += OnSeekKeyDown; KeyUp += OnSeekKeyUp;
-        GotFocus += (_, _) => RefreshFull(resample: false);
+        GotFocus += (_, _) => { if (!pointerGesture) RefreshFull(resample: false); };
         LostFocus += (_, _) => { if (!CancelScrub()) RefreshFull(resample: false); };
+    }
+
+    protected override void OnPointerEntered(PointerRoutedEventArgs e) => SetPointerWithin(true);
+    protected override void OnPointerExited(PointerRoutedEventArgs e) => SetPointerWithin(false);
+    protected override void OnPointerMoved(PointerRoutedEventArgs e) { if (pointerGesture && IsScrubbing) UpdateScrub(ValueAt(e.GetCurrentPoint(this).Position.X)); }
+    protected override void OnPointerCaptureLost(PointerRoutedEventArgs e) { if (pointerGesture) CancelScrub(); }
+    protected override void OnPointerWheelChanged(PointerRoutedEventArgs e) { }
+    protected override void OnKeyDown(KeyRoutedEventArgs e) => e.Handled |= HandleSeekKey(e.Key, true, e.KeyStatus.WasKeyDown);
+    protected override void OnKeyUp(KeyRoutedEventArgs e) => e.Handled |= HandleSeekKey(e.Key, false);
+
+    protected override void OnPointerPressed(PointerRoutedEventArgs e)
+    {
+        if (!IsEnabled || !e.GetCurrentPoint(this).IsInContact || !CapturePointer(e.Pointer)) return;
+        e.Handled = true; pointerGesture = true; Focus(FocusState.Pointer); BeginScrub();
+        UpdateScrub(ValueAt(e.GetCurrentPoint(this).Position.X));
+    }
+
+    protected override void OnPointerReleased(PointerRoutedEventArgs e)
+    {
+        if (!pointerGesture) return;
+        e.Handled = true; UpdateScrub(ValueAt(e.GetCurrentPoint(this).Position.X)); EndScrub(true);
     }
 
     protected override void OnApplyTemplate()
@@ -183,30 +193,52 @@ public sealed class SeekBar : Slider
         surface.Children.Add(marker);
         surface.Children.Add(head);
         surface.Children.Add(preview);
-        lastLayoutWidth = lastLayoutHeight = double.NaN;
+        lastLayoutWidth = lastLayoutHeight = -1;
+        ResetPreviewCache();
         lastRailAtTop = null;
         RefreshFull(resample: true);
+    }
+
+    private void ResetPreviewCache()
+    {
+        lastPreviewSec = lastPreviewMaxSec = -1;
+        lastPreviewLength = 0;
+        lastPreviewLeft = -1;
+        lastPreviewTop = double.NaN;
     }
 
     private double Fraction(double value) => Maximum <= Minimum ? 0 : Math.Clamp((value - Minimum) / (Maximum - Minimum), 0, 1);
     private static double HeadX(double fraction, double width) => Math.Clamp(fraction * width, 7.5, Math.Max(7.5, width - 7.5)) - 7;
     internal double ValueAt(double x) => Minimum + Math.Clamp(x / Math.Max(1, ActualWidth), 0, 1) * (Maximum - Minimum);
 
+    private bool CanKeepProgressAnimation(double width, bool visible) =>
+        progressAnimating && !IsScrubbing && visible && IsPlaying && width > 0 &&
+        DesktopVisual.CanAnimate(this) && !string.IsNullOrEmpty(PresentationKey) &&
+        Math.Abs(animWidth - width) < 0.5 &&
+        Math.Abs(animMin - Minimum) < 1e-6 &&
+        Math.Abs(animMax - Maximum) < 1e-6 &&
+        PlaybackRate is { } rate && Math.Abs(rate - animRate) < 1e-6;
+
+    private void UpdateCacheWidth()
+    {
+        if (surface is null) return;
+        double width = Math.Max(0, ActualWidth);
+        double cacheWidth = width * (double.IsFinite(CacheFraction) ? Math.Clamp(CacheFraction, 0, 1) : 0);
+        if (Math.Abs(cache.Width - cacheWidth) > 0.1) cache.Width = cacheWidth;
+    }
+
     private void OnValueChanged()
     {
         if (surface is null) return;
         double width = Math.Max(0, ActualWidth);
-        if (progressAnimating && !IsScrubbing &&
-            Math.Abs(animWidth - width) < 0.5 &&
-            Math.Abs(animMin - Minimum) < 1e-6 &&
-            Math.Abs(animMax - Maximum) < 1e-6 &&
-            PlaybackRate is { } rate && Math.Abs(rate - animRate) < 1e-6 &&
+        bool visible = DesktopVisual.IsVisible(this);
+        if (CanKeepProgressAnimation(width, visible) &&
             Math.Abs(Value - DisplayValue) < DriftRecalibrateThresholdSeconds)
         {
-            if (pointerWithin) UpdatePreview();
+            if (pointerWithin && !previewTicking) UpdatePreview();
             return;
         }
-        SyncProgressVisuals(Value, width, DesktopVisual.IsVisible(this));
+        SyncProgressVisuals(Value, width, visible);
         if (IsEnabled && (pointerWithin || IsScrubbing)) UpdatePreview(Value);
     }
 
@@ -255,8 +287,9 @@ public sealed class SeekBar : Slider
             Canvas.SetTop(shade, y - 4 - 40);
             Canvas.SetTop(head, y - 7);
             Canvas.SetTop(marker, y - 2);
-            lastRenderedFraction = double.NaN;
-            lastRenderedHeadX = double.NaN;
+            lastRenderedFraction = -1;
+            lastRenderedHeadX = -1;
+            lastPreviewLeft = -1;
         }
 
         double hitTop = RailAtTop && interactive ? RailOrigin - 3 : RailOrigin;
@@ -287,8 +320,7 @@ public sealed class SeekBar : Slider
             if (!ReferenceEquals(shade.Fill, cachedShadeBrush)) shade.Fill = cachedShadeBrush;
         }
 
-        double cacheWidth = width * (double.IsFinite(CacheFraction) ? Math.Clamp(CacheFraction, 0, 1) : 0);
-        if (Math.Abs(cache.Width - cacheWidth) > 0.1) cache.Width = cacheWidth;
+        UpdateCacheWidth();
 
         bool showMarker = double.IsFinite(ChorusSeconds) && ChorusSeconds >= Minimum && ChorusSeconds < Maximum;
         var markerVis = showMarker ? Visibility.Visible : Visibility.Collapsed;
@@ -299,9 +331,11 @@ public sealed class SeekBar : Slider
             if (Math.Abs(Canvas.GetLeft(marker) - markerLeft) > 0.1) Canvas.SetLeft(marker, markerLeft);
         }
 
-        SyncProgressVisuals(display, width, visible);
+        if (resample || geometryChanged || !CanKeepProgressAnimation(width, visible))
+            SyncProgressVisuals(display, width, visible);
         RefreshHover(expanded, RailAtTop && interactive && !highContrast, visible && IsEnabled && !highContrast);
         if (interactive) UpdatePreview(display);
+        else ClosePreview();
     }
 
     private void SyncProgressVisuals(double display, double width, bool visible)
@@ -309,7 +343,7 @@ public sealed class SeekBar : Slider
         StopProgressAnimation();
         double fraction = Fraction(display);
         double headX = HeadX(fraction, width);
-        if (double.IsNaN(lastRenderedFraction) || Math.Abs(lastRenderedFraction - fraction) > 1e-5)
+        if (Math.Abs(lastRenderedFraction - fraction) > 1e-5)
         {
             if (Stopwatch.GetTimestamp() < hoverAnimUntil)
                 StartHoverScalar(playedVisual.Compositor, playedVisual, "Scale.X", (float)fraction, (float)fraction, TimeSpan.FromMilliseconds(1));
@@ -317,7 +351,7 @@ public sealed class SeekBar : Slider
                 playedVisual.Scale = new Vector3((float)fraction, currentHoverScaleY, 1f);
             lastRenderedFraction = fraction;
         }
-        if (double.IsNaN(lastRenderedHeadX) || Math.Abs(lastRenderedHeadX - headX) > 0.05)
+        if (Math.Abs(lastRenderedHeadX - headX) > 0.05)
         {
             headVisual.Properties.InsertVector3("Translation", new Vector3((float)headX, 0f, 0f));
             lastRenderedHeadX = headX;
@@ -359,8 +393,8 @@ public sealed class SeekBar : Slider
         animWidth = width;
         sampledAt = Stopwatch.GetTimestamp();
         progressAnimating = true;
-        lastRenderedFraction = double.NaN;
-        lastRenderedHeadX = double.NaN;
+        lastRenderedFraction = -1;
+        lastRenderedHeadX = -1;
     }
 
     private void StopProgressAnimation()
@@ -373,26 +407,6 @@ public sealed class SeekBar : Slider
         playedScaleAnimation = null;
         headTranslationAnimation?.Dispose();
         headTranslationAnimation = null;
-    }
-
-    private void StopHover()
-    {
-        hoverAnimUntil = 0;
-        hoverExpanded = hoverShade = false;
-        currentHoverScaleY = 1f;
-        currentHeadOpacity = 0f;
-        currentShadeOpacity = 0f;
-        railVisual.StopAnimation("Scale.Y");
-        cacheVisual.StopAnimation("Scale.Y");
-        playedVisual.StopAnimation("Scale.Y");
-        headVisual.StopAnimation("Opacity");
-        shadeVisual.StopAnimation("Opacity");
-        railVisual.Scale = new Vector3(1f, 1f, 1f);
-        cacheVisual.Scale = new Vector3(1f, 1f, 1f);
-        if (!progressAnimating)
-            playedVisual.Scale = new Vector3((float)Fraction(Value), 1f, 1f);
-        headVisual.Opacity = 0f;
-        shadeVisual.Opacity = 0f;
     }
 
     private void DisposeAnimations()
@@ -409,7 +423,6 @@ public sealed class SeekBar : Slider
     {
         if (pointerWithin == within) return;
         pointerWithin = within;
-        if (!within && !IsScrubbing) ClosePreview();
         RefreshFull(resample: false);
     }
 
@@ -464,13 +477,6 @@ public sealed class SeekBar : Slider
         visual.StartAnimation(property, animation);
     }
 
-    private void OnSeekKeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        e.Handled |= HandleSeekKey(e.Key, true, e.KeyStatus.WasKeyDown);
-    }
-
-    private void OnSeekKeyUp(object sender, KeyRoutedEventArgs e) => e.Handled |= HandleSeekKey(e.Key, false);
-
     internal bool HandleSeekKey(VirtualKey key, bool down, bool repeated = false)
     {
         if (down && key == VirtualKey.Escape && IsScrubbing) { CancelScrub(); return true; }
@@ -503,30 +509,56 @@ public sealed class SeekBar : Slider
     }
 
     internal bool CancelScrub() => EndScrub(false);
-    private void ClosePreview() => preview.Visibility = Visibility.Collapsed;
+
+    private void SyncPreviewTick(bool active)
+    {
+        if (previewTicking == active) return;
+        previewTicking = active;
+        if (active) CompositionTarget.Rendering += OnPreviewRendering;
+        else CompositionTarget.Rendering -= OnPreviewRendering;
+    }
+
+    private void OnPreviewRendering(object? sender, object e) => UpdatePreview();
+
+    private void ClosePreview()
+    {
+        SyncPreviewTick(false);
+        preview.Visibility = Visibility.Collapsed;
+    }
 
     private void UpdatePreview(double? display = null)
     {
         if (!IsEnabled || !DesktopVisual.IsVisible(this) || (!pointerWithin && !IsScrubbing)) { ClosePreview(); return; }
+        SyncPreviewTick(progressAnimating && !IsScrubbing);
+        double width = Math.Max(0, ActualWidth);
         double value = IsScrubbing ? Value : display ?? DisplayValue;
-        string text = Clock(value) + " / " + Clock(Maximum);
+        long sec = Math.Max(0, (long)Math.Floor(value)), maxSec = Math.Max(0, (long)Math.Floor(Maximum));
         if (preview.Visibility != Visibility.Visible) preview.Visibility = Visibility.Visible;
-        if (lastPreviewText != text)
+        if (sec != lastPreviewSec || maxSec != lastPreviewMaxSec || lastPreviewSize.Width <= 0)
         {
-            lastPreviewText = text;
+            lastPreviewSec = sec;
+            lastPreviewMaxSec = maxSec;
+            string text = $"{sec / 60:00}:{sec % 60:00} / {maxSec / 60:00}:{maxSec % 60:00}";
             previewText.Text = text;
-            preview.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            lastPreviewSize = preview.DesiredSize;
+            if (lastPreviewLength != text.Length || lastPreviewSize.Width <= 0)
+            {
+                lastPreviewLength = text.Length;
+                preview.ClearValue(WidthProperty);
+                preview.ClearValue(HeightProperty);
+                preview.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                lastPreviewSize = new Size(Math.Ceiling(preview.DesiredSize.Width), Math.Ceiling(preview.DesiredSize.Height));
+                preview.Width = lastPreviewSize.Width;
+                preview.Height = lastPreviewSize.Height;
+            }
         }
+        double scale = XamlRoot?.RasterizationScale ?? 1d;
         var size = lastPreviewSize;
-        double center = Math.Clamp(Fraction(value) * ActualWidth, 7.5, Math.Max(7.5, ActualWidth - 7.5));
-        double left = Math.Clamp(center - size.Width / 2, 0, Math.Max(0, ActualWidth - size.Width));
+        double center = Math.Clamp(Fraction(value) * width, 7.5, Math.Max(7.5, width - 7.5));
+        double left = Math.Floor(Math.Clamp(center - size.Width / 2, 0, Math.Max(0, width - size.Width)) * scale + 0.5) / scale;
         double top = RailOrigin - size.Height - 8;
-        if (double.IsNaN(lastPreviewLeft) || Math.Abs(lastPreviewLeft - left) > 0.1) { lastPreviewLeft = left; Canvas.SetLeft(preview, left); }
+        if (Math.Abs(lastPreviewLeft - left) > 1e-4) { lastPreviewLeft = left; Canvas.SetLeft(preview, left); }
         if (double.IsNaN(lastPreviewTop) || Math.Abs(lastPreviewTop - top) > 0.1) { lastPreviewTop = top; Canvas.SetTop(preview, top); }
     }
-
-    private static string Clock(double value) { long seconds = Math.Max(0, (long)Math.Floor(value)); return $"{seconds / 60:00}:{seconds % 60:00}"; }
 
     protected override AutomationPeer OnCreateAutomationPeer() => new SeekPeer(this);
 
