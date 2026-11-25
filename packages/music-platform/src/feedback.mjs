@@ -25,7 +25,7 @@ function kgFacts(c, p, state) {
     rate = number(p.rate, 1, 'INVALID_REQUEST');
   if (listened < 0 || position < 0 || position > duration + 1 || rate <= 0 ||
       p.reason === 'playend' && Math.abs(position - duration) > 1 ||
-      state && listened > Math.max(0, (c.clock() - state.startedAt) / 1000) + 2) fail('INVALID_REQUEST');
+      state && listened > Math.max(0, (Date.now() - state.startedAt) / 1000) + 2) fail('INVALID_REQUEST');
   return { duration, listened, position, rate };
 }
 function records(p) {
@@ -70,19 +70,19 @@ async function cscc(c, path, data, body, callbacks) {
   return raw;
 }
 async function prepareKG(c, p, duration) {
-  const startedAt = c.clock();
+  const startedAt = Date.now();
   const client = c.client(), fields = cookieFields(c.accountRequired().cookie), uuid = fields.KUGOU_API_GUID ?? client.seed,
     mid = fields.KUGOU_API_MID ?? client.mid, model = fields.KUGOU_API_DEV ?? uuid.slice(0, 10).toUpperCase();
   const row = await c.kgMixRow(targetID(p).toUpperCase(), scalar(p.target?.mixsongId));
   if (Math.abs(number(row.audio_info?.timelength) / 1000 - duration) > 10) fail('REMOTE_CHANGED');
   const mix = required(row.base?.album_audio_id);
-  const time = String(Math.floor(c.clock() / 1000)), body = Buffer.from(JSON.stringify({ machine: model, mid, uuid, wh: [1920, 1080] }));
+  const time = String(Math.floor(Date.now() / 1000)), body = Buffer.from(JSON.stringify({ machine: model, mid, uuid, wh: [1920, 1080] }));
   const firstReply = await cscc(c, '/v3/qrydid', { appid: 'and02', _t: time,
     sign: md5('_t' + time + 'appidand02pbKC7zn{4U*ydo2M1Rir' + body) }, body);
   const did = required(firstReply.data?.deviceid), field = hex(16);
   const portrait = publicEncrypt({ key: csccKey, padding: constants.RSA_PKCS1_PADDING },
-    Buffer.from(`${uuid}\t${field}\t${c.clock()}\t${did}`)).toString('base64');
-  const next = String(Math.floor(c.clock() / 1000));
+    Buffer.from(`${uuid}\t${field}\t${Date.now()}\t${did}`)).toString('base64');
+  const next = String(Math.floor(Date.now() / 1000));
   const second = await cscc(c, '/v2/gen', { s: portrait, appid: 3116, _t: next,
     sign: md5('_t' + next + 'appid3116s' + portrait + csccSalt) });
   const data = decodeJSON(decrypt(Buffer.from(required(second.data), 'base64'), field, 'cbc', uuid.slice(0, 16)));
@@ -108,7 +108,7 @@ async function prepareTX(c, p) {
     vkey: required(row.vkey) };
 }
 async function sendKG(c, p, state, callbacks, facts) {
-  const end = p.event === 'end', now = Math.floor(c.clock() / 1000);
+  const end = p.event === 'end', now = Math.floor(Date.now() / 1000);
   const duration = Math.round(facts.duration * 1000);
   const listened = end ? Math.floor(facts.listened * 1000) : 0;
   const fields = [`type_id=${end ? '4' : '20431'}`, 'action=play', 'mixsongid=' + state.mix,
@@ -118,7 +118,7 @@ async function sendKG(c, p, state, callbacks, facts) {
   if (end) fields.push('duration=' + listened, 'state=' + (p.reason === 'exception' ? '播放错误' :
     p.reason === 'playend' && listened > 0 ? '完整播放' : '被终止'), 'type=1', 'fs=' + facts.rate.toFixed(1));
   fields.push('mid=' + state.mid, 'uuid=' + state.uuid, 'sys=9', 'mod=' + state.model, 'channelid=18', 'ip=0.0.0.0',
-    'net=1', 'ver=10597', 'time=' + c.clock(), 'userid=' + c.account.userId, 'ss3=' + md5(hex(16)));
+    'net=1', 'ver=10597', 'time=' + Date.now(), 'userid=' + c.account.userId, 'ss3=' + md5(hex(16)));
   const event = Buffer.from(fields.join('&'));
   const head = ['4', '1', state.uuid, '0', '3116', '10597', '18', '9', state.model, state.uuid, state.mid, '0',
     '000000000000000000000000000000000000'].join('\t') + '\r\n' +
@@ -138,7 +138,7 @@ export function createFeedbackOperations() {
   }
   function register(c, state) {
     if (!c.isCurrent()) return null;
-    const now = c.clock();
+    const now = Date.now();
     pruneSessions(now);
     const sessionId = randomUUID();
     sessions.set(sessionId, { platform: c.platform, scope: c.account.scope ?? c.account.cookie,
@@ -146,7 +146,7 @@ export function createFeedbackOperations() {
     return sessionId;
   }
   function take(c, sessionId) {
-    pruneSessions(c.clock());
+    pruneSessions(Date.now());
     const id = input(sessionId);
     const entry = sessions.get(id);
     if (!entry || entry.platform !== c.platform || entry.scope !== (c.account?.scope ?? c.account?.cookie) ||
@@ -213,8 +213,8 @@ export function createFeedbackOperations() {
           const listened = Math.floor(facts.listened);
           await c.verifyTxFeedback();
           const client = await c.prepareTx(), account = c.account, cookies = cookieFields(account.cookie);
-          const now = Math.floor(c.clock() / 1000);
-          const comm = JSON.parse(txRequest('', '', {}, client, account, c.clock).body).comm;
+          const now = Math.floor(Date.now() / 1000);
+          const comm = JSON.parse(txRequest('', '', {}, client, account).body).comm;
           const attributes = { cmd: '1', optime: String(now), QQ: account.userId, uid: client.session.uid,
             songtype: '1', playtype: '5', time: String(listened), play_duration_mi: String(listened * 1000),
             audiotime: String(state.duration * 1000), songid: state.songId, singerid: state.singerId, vkey: state.vkey,
@@ -245,7 +245,7 @@ export function createFeedbackOperations() {
       });
     },
     'feedback.release'(c, { sessionId }) {
-      pruneSessions(c.clock());
+      pruneSessions(Date.now());
       if (sessionId != null && sessionId !== '') {
         const id = input(sessionId);
         const entry = sessions.get(id);

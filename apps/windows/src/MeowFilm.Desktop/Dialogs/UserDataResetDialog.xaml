@@ -5,11 +5,10 @@
  UseLayoutRounding="True"
  Foreground="{ThemeResource MeowFilm.Brush.Text}"
  TabFocusNavigation="Cycle"
- KeyDown="OnPreviewKeyDown" AutomationProperties.Name="清除全部数据">
- <Grid Style="{StaticResource MeowFilm.DialogHost}">
-  <ContentControl x:Name="DialogFocusTarget" IsTabStop="True" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center">
-  <Border x:Name="DialogSurface" Style="{StaticResource MeowFilm.FloatingSurface}" MaxWidth="440"
-          Margin="24" Padding="20" VerticalAlignment="Center" Translation="0,0,16">
+ AutomationProperties.Name="清除全部数据">
+ <ContentControl x:Name="DialogFocusTarget" IsTabStop="True" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center">
+  <Border x:Name="DialogSurface" Style="{StaticResource MeowFilm.FloatingSurface}" MinWidth="340" MaxWidth="440"
+          Padding="20" Translation="0,0,16">
    <Border.Shadow><ThemeShadow/></Border.Shadow>
    <StackPanel>
     <local:DockPanel Margin="0,0,0,16">
@@ -33,6 +32,5 @@
     </local:WrapPanel>
    </StackPanel>
   </Border>
-  </ContentControl>
- </Grid>
+ </ContentControl>
 </UserControl>

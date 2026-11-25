@@ -78,18 +78,9 @@ public sealed partial class MusicAccountsController
 
     private void ReadAccountQr(MusicAccountQrChallenge challenge, string platform)
     {
-        MusicDto.Require(challenge.Platform == platform && !string.IsNullOrEmpty(challenge.ChallengeId));
-        WriteableBitmap image;
-        if (challenge.DisplayKind == "png")
-        {
-            MusicDto.Require(!string.IsNullOrEmpty(challenge.ImageBase64));
-            image = MusicAccountQrImage.DecodePng(challenge.ImageBase64!);
-        }
-        else
-        {
-            MusicDto.Require(challenge.DisplayKind == "url" && !string.IsNullOrEmpty(challenge.Url));
-            image = MusicAccountQrImage.Create(challenge.Url!);
-        }
+        WriteableBitmap image = challenge.DisplayKind == "png"
+            ? MusicAccountQrImage.DecodePng(challenge.ImageBase64!)
+            : MusicAccountQrImage.Create(challenge.Url!);
         accountQr = new(platform, challenge.ChallengeId, challenge.ExpiresAt); accountQrImage = image;
         accountStatus = "等待扫码"; AccountQrBindings();
     }
@@ -114,12 +105,9 @@ public sealed partial class MusicAccountsController
 
     private MusicAccountStatusRecord? PublishQrPoll(MusicAccountQrPollResult reply, string platform)
     {
-        MusicDto.Require(reply.Platform == platform && accountQr is not null &&
-            reply.ChallengeId == accountQr.Id);
-        MusicDto.Require(reply.Status is "waiting" or "confirming" or "expired" or "refused" or "authenticated");
+        if (accountQr is null || reply.ChallengeId != accountQr.Id) return null;
         if (reply.Status == "authenticated")
         {
-            MusicDto.Require(reply.Account is not null);
             ClearAccountQr();
             return reply.Account;
         }

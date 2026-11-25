@@ -129,7 +129,7 @@ import MeowPlayback
               let next = MusicSystemMetadataBinding(
                 entry: entry, attempt: attempt, activeAttemptID: model.activeNativeAttemptID,
                 activeResourceID: model.activeResourceID, activeOccurrenceID: model.activeOccurrenceID,
-                access: model.accountAccessGeneration, snapshot: playback.snapshot),
+                snapshot: playback.snapshot),
               playback.isCurrent(attempt) else {
             if binding != nil || modelClosed { revoke() }
             return
@@ -217,17 +217,16 @@ import MeowPlayback
 struct MusicSystemMetadataBinding: Equatable {
     let attempt: PlayAttempt
     let occurrenceID: String
-    let access: UUID
     let songKey: String
 
     init?(entry: MusicQueueEntry, attempt: PlayAttempt, activeAttemptID: UUID?,
-          activeResourceID: String?, activeOccurrenceID: String?, access: UUID,
+          activeResourceID: String?, activeOccurrenceID: String?,
           snapshot: PlaybackSnapshot) {
         guard attempt.owner == "music", attempt.id == activeAttemptID,
               attempt.resourceID == activeResourceID, entry.id == activeOccurrenceID,
               snapshot.owner == attempt.owner, snapshot.resourceID == attempt.resourceID,
               snapshot.phase != .idle, snapshot.phase != .failed else { return nil }
-        self.attempt = attempt; occurrenceID = entry.id; self.access = access
+        self.attempt = attempt; occurrenceID = entry.id
         songKey = MusicAppearanceSongIdentity(track: entry.track).stableKey
     }
 

@@ -5,16 +5,7 @@ import MeowStorage
 
 /// Disposable page display state. Songs are permanent repository references;
 /// no credentials, media bytes or continuation authority are stored here.
-public protocol MusicHomeSnapshotStoring: Sendable {
-    func clear() throws
-}
-
-protocol MusicHomeDisplaySnapshotStoring: MusicHomeSnapshotStoring {
-    func readDisplay() throws -> (source: MusicPublicBrowsePlatform, page: MusicNativePublicBrowseDiscovery)?
-    func writeDisplay(_ page: MusicNativePublicBrowseDiscovery, source: MusicPublicBrowsePlatform) throws
-}
-
-public final class MusicNativeHomeSnapshotStorage: MusicHomeDisplaySnapshotStoring, @unchecked Sendable {
+public final class MusicNativeHomeSnapshotStorage: @unchecked Sendable {
     private let database: SQLiteDatabase
     public init(database: SQLiteDatabase) { self.database = database }
     func readDisplay() throws -> (source: MusicPublicBrowsePlatform, page: MusicNativePublicBrowseDiscovery)? {

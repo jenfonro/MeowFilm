@@ -86,7 +86,7 @@ public final class MusicPlayerViewController: MusicPageViewController {
     }
 
     private func reconcileAccess() {
-        if !content.isAvailable { requestClose() }
+        if content.model.isClosed { requestClose() }
     }
 
     private func requestClose() {
@@ -165,7 +165,7 @@ public final class MusicPlayerViewController: MusicPageViewController {
     }
 
     private func openFMSettings() {
-        guard content.model.isFMActive, content.isAvailable, isPageVisible, presentedViewController == nil else { return }
+        guard content.model.isFMActive, !content.model.isClosed, isPageVisible, presentedViewController == nil else { return }
         let page = MusicFMSettingsViewController(model: content.model, appearance: appearance)
         presentPageModal(page, animated: !UIAccessibility.isReduceMotionEnabled)
     }

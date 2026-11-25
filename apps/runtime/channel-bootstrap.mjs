@@ -9,7 +9,7 @@ import { createNativeSettings } from './native-settings.mjs';
 
 const DEBUG_ERROR_SYMBOL = Symbol.for('meowfilm.platformBootstrapDebug');
 
-export function parseChannelConfiguration(bytes, { expectedSessionId } = {}) {
+function parseChannelConfiguration(bytes, { expectedSessionId } = {}) {
   const value = decodeJSONValue(bytes);
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
       !Object.hasOwn(value, 'sessionId') ||

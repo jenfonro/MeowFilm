@@ -21,14 +21,6 @@ func musicHex(_ value: String) -> Bool {
     return bytes.count == 64 && bytes.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
 }
 
-func musicSame(_ a: String, _ b: String) -> Bool {
-    a.utf8.elementsEqual(b.utf8)
-}
-
-func musicIDs(_ values: [String]) -> Set<Data> {
-    Set(values.map { Data($0.utf8) })
-}
-
 // MARK: - Shared Source & Play Context Records
 
 struct MusicSourceRecord: Equatable, Sendable {
@@ -319,12 +311,12 @@ struct MusicSongSourceRecord: Equatable, Sendable {
 
     func extraRootField(_ name: String) -> SQLiteTreeValue? {
         guard case .object(let rootFields)? = extras else { return nil }
-        return rootFields.first(where: { $0.name.utf8.elementsEqual(name.utf8) })?.value
+        return rootFields.first(where: { $0.name == name })?.value
     }
 
     func extraMusicInfoField(_ name: String) -> SQLiteTreeValue? {
         guard case .object(let infoFields)? = extraRootField("musicInfo") else { return nil }
-        return infoFields.first(where: { $0.name.utf8.elementsEqual(name.utf8) })?.value
+        return infoFields.first(where: { $0.name == name })?.value
     }
 }
 
@@ -401,7 +393,7 @@ struct MusicCollectionBindingRecord: Equatable, Sendable {
     var map: [MusicCollectionBindingMapEntry]
 
     func songID(for remoteEntryID: String) -> String? {
-        map.first(where: { musicSame($0.remoteEntryID, remoteEntryID) })?.songID
+        map.first(where: { $0.remoteEntryID == remoteEntryID })?.songID
     }
 }
 
@@ -426,11 +418,11 @@ struct MusicCollectionRecord: Equatable, Sendable {
     var intents: [MusicCollectionIntentRecord]
 
     func intent(for songID: String) -> MusicCollectionIntentRecord? {
-        intents.first(where: { musicSame($0.intentKey, songID) })
+        intents.first(where: { $0.intentKey == songID })
     }
 
     mutating func setIntent(_ record: MusicCollectionIntentRecord) {
-        if let idx = intents.firstIndex(where: { musicSame($0.intentKey, record.intentKey) }) {
+        if let idx = intents.firstIndex(where: { $0.intentKey == record.intentKey }) {
             intents[idx] = record
         } else {
             intents.append(record)

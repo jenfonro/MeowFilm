@@ -44,7 +44,7 @@
  <Style x:Key="Settings.PopupTitle" TargetType="TextBlock" BasedOn="{StaticResource Settings.SectionTitle}"><Setter Property="FontSize" Value="18"/></Style>
  <Style x:Key="Settings.PopupClose" TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
   <Setter Property="Width" Value="28"/><Setter Property="Height" Value="28"/><Setter Property="MinHeight" Value="28"/><Setter Property="Padding" Value="0"/>
-  <Setter Property="FontFamily" Value="{ThemeResource MeowFilm.Font.Icons}"/>
+  <Setter Property="FontFamily" Value="{StaticResource MeowFilm.Font.Icons}"/>
  </Style>
  <Style x:Key="Settings.RuleSurface" TargetType="Border" BasedOn="{StaticResource Settings.PopupSurface}"><Setter Property="Padding" Value="12,8"/></Style>
  <Style x:Key="Settings.ListSurface" TargetType="Border" BasedOn="{StaticResource Settings.PopupSurface}"><Setter Property="Padding" Value="6"/></Style>

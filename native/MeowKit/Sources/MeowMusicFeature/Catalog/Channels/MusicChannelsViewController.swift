@@ -184,10 +184,14 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     private func activateCatalogue() {
         guard let catalogue, isPageActive else { return }
-        catalogue.setAccess(available: !model.isClosed, generation: model.accountAccessGeneration)
+        if model.isClosed {
+            catalogue.close()
+            renderCatalogue()
+            return
+        }
         catalogue.appear()
         catalogue.setDisplayVisible(isPageVisible)
-        if !observingHome, !model.isClosed {
+        if !observingHome {
             observingHome = true
             runPageTask(key: "observeHome") { await catalogue.observeHomeChanges() }
         }

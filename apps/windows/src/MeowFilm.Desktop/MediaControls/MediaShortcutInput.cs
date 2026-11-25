@@ -21,7 +21,7 @@ internal static class MediaShortcutInput
 
     internal static bool AllowsLocal(FrameworkElement root, object? target)
     {
-        if (HasPopup(root)) return false;
+        if (HasPopup(root) || DesktopModalHost.HasOpenModal(root)) return false;
         for (var node = target as DependencyObject; node is not null; node = VisualTreeHelper.GetParent(node))
         {
             if (Protected(node)) return false;
@@ -35,7 +35,8 @@ internal static class MediaShortcutInput
         nint foreground = MediaShortcutNative.ForegroundWindow;
         // A background root's retained XAML focus is not the current input target.
         if (!MediaShortcutNative.OwnsWindow(hwnd, foreground)) return false;
-        if (foreground != hwnd || MediaShortcutNative.HasMenuOrChildFocus(hwnd, root) || HasPopup(root)) return true;
+        if (foreground != hwnd || MediaShortcutNative.HasMenuOrChildFocus(hwnd, root) ||
+            HasPopup(root) || DesktopModalHost.HasOpenModal(root)) return true;
         bool editor = false;
         for (var node = DesktopVisual.Focused(root); node is not null; node = VisualTreeHelper.GetParent(node))
         {

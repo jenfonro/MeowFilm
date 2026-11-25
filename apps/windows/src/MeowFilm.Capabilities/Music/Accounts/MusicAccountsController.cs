@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Core.Runtime;
@@ -15,44 +16,44 @@ public sealed record MusicPlatformAccount(string Platform, string Name, string S
     public bool HasSession => State is "saved" or "verified" or "revoked";
 }
 
-/// <summary>Standalone owner for music platform accounts, QR/SMS login, details, sync, and import/export.</summary>
-public sealed partial class MusicAccountsController : MusicController,
-    IMusicAccountsCoordinator
+/// <summary>Standalone Layer-2 owner for music platform accounts, QR/SMS login, details, sync, and import/export.</summary>
+public sealed partial class MusicAccountsController : MusicController
 {
     private readonly record struct AccountReadResult(long Epoch, long Observation, string? ErrorCode);
     private readonly MusicSettingsController settings;
+    private readonly ConcurrentDictionary<string, long> platformObservations = new();
 
     internal MusicAccountsController(MusicRuntimeContext ctx, MusicSettingsController settings) : base(ctx)
     {
         this.settings = settings;
-        InitializeLibrarySync();
+        LibrarySync = new(
+            application.LibrarySync,
+            Receipts,
+            ConfirmResetSyncAccountAsync,
+            () => stopping || disposed);
+        application.LibrarySyncChanged += LibrarySyncChanged;
+        InitializePlatformSettings();
     }
 
-    private IMusicCatalogCoordinator catalogPort = null!;
-    private IMusicLyricsCoordinator lyricsPort = null!;
-    private IMusicLibraryCoordinator libraryPort = null!;
-    private IMusicQueueCoordinator queuePort = null!;
+    public MusicLibrarySyncViewModel LibrarySync { get; }
 
-    internal void AttachPorts(
-        IMusicCatalogCoordinator catalog,
-        IMusicLyricsCoordinator lyrics,
-        IMusicLibraryCoordinator library,
-        IMusicQueueCoordinator queue)
+    // Explicit cross-domain events wired at MusicCapability composition root.
+    internal event Action<string>? AccountUpdated;
+    internal event Action? AccountsReloaded;
+    internal event Action? AccountSessionChanging;
+    internal event Action? AccountSessionChanged;
+    internal event Action<bool>? AccountChangeSettled;
+    internal event Action? AccountCancelStarted;
+    internal event Action? AccountCancelSettled;
+    internal event Func<long, CancellationToken, Task>? LibrarySynced;
+
+    internal long RecordPlatformObservation(string platform)
     {
-        catalogPort = catalog;
-        lyricsPort = lyrics;
-        libraryPort = library;
-        queuePort = queue;
+        Interlocked.Increment(ref accountObservation);
+        return platformObservations.AddOrUpdate(platform, 1, (_, value) => value + 1);
     }
 
-    void IMusicAccountsCoordinator.RefreshPlatformSetting(string platform) => RefreshPlatformSetting(platform);
-    Task IMusicAccountsCoordinator.ActivatePlatformSettingsAsync(CancellationToken token) => ActivatePlatformSettingsAsync(token);
-    Task IMusicAccountsCoordinator.DeactivateAccountDetailsAsync() => DeactivateAccountDetailsAsync();
-    Task IMusicAccountsCoordinator.DeactivateLibrarySyncAsync() => LibrarySync.DeactivateAsync();
-    Task IMusicAccountsCoordinator.RetireAccountTransferAsync() => RetireAccountTransferAsync();
-
-    // PlatformSettings rows depend on Settings.FeedbackPlatforms, so initialize after Settings is created.
-    internal void InitializeAfterSettings() => InitializePlatformSettings();
+    internal long PlatformObservation(string platform) => platformObservations.GetValueOrDefault(platform);
 
     public ObservableCollection<MusicPlatformAccount> Accounts { get; } =
         [
@@ -82,7 +83,6 @@ public sealed partial class MusicAccountsController : MusicController,
     internal Task AccountSettlementTask => accountSettlement;
     internal bool CanEditFeedback => settings.CanEditFeedback;
 
-    internal void MarkAccountObserved() => Interlocked.Increment(ref accountObservation);
     internal void MarkAccountsStale() => accountsLoaded = false;
     internal bool HasSettledCurrentAccount(string platform) => accountsLoaded &&
         loadedAccountObservation == Volatile.Read(ref accountObservation) &&
@@ -158,12 +158,9 @@ public sealed partial class MusicAccountsController : MusicController,
 
     private static MusicPlatformAccount AccountRow(MusicAccountStatusRecord item)
     {
-        MusicDto.Require(item.Platform is "wy" or "tx" or "kg");
         string name = MusicPlatformInfo.DisplayName(item.Platform);
-        MusicDto.Require(item.State is "none" or "saved" or "verified" or "revoked");
         if (item.Profile is not { } profile)
             return new(item.Platform, name, item.State, Generation: item.Generation);
-        MusicDto.Require(profile.Platform == item.Platform && !string.IsNullOrEmpty(profile.UserId));
         return new(item.Platform, name, item.State,
             string.IsNullOrEmpty(profile.DisplayName) ? profile.UserId : profile.DisplayName,
             profile.UserId, item.Generation);
@@ -174,7 +171,7 @@ public sealed partial class MusicAccountsController : MusicController,
         int index = -1;
         for (int i = 0; i < Accounts.Count; i++)
             if (Accounts[i].Platform == value.Platform) { index = i; break; }
-        MusicDto.Require(index >= 0);
+        if (index < 0) return;
         if (!Equals(Accounts[index], value))
         {
             bool selected = selectedAccount?.Platform == value.Platform;
@@ -192,8 +189,7 @@ public sealed partial class MusicAccountsController : MusicController,
         // Publish after the collection replacement has finished its selection
         // transaction, otherwise ComboBox can clear the newly rebound selection.
         AccountBindings();
-        queuePort.RecommendationBindings();
-        if (value.Platform == catalogPort.HomePlatform) catalogPort.RefreshHomeDisplay();
+        AccountUpdated?.Invoke(value.Platform);
     }
 
     internal async Task EnsureAccountsAsync()
@@ -253,9 +249,7 @@ public sealed partial class MusicAccountsController : MusicController,
                 try
                 {
                     var reply = await application.ListAccountsAsync(request.Token);
-                    MusicDto.Require(reply.Items.Count == 3);
                     var rows = reply.Items.Select(AccountRow).ToArray();
-                    MusicDto.Require(rows.Select(item => item.Platform).Distinct().Count() == 3);
                     if (epoch != accountEpoch || observation != Volatile.Read(ref accountObservation) || stopping && !allowStopping) return;
                     foreach (var row in rows) UpdateAccount(row, notify: false);
                     accountsLoaded = true;
@@ -264,8 +258,7 @@ public sealed partial class MusicAccountsController : MusicController,
                     // Passive reconciliation must not consume an operation's result notice.
                     errorCode = null;
                     AccountBindings();
-                    queuePort.RecommendationBindings();
-                    catalogPort.RefreshHomeDisplay();
+                    AccountsReloaded?.Invoke();
                 }
                 catch (Exception error)
                 {
@@ -324,7 +317,7 @@ public sealed partial class MusicAccountsController : MusicController,
         // KG begin durably establishes device identity before its first request.
         accountMayWrite = operation != "sms.send" && (operation != "qr.begin" || platform == "kg");
         if (!accountSmsOperation) ClearAccountSmsQuiet();
-        if (operation != "qr.poll") { ClearAccountQrQuiet(); catalogPort.RetireCatalogSession(); }
+        if (operation != "qr.poll") { ClearAccountQrQuiet(); AccountSessionChanging?.Invoke(); }
         if (operation != "qr.poll") accountStatus = "";
         AccountBindings();
         try { await RunAsync(async () =>
@@ -342,17 +335,14 @@ public sealed partial class MusicAccountsController : MusicController,
                     : await invoke(cancellation.Token);
                 if (stopping || epoch != accountEpoch) return;
                 if (handle(reply) is not { } account) return;
-                var row = AccountRow(account);
-                MusicDto.Require(row.Platform == platform);
-                UpdateAccount(row);
+                UpdateAccount(AccountRow(account));
                 accountsLoaded = false;
                 changedAccount = true;
                 if (operation == "sms.login") ClearAccountSms();
                 accountSaveUncertain = false;
                 accountStatus = operation == "logout" ? "已退出" : "会话验证成功";
                 // Retire request authority, not the last successful home display.
-                catalogPort.RetireCatalogSession();
-                lyricsPort.RetireLyrics();
+                AccountSessionChanged?.Invoke();
             }
             catch (OperationCanceledException)
             {
@@ -380,8 +370,7 @@ public sealed partial class MusicAccountsController : MusicController,
                 accountSmsOperation = false; accountSmsSending = false;
             }
             AccountBindings();
-            if (changedAccount) catalogPort.BeginHomeAccountRecovery(true);
-            if (changedAccount && epoch == accountEpoch && lyricsPort.NeedsLyrics) _ = lyricsPort.RestoreLyricsAsync();
+            if (changedAccount) AccountChangeSettled?.Invoke(epoch == accountEpoch);
         }
     }
 
@@ -397,7 +386,7 @@ public sealed partial class MusicAccountsController : MusicController,
         accountSettlement = completion.Task;
         accountCancellation?.Cancel(); ClearAccountQrQuiet(); ClearAccountSmsQuiet();
         accountStatus = sending ? "短信发送结果未确认" : "已取消";
-        lyricsPort.RetireLyrics();
+        AccountCancelStarted?.Invoke();
         AccountBindings();
         _ = Settle();
         return completion.Task;
@@ -440,7 +429,7 @@ public sealed partial class MusicAccountsController : MusicController,
             {
                 completion.TrySetResult();
                 AccountBindings();
-                if (settled && epoch == accountEpoch && lyricsPort.NeedsLyrics) _ = lyricsPort.RestoreLyricsAsync();
+                if (settled && epoch == accountEpoch) AccountCancelSettled?.Invoke();
             }
         }
     }

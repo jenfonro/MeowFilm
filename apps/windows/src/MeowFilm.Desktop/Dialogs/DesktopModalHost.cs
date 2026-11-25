@@ -16,6 +16,8 @@ public sealed class DesktopModalHost : Grid
 {
     private static readonly DependencyProperty HostProperty = DependencyProperty.RegisterAttached(
         "Host", typeof(DesktopModalHost), typeof(DesktopModalHost), new PropertyMetadata(null));
+    private static readonly DependencyProperty ModalHostsProperty = DependencyProperty.RegisterAttached(
+        "ModalHosts", typeof(List<DesktopModalHost>), typeof(DesktopModalHost), new PropertyMetadata(null));
 
     private sealed class ActiveModal
     {
@@ -56,10 +58,48 @@ public sealed class DesktopModalHost : Grid
     public void Attach(DesktopWindow window)
     {
         window.Root.SetValue(HostProperty, this);
+        RegisterModalHost(window.Root, this);
         window.Deactivated += (_, _) => CancelPress();
         window.VisibilityChanged += (_, _) => { if (!window.IsVisible) CloseAll(); };
-        window.Closed += (_, _) => CloseAll();
+        window.Closed += (_, _) =>
+        {
+            UnregisterModalHost(window.Root, this);
+            CloseAll(restoreFocus: false);
+        };
     }
+
+    internal void AttachSystem(DesktopWindow window)
+    {
+        RegisterModalHost(window.Root, this);
+        window.Deactivated += (_, _) => CancelPress();
+        window.Closed += (_, _) =>
+        {
+            UnregisterModalHost(window.Root, this);
+            CloseAll(restoreFocus: false);
+        };
+    }
+
+    private static void RegisterModalHost(FrameworkElement root, DesktopModalHost host)
+    {
+        if (root.GetValue(ModalHostsProperty) is not List<DesktopModalHost> hosts)
+        {
+            hosts = [];
+            root.SetValue(ModalHostsProperty, hosts);
+        }
+        if (!hosts.Contains(host)) hosts.Add(host);
+    }
+
+    private static void UnregisterModalHost(FrameworkElement root, DesktopModalHost host)
+    {
+        if (root.GetValue(ModalHostsProperty) is List<DesktopModalHost> hosts)
+            hosts.Remove(host);
+    }
+
+    internal static bool HasOpenModal(FrameworkElement root) =>
+        root.GetValue(ModalHostsProperty) is List<DesktopModalHost> hosts && hosts.Any(host => host.IsOpen);
+
+    public bool IsPresented(FrameworkElement content) =>
+        modals.Any(item => ReferenceEquals(item.Content, content));
 
     public static DesktopModalHost? Find(DependencyObject owner)
     {
@@ -227,6 +267,7 @@ public sealed class DesktopModalHost : Grid
 
     public bool HandleEscape(KeyRoutedEventArgs args)
     {
+        if (DesktopVisual.Modifiers != VirtualKeyModifiers.None) return false;
         bool handled = HandleEscape(args.Key);
         args.Handled |= handled;
         return handled;
@@ -278,11 +319,13 @@ public sealed class DesktopModalHost : Grid
         else Close();
     }
 
-    public void Close(FrameworkElement content)
+    public void Close(FrameworkElement content) => Close(content, restoreFocus: true);
+
+    public void Close(FrameworkElement content, bool restoreFocus)
     {
         int index = modals.FindIndex(item => ReferenceEquals(item.Content, content));
         if (index < 0) return;
-        CloseAt(index);
+        CloseAt(index, restoreFocus);
     }
 
     public static void CloseFor(DependencyObject owner, FrameworkElement? content = null)
@@ -291,23 +334,25 @@ public sealed class DesktopModalHost : Grid
         if (content is null)
         {
             for (int i = host.modals.Count - 1; i >= 0; i--)
-                if (ReferenceEquals(host.modals[i].Owner, owner)) host.CloseAt(i);
+                if (ReferenceEquals(host.modals[i].Owner, owner)) host.CloseAt(i, restoreFocus: true);
         }
         else host.Close(content);
     }
 
-    public void CloseAll()
+    public void CloseAll() => CloseAll(restoreFocus: true);
+
+    public void CloseAll(bool restoreFocus)
     {
-        while (modals.Count > 0) CloseAt(modals.Count - 1);
+        while (modals.Count > 0) CloseAt(modals.Count - 1, restoreFocus);
     }
 
     public void Close()
     {
         if (modals.Count == 0) return;
-        CloseAt(modals.Count - 1);
+        CloseAt(modals.Count - 1, restoreFocus: true);
     }
 
-    private void CloseAt(int index)
+    private void CloseAt(int index, bool restoreFocus)
     {
         dismissPointer = null;
         var current = modals[index];
@@ -336,7 +381,8 @@ public sealed class DesktopModalHost : Grid
         {
             Visibility = Visibility.Collapsed;
         }
-        if (modals.Count == 0 &&
+        if (restoreFocus &&
+            modals.Count == 0 &&
             current.PriorFocus is FrameworkElement focusTarget &&
             focusTarget.IsLoaded &&
             DesktopVisual.IsVisible(current.Owner) &&
@@ -344,7 +390,8 @@ public sealed class DesktopModalHost : Grid
         {
             DispatcherQueue?.TryEnqueue(() =>
             {
-                if (modals.Count == 0 && focusTarget.IsLoaded && DesktopVisual.IsVisible(focusTarget))
+                if (modals.Count == 0 && focusTarget.IsLoaded && DesktopVisual.IsVisible(focusTarget) &&
+                    (focusTarget is not Control ctrl || ctrl.IsEnabled))
                     focusTarget.Focus(FocusState.Programmatic);
             });
         }

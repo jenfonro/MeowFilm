@@ -56,7 +56,7 @@
            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
     <ContentPresenter x:Name="ShortVideoContent" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
                       HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}"
-                      FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal" />
+                      FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" />
    </Border>
   </Grid>
  </ControlTemplate>

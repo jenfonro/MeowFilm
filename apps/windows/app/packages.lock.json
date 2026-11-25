@@ -244,6 +244,7 @@
           "MeowFilm.Platform": "[1.0.0, )",
           "MeowFilm.Threading": "[1.0.0, )",
           "Microsoft.Data.Sqlite": "[10.0.15, 10.0.15]",
+          "Microsoft.Graphics.Win2D": "[1.4.0, 1.4.0]",
           "Microsoft.Web.WebView2": "[1.0.4314.35, 1.0.4314.35]",
           "Microsoft.WindowsAppSDK": "[1.8.260921001, 1.8.260921001]",
           "Net.Codecrete.QrCodeGenerator": "[3.2.1, 3.2.1]",
@@ -259,7 +260,6 @@
           "MeowFilm.Core": "[1.0.0, )",
           "MeowFilm.Platform": "[1.0.0, )",
           "MeowFilm.Threading": "[1.0.0, )",
-          "Microsoft.Graphics.Win2D": "[1.4.0, 1.4.0]",
           "Microsoft.WindowsAppSDK": "[1.8.260921001, 1.8.260921001]",
           "SkiaSharp": "[4.155.0, 4.155.0]",
           "SkiaSharp.NativeAssets.Win32": "[4.155.0, 4.155.0]"

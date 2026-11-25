@@ -41,15 +41,6 @@ internal static class MusicSettingsStore
             r => new MusicOnlineSettingsRecord(r.GetInt64(0), r.GetBool(1)),
             out var rec, ("$scope", scope)) ? rec : null;
 
-    internal static void WriteOnlineSettings(DatabaseSession db, string scope, MusicOnlineSettingsRecord value)
-    {
-        db.Execute("""
-            INSERT INTO music_playback_settings(scope,lyrics_enabled) VALUES($scope,$lyr)
-            ON CONFLICT(scope) DO UPDATE SET lyrics_enabled=excluded.lyrics_enabled
-            """, ("$scope", scope), ("$lyr", value.LyricsEnabled));
-        UpsertPolicyRevision(db, scope, "online", value.Revision);
-    }
-
     internal static MusicDeviceSettingsRecord? ReadDeviceSettings(DatabaseSession db, string scope) =>
         db.TryQuerySingle("SELECT revision,volume FROM playback_volume WHERE owner=$owner",
             r => new MusicDeviceSettingsRecord(

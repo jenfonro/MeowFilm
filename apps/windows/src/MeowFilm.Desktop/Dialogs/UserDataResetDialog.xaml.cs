@@ -1,25 +1,24 @@
+using MeowFilm.Core.Debug;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
-using Windows.System;
 
 namespace MeowFilm.Desktop;
 
-public partial class UserDataResetDialog : UserControl
+public partial class UserDataResetDialog : UserControl, IDesktopDebugModal
 {
+    private bool confirming;
+
     internal event Action? ConfirmRequested;
     internal event Action? CancelRequested;
     internal event Action? ExitRequested;
-    internal bool IsOpen => Visibility == Visibility.Visible;
+    internal bool IsOpen => Parent is DesktopModalHost host && host.IsPresented(this);
     internal bool IsPending { get; private set; }
-    internal bool IsConfirming => confirming;
     internal FrameworkElement SurfaceElement => DialogSurface;
-    private bool confirming;
 
     public UserDataResetDialog() => InitializeComponent();
 
-    internal void Open()
+    internal void PrepareOpen()
     {
         confirming = true;
         IsPending = false;
@@ -30,9 +29,10 @@ public partial class UserDataResetDialog : UserControl
         AutomationProperties.SetName(ConfirmChoice, "清除全部数据");
         ConfirmChoice.IsEnabled = true;
         FailureNotice.Clear();
-        Visibility = Visibility.Visible;
-        // The previously collapsed surface must participate in layout before
-        // WinUI can move focus to its safe initial choice.
+    }
+
+    internal void FocusInitial()
+    {
         UpdateLayout();
         CancelChoice.Focus(FocusState.Programmatic);
     }
@@ -75,10 +75,39 @@ public partial class UserDataResetDialog : UserControl
         if (IsOpen && confirming && !IsPending) CancelRequested?.Invoke();
     }
 
-    private void OnPreviewKeyDown(object sender, KeyRoutedEventArgs e)
+    DesktopDebugDialogDescription IDesktopDebugModal.DescribeDebugDialog() => new(
+        Id: "user-data-reset",
+        Kind: "user-data-reset",
+        FallbackTitle: confirming ? "清除全部本机数据" : "清除未完成",
+        Message: confirming ? "清空本机数据确认框" : "清空本机数据失败提示框",
+        Surface: DialogSurface,
+        Buttons: confirming
+            ? [new("取消", "cancel", !IsPending), new("确认清除", "confirm", !IsPending, "清除全部数据")]
+            : [new("退出", "exit", !IsPending), new("重试清除", "confirm", !IsPending)]);
+
+    object IDesktopDebugModal.HandleDebugAction(string act)
     {
-        if (e.Key != VirtualKey.Escape || DesktopVisual.Modifiers != VirtualKeyModifiers.None) return;
-        e.Handled = true;
-        OnCancelClick(sender, new RoutedEventArgs());
+        if (act is "cancel" or "dismiss" or "close")
+        {
+            if (!confirming || IsPending)
+                throw DebugApiException.InvalidState("User data reset dialog cannot be cancelled in its current state.");
+            CancelRequested?.Invoke();
+            return new { dialog = "user-data-reset", action = "cancel" };
+        }
+        if (act == "exit")
+        {
+            if (confirming || IsPending)
+                throw DebugApiException.InvalidState("Exit action is only available after reset failure.");
+            ExitRequested?.Invoke();
+            return new { dialog = "user-data-reset", action = "exit" };
+        }
+        if (act == "confirm")
+        {
+            if (IsPending)
+                throw DebugApiException.InvalidState("User data reset is currently in progress.");
+            ConfirmRequested?.Invoke();
+            return new { dialog = "user-data-reset", action = "confirm" };
+        }
+        throw DebugApiException.InvalidArgument($"Unsupported action '{act}' for dialog 'user-data-reset'.");
     }
 }

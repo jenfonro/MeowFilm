@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using System.ComponentModel;
 
@@ -46,7 +47,42 @@ public partial class FilmCard : UserControl
         }
     }
 
-    private void Changed(object? sender, PropertyChangedEventArgs e) => Bindings.Update();
+    private void Changed(object? sender, PropertyChangedEventArgs e)
+    {
+        if (Item is not { } item) return;
+        switch (e.PropertyName)
+        {
+            case nameof(IFilmCardDisplay.Title):
+                TitleText.Text = item.Title;
+                AutomationProperties.SetName(HitButton, item.Title);
+                break;
+            case nameof(IFilmCardDisplay.Poster):
+                Poster.Address = item.Poster;
+                break;
+            case nameof(IFilmCardDisplay.Score):
+                ScoreText.Text = item.Score;
+                break;
+            case nameof(IFilmCardDisplay.HasScore):
+                ScoreBadge.Visibility = item.HasScore ? Visibility.Visible : Visibility.Collapsed;
+                TextBadge.Visibility = TextBadgeVisibility;
+                break;
+            case nameof(IFilmCardDisplay.TextBadge):
+                TextBadgeText.Text = item.TextBadge;
+                break;
+            case nameof(IFilmCardDisplay.HasTextBadge):
+                TextBadge.Visibility = TextBadgeVisibility;
+                break;
+            case nameof(IFilmCardDisplay.Subtitle):
+                Subtitle.Text = item.Subtitle;
+                break;
+            case nameof(IFilmCardDisplay.HasSubtitle):
+                SiteLabel.Visibility = item.HasSubtitle ? Visibility.Visible : Visibility.Collapsed;
+                break;
+            case null or "":
+                Bindings.Update();
+                break;
+        }
+    }
 
     private void Activate_Click(object sender, RoutedEventArgs e)
     {

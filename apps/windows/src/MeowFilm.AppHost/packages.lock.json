@@ -37,14 +37,6 @@
           "SQLitePCLRaw.core": "2.1.13"
         }
       },
-      "Microsoft.Graphics.Win2D": {
-        "type": "Transitive",
-        "resolved": "1.4.0",
-        "contentHash": "/04yyf3xEOxeBK+SXxGB6OYLjXBVuujcLQF04mREcRcBT59IMI+oDbXOZZG2c/mJL8kKFC8r3wqz6MyA6IP3oA==",
-        "dependencies": {
-          "Microsoft.WindowsAppSDK.WinUI": "1.8.260204000"
-        }
-      },
       "Microsoft.Web.WebView2": {
         "type": "Transitive",
         "resolved": "1.0.3179.45",
@@ -194,7 +186,6 @@
           "MeowFilm.Core": "[1.0.0, )",
           "MeowFilm.Platform": "[1.0.0, )",
           "MeowFilm.Threading": "[1.0.0, )",
-          "Microsoft.Graphics.Win2D": "[1.4.0, 1.4.0]",
           "Microsoft.WindowsAppSDK": "[1.8.260921001, 1.8.260921001]",
           "SkiaSharp": "[4.155.0, 4.155.0]",
           "SkiaSharp.NativeAssets.Win32": "[4.155.0, 4.155.0]"
@@ -215,14 +206,6 @@
       }
     },
     "net10.0-windows10.0.19041/win-x64": {
-      "Microsoft.Graphics.Win2D": {
-        "type": "Transitive",
-        "resolved": "1.4.0",
-        "contentHash": "/04yyf3xEOxeBK+SXxGB6OYLjXBVuujcLQF04mREcRcBT59IMI+oDbXOZZG2c/mJL8kKFC8r3wqz6MyA6IP3oA==",
-        "dependencies": {
-          "Microsoft.WindowsAppSDK.WinUI": "1.8.260204000"
-        }
-      },
       "Microsoft.Web.WebView2": {
         "type": "Transitive",
         "resolved": "1.0.3179.45",

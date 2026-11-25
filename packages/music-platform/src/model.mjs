@@ -119,16 +119,6 @@ export function mediaURL(value, base) {
     return url.href;
   } catch { fail('INVALID_RESPONSE'); }
 }
-export function publicText(value, secrets) {
-  const result = text(value);
-  let decoded = result;
-  for (let at = 0; at < 4; at++) {
-    if (secrets.some(secret => secret && decoded.includes(secret))) fail('INVALID_RESPONSE');
-    try { const next = decodeURIComponent(decoded); if (next === decoded) break; decoded = next; }
-    catch { break; }
-  }
-  return result;
-}
 function sourceKey(platform, info) {
   return JSON.stringify([platform, required(info.songmid),
     platform === 'kg' ? scalar(first(info.hash, info.albumAudioId)).toLowerCase() : '']);

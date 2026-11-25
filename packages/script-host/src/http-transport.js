@@ -51,7 +51,7 @@ function abortReason(signal) {
   return safeError(signal.reason, 'CANCELLED');
 }
 
-export async function requestOnce(url, { method = 'GET', headers = {}, body } = {}, signal, follow) {
+async function requestOnce(url, { method = 'GET', headers = {}, body } = {}, signal, follow) {
   if (signal.aborted) throw abortReason(signal);
   const resources = [], closing = [];
   const own = resource => {

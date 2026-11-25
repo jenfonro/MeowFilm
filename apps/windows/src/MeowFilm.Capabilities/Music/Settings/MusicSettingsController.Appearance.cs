@@ -1,6 +1,6 @@
 using MeowFilm.Capabilities.Library;
-using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
+using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Capabilities;
 
@@ -37,17 +37,12 @@ public sealed partial class MusicSettingsController
     private long appearanceRevision, appearanceGeneration;
     private bool appearanceLoaded, appearanceBusy;
     private Task appearanceWork = Task.CompletedTask;
-    private bool AppearanceCurrent(long generation) =>
-        generation == appearanceGeneration && !stopping && !disposed;
-
-    internal void RetireAppearanceSettings()
-    {
-        appearanceGeneration++;
-        appearanceLoaded = false;
-    }
-
     private string savedPlaylistView = "grid", savedColorMode = "song", savedColorPalette = "lilac";
     private string appearanceStatus = "";
+
+    private bool AppearanceCurrent(long currentGeneration) =>
+        currentGeneration == appearanceGeneration && !stopping && !disposed;
+
     public MusicCatalogChoice[] ColorModes { get; } =
         [new("song", "跟随歌曲"), new("fixed", "固定配色")];
     public MusicCatalogChoice[] PlaylistViews { get; } =
@@ -63,13 +58,19 @@ public sealed partial class MusicSettingsController
     internal Brush PlayerPalette(Brush cover) => savedColorMode == "fixed"
         ? MusicAppearancePalette.Brush(savedColorPalette) : cover;
 
+    internal void RetireAppearanceSettings()
+    {
+        appearanceGeneration++;
+        appearanceLoaded = false;
+    }
+
     internal void SetAppearanceReadFailed()
     {
         appearanceStatus = "外观设置读取失败";
-        AppearanceBindings();
+        NotifyAppearanceBindings();
     }
 
-    internal void AppearanceBindings()
+    private void NotifyAppearanceBindings()
     {
         Changed(nameof(CanEditAppearance));
         Changed(nameof(CanEditFixedAppearance));
@@ -88,37 +89,37 @@ public sealed partial class MusicSettingsController
         appearanceLoaded = true;
         appearanceStatus = "";
         Changed(nameof(PlaylistListView));
-        AppearanceBindings();
+        NotifyAppearanceBindings();
         ctx.ReapplyAppearance();
     }
 
     internal async Task ReadAppearance(CancellationToken token)
     {
-        long generation = appearanceGeneration;
+        long currentGeneration = appearanceGeneration;
         var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.Appearance,
             ct => application.GetAppearanceAsync(ct), token);
         token.ThrowIfCancellationRequested();
-        if (AppearanceCurrent(generation)) AcceptAppearance(settings);
+        if (AppearanceCurrent(currentGeneration)) AcceptAppearance(settings);
     }
 
     internal async Task EnsureAppearanceAsync()
     {
-        long generation = appearanceGeneration;
+        long currentGeneration = appearanceGeneration;
         await appearanceWork;
-        if (AppearanceCurrent(generation) && !appearanceLoaded) await ReloadAppearanceAsync();
+        if (AppearanceCurrent(currentGeneration) && !appearanceLoaded) await ReloadAppearanceAsync();
     }
 
     internal Task ReloadAppearanceAsync()
     {
         if (appearanceBusy || stopping || disposed) return Task.CompletedTask;
         appearanceBusy = true;
-        long generation = appearanceGeneration;
-        AppearanceBindings();
+        long currentGeneration = appearanceGeneration;
+        NotifyAppearanceBindings();
         return appearanceWork = RunAsync(async () =>
         {
             try { await ReadAppearance(lifetime.Token); }
-            catch { if (AppearanceCurrent(generation)) appearanceStatus = "外观设置读取失败"; }
-            finally { appearanceBusy = false; if (AppearanceCurrent(generation)) AppearanceBindings(); }
+            catch { if (AppearanceCurrent(currentGeneration)) appearanceStatus = "外观设置读取失败"; }
+            finally { appearanceBusy = false; if (AppearanceCurrent(currentGeneration)) NotifyAppearanceBindings(); }
         });
     }
 
@@ -146,51 +147,49 @@ public sealed partial class MusicSettingsController
         }
         if (playlistView == savedPlaylistView && colorMode == savedColorMode &&
             colorPalette == savedColorPalette) return Task.CompletedTask;
-        long revision = appearanceRevision;
+        long expectedRevision = appearanceRevision;
         appearanceBusy = true;
-        long generation = appearanceGeneration;
-        AppearanceBindings();
+        long currentGeneration = appearanceGeneration;
+        NotifyAppearanceBindings();
         return appearanceWork = RunAsync(async () =>
         {
             try
             {
                 var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.Appearance,
-                    ct => application.SaveAppearanceAsync(revision, playlistView, "starlight", colorMode, colorPalette, ct),
+                    ct => application.SaveAppearanceAsync(expectedRevision, playlistView, "starlight", colorMode, colorPalette, ct),
                     lifetime.Token);
-                if (AppearanceCurrent(generation)) AcceptAppearance(saved);
+                if (AppearanceCurrent(currentGeneration)) AcceptAppearance(saved);
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
             {
-                if (!AppearanceCurrent(generation)) return;
+                if (!AppearanceCurrent(currentGeneration)) return;
                 try
                 {
                     var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.Appearance,
                         ct => application.GetAppearanceAsync(ct), lifetime.Token);
-                    if (!AppearanceCurrent(generation)) return;
+                    if (!AppearanceCurrent(currentGeneration)) return;
                     AcceptAppearance(current);
                     if (!AppearanceMatches(playlistView, colorMode, colorPalette))
-                        appearanceStatus = error.Code == "REVISION_CONFLICT"
-                            ? "外观设置已更新"
-                            : "外观设置保存失败";
+                        appearanceStatus = error.Code == "REVISION_CONFLICT" ? "外观设置已更新" : "外观设置保存失败";
                 }
                 catch
                 {
-                    if (!AppearanceCurrent(generation)) return;
+                    if (!AppearanceCurrent(currentGeneration)) return;
                     appearanceLoaded = false;
                     appearanceStatus = "外观设置保存失败";
                 }
             }
             catch
             {
-                if (!AppearanceCurrent(generation)) return;
+                if (!AppearanceCurrent(currentGeneration)) return;
                 appearanceLoaded = false;
                 appearanceStatus = "外观设置保存失败";
             }
             finally
             {
                 appearanceBusy = false;
-                if (AppearanceCurrent(generation)) AppearanceBindings();
+                if (AppearanceCurrent(currentGeneration)) NotifyAppearanceBindings();
             }
         });
     }

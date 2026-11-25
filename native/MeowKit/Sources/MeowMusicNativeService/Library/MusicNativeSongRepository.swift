@@ -36,7 +36,6 @@ extension NativeMusicService {
             let proposed = proposedInput[inputIndex], incoming = proposed.sources
             let explicit = proposed.songID
             if !authoritative, !explicit.isEmpty, let stored = try store.song(id: explicit) {
-                try MusicLibraryValidation.validateSong(stored, id: explicit)
                 project?(explicit, stored)
                 result.append(explicit)
                 previous = (raw, explicit)
@@ -129,19 +128,11 @@ extension NativeMusicService {
     }
 
     func repositorySong(_ id: String, _ state: MusicDomainState) throws -> MusicSongRecord {
-        let song = try state.song(id)
-        try musicRequire(UUID(uuidString: id) != nil && musicSame(song.songID, id), .songIDConflict)
-        _ = try MusicModel.sources(song)
-        return song
+        try state.song(id)
     }
 
     func repositorySongMap(_ ids: [String], _ state: MusicDomainState) throws -> [String: MusicSongRecord] {
-        let batch = try state.projectSongs(ids)
-        for (id, song) in batch {
-            try musicRequire(UUID(uuidString: id) != nil && musicSame(song.songID, id), .songIDConflict)
-            _ = try MusicModel.sources(song)
-        }
-        return batch
+        try state.projectSongs(ids)
     }
 
     func repositorySongs(_ ids: [String], _ state: MusicDomainState) throws -> [MusicSongRecord] {
@@ -200,7 +191,7 @@ extension NativeMusicService {
         var normalized: [MusicSongRecord] = [], recommendations: [Data?] = []
         var previous: (track: MusicNativeTrackData, song: MusicSongRecord, recommendation: Data?)?
         for track in tracks {
-            if let previous, musicSame(previous.track.platform, track.platform), previous.track.data == track.data {
+            if let previous, previous.track.platform == track.platform, previous.track.data == track.data {
                 normalized.append(previous.song); recommendations.append(previous.recommendation)
             } else {
                 let song = try MusicModel.normalize(track)
@@ -229,13 +220,12 @@ extension NativeMusicService {
         var previous: (reference: MusicQueueTrackReference, data: Data)?
         return try references.map { reference in
             try access.check()
-            if let previous, musicSame(previous.reference.songID, reference.songID),
-               musicSame(previous.reference.sourceKey, reference.sourceKey),
+            if let previous, previous.reference.songID == reference.songID,
+               previous.reference.sourceKey == reference.sourceKey,
                previous.reference.recommendation == reference.recommendation {
                 return .init(platform: reference.platform, data: previous.data, sourcePosition: reference.sourcePosition)
             }
             guard let song = songs[reference.songID] else { throw MusicServiceError.notFound }
-            try musicRequire(UUID(uuidString: reference.songID) != nil && musicSame(song.songID, reference.songID), .songIDConflict)
             guard let source = song.sources.first(where: { $0.sourceKey == reference.sourceKey }) else {
                 throw MusicServiceError.notFound
             }
@@ -251,7 +241,6 @@ extension NativeMusicService {
         return .init(items: try page.items.map { reference in
             try access.check()
             guard let song = songs[reference.songID] else { throw MusicServiceError.notFound }
-            try musicRequire(UUID(uuidString: reference.songID) != nil && musicSame(song.songID, reference.songID), .songIDConflict)
             return try MusicModel.track(
                 song,
                 .init(kind: .library, id: reference.songID, occurrence: reference.occurrenceID),
@@ -299,9 +288,8 @@ extension NativeMusicService: MusicSongRepositoryReading {
     public func repositoryTracks(songIDs: Set<String>) async throws -> [String: MusicRemoteTrack] {
         let state = try read()
         let batch = try state.songRows.songs(ids: songIDs)
-        return try Dictionary(uniqueKeysWithValues: batch.compactMap { id, song in
-            try MusicLibraryValidation.validateSong(song, id: id)
-            return (id, try MusicModel.track(song, .init(kind: .library, id: id)))
+        return try Dictionary(uniqueKeysWithValues: batch.map { id, song in
+            (id, try MusicModel.track(song, .init(kind: .library, id: id)))
         })
     }
 

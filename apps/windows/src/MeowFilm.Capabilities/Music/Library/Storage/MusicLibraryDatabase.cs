@@ -55,7 +55,6 @@ public sealed class MusicLibraryCommit
     public IReadOnlyList<MusicHistoryPlaylistMutation> HistoryPlaylists { get; init; } = [];
     public IReadOnlyList<MusicHistoryDayMutation> HistoryDays { get; init; } = [];
     public MusicPlaybackModeRecord? PlaybackMode { get; init; }
-    public MusicOnlineSettingsRecord? OnlineSettings { get; init; }
     public MusicDeviceSettingsRecord? DeviceSettings { get; init; }
     public MusicAppearanceRecord? Appearance { get; init; }
     public MusicCatalogSourceRecord? CatalogSource { get; init; }
@@ -79,7 +78,6 @@ public sealed class MusicLibraryCommit
         HistoryPlaylists.Count == 0 &&
         HistoryDays.Count == 0 &&
         PlaybackMode is null &&
-        OnlineSettings is null &&
         DeviceSettings is null &&
         Appearance is null &&
         CatalogSource is null &&
@@ -352,8 +350,6 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
 
             if (commit.PlaybackMode is { } mode)
                 MusicSettingsStore.WritePlaybackMode(db, scope, mode);
-            if (commit.OnlineSettings is { } online)
-                MusicSettingsStore.WriteOnlineSettings(db, scope, online);
             if (commit.DeviceSettings is { } device)
                 MusicSettingsStore.WriteDeviceSettings(db, scope, device);
             if (commit.Appearance is { } appearance)

@@ -72,7 +72,7 @@ export function parseRuleObject(value) {
   return parsed;
 }
 
-export function splitTopLevel(rule, operator) {
+function splitTopLevel(rule, operator) {
   const source = toText(rule);
   const parts = [];
   let start = 0, braces = 0, brackets = 0, quote = '';
@@ -99,7 +99,7 @@ export function splitTopLevel(rule, operator) {
   return parts;
 }
 
-export function applyReplacement(value, rule) {
+function applyReplacement(value, rule) {
   const source = toText(rule);
   let parts = splitTopLevel(source, '##');
   if (!parts) {

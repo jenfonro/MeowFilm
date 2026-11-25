@@ -5,20 +5,17 @@ import MeowMusicFeature
 
 enum MusicLibraryValidation {
     static func validateSong(_ song: MusicSongRecord, id: String) throws {
-        try musicRequire(UUID(uuidString: id) != nil && song.songID.utf8.elementsEqual(id.utf8), .songIDConflict)
+        try musicRequire(UUID(uuidString: id) != nil && song.songID == id, .songIDConflict)
         _ = try MusicModel.sources(song)
     }
 }
 
 extension NativeMusicService: MusicCollectionMembershipServing {
     func collection(_ id: String, _ d: MusicDomainState) throws -> MusicCollectionRecord {
-        let rows = d.library.collections.filter { musicSame($0.id, id) && !$0.deleted }
-        guard let c = rows.first else { throw MusicServiceError.notFound }
-        try musicRequire(rows.count == 1 && !id.isEmpty, .corruptStorage)
-        try musicRequire(["favorites", "playlist"].contains(c.kind), .corruptStorage)
+        guard let c = d.library.collections.first(where: { $0.id == id && !$0.deleted }) else {
+            throw MusicServiceError.notFound
+        }
         try musicRequire((id == "favorites") == (c.kind == "favorites"), .favoritesProtected)
-        try musicRequire((0...musicMaxSafeInteger).contains(c.revision) && c.order.allSatisfy { !$0.isEmpty }, .corruptStorage)
-        try musicRequire(musicIDs(c.order).count == c.order.count, .corruptStorage)
         return c
     }
 
@@ -33,7 +30,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
 
     func saveCollection(_ c: MusicCollectionRecord, _ d: inout MusicDomainState) throws {
         try musicRequire((0...musicMaxSafeInteger).contains(c.revision), .limit)
-        let positions = d.library.collections.indices.filter { musicSame(d.library.collections[$0].id, c.id) }
+        let positions = d.library.collections.indices.filter { d.library.collections[$0].id == c.id }
         try musicRequire(positions.count <= 1, .corruptStorage)
         if let i = positions.first { d.library.collections[i] = c } else { d.library.collections.append(c) }
         d.library.libraryRevision += 1
@@ -42,11 +39,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
 
     public func collections() async throws -> [MusicCollection] {
         let state = try read()
-        let rows = state.library.collections.filter { !$0.deleted }
-        let identities = Dictionary(grouping: rows, by: { Data($0.id.utf8) })
-        let validRows = rows.filter {
-            !$0.id.isEmpty && identities[Data($0.id.utf8)]?.count == 1 && (0...musicMaxSafeInteger).contains($0.revision)
-        }
+        let validRows = state.library.collections.filter { !$0.deleted && !$0.id.isEmpty }
         let coverSongIDs = Set(validRows.compactMap(\.order.first).filter { !$0.isEmpty })
         let coverSongs = coverSongIDs.isEmpty ? [:] : try state.songRows.songs(ids: coverSongIDs)
         let managed: [MusicCollection] = validRows.map { row in
@@ -60,14 +53,8 @@ extension NativeMusicService: MusicCollectionMembershipServing {
                 artwork: first.flatMap { MusicModel.artworkURL($0.coverURL) }
             )
         }
-        let references = state.library.networkReferences.filter(\.present)
-        let network = references.compactMap { try? networkCollectionDTO($0) }
-        let values = managed + network
-        let ids = Dictionary(grouping: values, by: { Data($0.id.utf8) })
-        let visible = values.filter { ids[Data($0.id.utf8)]?.count == 1 }
-        let empty = rows.isEmpty && state.library.networkReferences.allSatisfy { !$0.present }
-        try musicRequire(empty || !visible.isEmpty, .corruptStorage)
-        return visible
+        let network = state.library.networkReferences.filter(\.present).compactMap { try? networkCollectionDTO($0) }
+        return managed + network
     }
 
     public func tracks(in requested: MusicCollection) async throws -> [MusicRemoteTrack] {
@@ -113,7 +100,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
             try musicRequire(c.revision == requested.revision, .revisionConflict)
             var next = try refs.map { try collectionSongIDs($0, state: d) } ?? c.order
             if let order {
-                try musicRequire(order.count == next.count && musicIDs(order).count == order.count && musicIDs(order) == musicIDs(next))
+                try musicRequire(order.count == next.count && Set(order).count == order.count && Set(order) == Set(next))
                 next = order
             }
             try finishCollectionEdit(&c, next: next, name: name, state: &d)
@@ -137,12 +124,12 @@ extension NativeMusicService: MusicCollectionMembershipServing {
             var c = try collection(requested.id, d)
             try musicRequire(c.revision == requested.revision, .revisionConflict)
             let added = try collectionSongIDs(adding, state: d)
-            let removed = Set(try collectionSongIDs(removing, state: d).map { Data($0.utf8) })
-            try musicRequire(removed.isDisjoint(with: added.map { Data($0.utf8) }))
+            let removed = Set(try collectionSongIDs(removing, state: d))
+            try musicRequire(removed.isDisjoint(with: added))
             let previous = c.order
-            var next = previous.filter { !removed.contains(Data($0.utf8)) }
-            var seen = Set(next.map { Data($0.utf8) })
-            next += added.filter { seen.insert(Data($0.utf8)).inserted }
+            var next = previous.filter { !removed.contains($0) }
+            var seen = Set(next)
+            next += added.filter { seen.insert($0).inserted }
             guard next != previous else { return collectionDTO(c) }
             try finishCollectionEdit(&c, next: next, name: nil, state: &d)
             return collectionDTO(c)
@@ -152,7 +139,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
     }
 
     private func collectionSongIDs(_ refs: [MusicReference], state: MusicDomainState) throws -> [String] {
-        var seen = Set<Data>()
+        var seen = Set<String>()
         var ids: [String] = []
         for ref in refs {
             let id: String
@@ -160,12 +147,12 @@ extension NativeMusicService: MusicCollectionMembershipServing {
             case .library:
                 id = ref.id
             case .queue:
-                let entries = state.queue.entries.filter { musicSame($0.id, ref.id) }
+                let entries = state.queue.entries.filter { $0.id == ref.id }
                 guard let entry = entries.first else { throw MusicServiceError.notFound }
                 try musicRequire(entries.count == 1, .corruptStorage)
                 id = entry.songID
             }
-            guard seen.insert(Data(id.utf8)).inserted else { continue }
+            guard seen.insert(id).inserted else { continue }
             try musicRequire(UUID(uuidString: id) != nil, .songIDConflict)
             ids.append(id)
         }
@@ -186,7 +173,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
             _ = try musicText(name)
             c.name = name
         }
-        let before = Set(previous.map { Data($0.utf8) }), after = Set(next.map { Data($0.utf8) })
+        let before = Set(previous), after = Set(next)
         let changed = before.symmetricDifference(after)
         if !changed.isEmpty {
             func intent(_ key: String, _ present: Bool) -> MusicCollectionIntentRecord {
@@ -195,14 +182,14 @@ extension NativeMusicService: MusicCollectionMembershipServing {
             var remaining = changed
             var updated: [MusicCollectionIntentRecord] = []
             for row in c.intents {
-                let key = Data(row.intentKey.utf8)
+                let key = row.intentKey
                 guard remaining.remove(key) != nil else { updated.append(row); continue }
                 if after.contains(key) || !c.bindings.isEmpty {
                     updated.append(intent(row.intentKey, after.contains(key)))
                 }
             }
-            for id in previous + next where remaining.remove(Data(id.utf8)) != nil {
-                let present = after.contains(Data(id.utf8))
+            for id in previous + next where remaining.remove(id) != nil {
+                let present = after.contains(id)
                 if present || !c.bindings.isEmpty {
                     updated.append(intent(id, present))
                 }

@@ -1,4 +1,4 @@
-import { afterCloseDispatch, closeResource } from './resource-close.js';
+import { afterCloseDispatch, closeResource, ignoreError } from './resource-close.js';
 import { randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { fault, requireValue } from './errors.js';
@@ -245,7 +245,6 @@ export class CatProxyResources {
   track(target) {
     if (this.resources.has(target)) return;
     const state = { target, closed: false, closing: null };
-    const ignoreError = () => {};
     const detach = afterCloseDispatch(target, () => { state.closed = true; });
     target.on('error', ignoreError);
     state.release = () => {

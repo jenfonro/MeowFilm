@@ -7,7 +7,7 @@ public sealed partial class MusicLibraryController
         var selected = collection;
         var origin = ctx.LoadGeneration;
         var offset = ctx.ActiveSongs.Count;
-        var expectedTotal = total;
+        var expectedTotal = contentState.Total;
         if (!CanLoadMoreCollection || selected is null || offset >= expectedTotal)
             return Task.CompletedTask;
 
@@ -15,7 +15,7 @@ public sealed partial class MusicLibraryController
         {
             if (stopping || origin != ctx.LoadGeneration || collection?.Id != selected.Id ||
                 collection.Revision != selected.Revision || ctx.ActiveSongs.Count != offset ||
-                total != expectedTotal || offset >= expectedTotal)
+                contentState.Total != expectedTotal || offset >= expectedTotal)
                 return;
 
             using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
@@ -34,8 +34,6 @@ public sealed partial class MusicLibraryController
                 if (stopping || origin != ctx.LoadGeneration || collection?.Id != selected.Id ||
                     collection.Revision != selected.Revision || ctx.ActiveSongs.Count != offset)
                     return;
-                var known = ctx.ActiveSongs.Select(row => row.Id).ToHashSet(StringComparer.Ordinal);
-                MusicDto.Require(rows.All(row => known.Add(row.Id)));
                 foreach (var row in rows) ctx.ActiveSongs.Add(row);
             }
             finally
@@ -63,8 +61,6 @@ public sealed partial class MusicLibraryController
             var reply = await application.ReorderSongInCollectionAsync(
                 selected.Id, selected.Revision, source.Id, target.Id, after, lifetime.Token);
             var updated = PlaylistRow.FromSummary(reply);
-            MusicDto.Require(updated.Id == selected.Id && updated.Count == selected.Count &&
-                updated.Revision == selected.Revision + 1);
             if (stopping || origin != ctx.LoadGeneration || collection?.Id != selected.Id ||
                 !ctx.ActiveSongs.Contains(source) || !ctx.ActiveSongs.Contains(target))
                 return;

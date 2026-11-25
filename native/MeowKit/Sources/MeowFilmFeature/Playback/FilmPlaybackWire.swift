@@ -34,13 +34,6 @@ public enum FilmPlaybackIdentifier: Hashable, Sendable {
         case .number(let number): String(number)
         }
     }
-    public static func == (lhs: Self, rhs: Self) -> Bool {
-        switch (lhs, rhs) {
-        case (.string(let a), .string(let b)): a.utf8.elementsEqual(b.utf8)
-        case (.number(let a), .number(let b)): a == b
-        default: false
-        }
-    }
 }
 
 /// Carries the selected identity, not a title-only request or a reconstructed search.
@@ -773,12 +766,6 @@ public struct FilmPlaybackMediaInput: Sendable, CustomStringConvertible, CustomD
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               url.host?.isEmpty == false else { throw FilmPlaybackError.invalidResponse }
         self.sessionID = sessionID; self.attemptID = attemptID; self.url = url
-        if let rawOrigin = fields["mediaOrigin"], rawOrigin != .null {
-            guard let originText = rawOrigin.filmText,
-                  let originURL = URL(string: originText),
-                  ["http", "https"].contains(originURL.scheme?.lowercased() ?? ""),
-                  originURL.host?.isEmpty == false else { throw FilmPlaybackError.invalidResponse }
-        }
         format = fields["format"]?.filmText
         drm = fields["drm"]; title = try fields.filmString("title")
         position = try fields.filmNumber("position"); paused = try fields.filmBool("paused")

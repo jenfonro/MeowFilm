@@ -34,6 +34,27 @@ napi_value Release(napi_env env, napi_callback_info info) {
   lock->Close();
   napi_value value; napi_get_undefined(env, &value); return value;
 }
+#ifdef _WIN32
+bool IsAbsoluteWindowsPath(const std::u16string& path) {
+  if (path.find(u'\0') != std::u16string::npos) return false;
+  auto isSep = [](char16_t ch) { return ch == u'\\' || ch == u'/'; };
+  auto isDrive = [&](size_t pos) {
+    return path.size() >= pos + 4 &&
+      ((path[pos] >= u'A' && path[pos] <= u'Z') || (path[pos] >= u'a' && path[pos] <= u'z')) &&
+      path[pos + 1] == u':' && isSep(path[pos + 2]);
+  };
+  auto isUncTail = [&](size_t pos) {
+    if (pos >= path.size() || isSep(path[pos])) return false;
+    size_t sep = path.find_first_of(u"\\/", pos);
+    return sep != std::u16string::npos && sep + 1 < path.size() && !isSep(path[sep + 1]);
+  };
+  if (isDrive(0)) return true;
+  if (path.size() > 4 && path[0] == u'\\' && path[1] == u'\\' && path[2] == u'?' && path[3] == u'\\' && !isSep(path[4])) {
+    return true;
+  }
+  return path.size() >= 5 && isSep(path[0]) && isSep(path[1]) && isUncTail(2);
+}
+#endif
 napi_value Acquire(napi_env env, napi_callback_info info) {
   napi_value args[3]; size_t count = 3, length = 0; bool exclusive; int32_t timeout;
   if (napi_get_cb_info(env, info, &count, args, nullptr, nullptr) != napi_ok || count != 3 ||
@@ -42,17 +63,26 @@ napi_value Acquire(napi_env env, napi_callback_info info) {
     napi_throw_error(env, "INVALID_REQUEST", "INVALID_REQUEST"); return nullptr;
   }
 #ifdef _WIN32
-  if (napi_get_value_string_utf16(env, args[0], nullptr, 0, &length) != napi_ok) return nullptr;
+  if (napi_get_value_string_utf16(env, args[0], nullptr, 0, &length) != napi_ok) {
+    napi_throw_error(env, "INVALID_REQUEST", "INVALID_REQUEST"); return nullptr;
+  }
   std::u16string path(length + 1, 0);
-  napi_get_value_string_utf16(env, args[0], path.data(), path.size(), &length); path.resize(length);
-  if (path.size() < 4 || path[1] != u':' || (path[2] != u'\\' && path[2] != u'/') ||
-      path.find(u'\0') != std::u16string::npos) {
+  if (napi_get_value_string_utf16(env, args[0], path.data(), path.size(), &length) != napi_ok) {
+    napi_throw_error(env, "INVALID_REQUEST", "INVALID_REQUEST"); return nullptr;
+  }
+  path.resize(length);
+  if (!IsAbsoluteWindowsPath(path)) {
     napi_throw_error(env, "UNSAFE_PATH", "UNSAFE_PATH"); return nullptr;
   }
 #else
-  if (napi_get_value_string_utf8(env, args[0], nullptr, 0, &length) != napi_ok) return nullptr;
+  if (napi_get_value_string_utf8(env, args[0], nullptr, 0, &length) != napi_ok) {
+    napi_throw_error(env, "INVALID_REQUEST", "INVALID_REQUEST"); return nullptr;
+  }
   std::string path(length + 1, 0);
-  napi_get_value_string_utf8(env, args[0], path.data(), path.size(), &length); path.resize(length);
+  if (napi_get_value_string_utf8(env, args[0], path.data(), path.size(), &length) != napi_ok) {
+    napi_throw_error(env, "INVALID_REQUEST", "INVALID_REQUEST"); return nullptr;
+  }
+  path.resize(length);
   if (path.empty() || path[0] != '/' || path.find('\0') != std::string::npos) {
     napi_throw_error(env, "UNSAFE_PATH", "UNSAFE_PATH"); return nullptr;
   }

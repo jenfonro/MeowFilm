@@ -46,6 +46,5 @@ export function playbackLog(metadata, records) {
     frame.writeUInt16LE(bytes.length); frame.writeUInt32LE(at / 32768, 2);
     chunks.push(frame, encrypt(bytes, key, uuid));
   }
-  key.fill(0);
   return Buffer.concat(chunks);
 }

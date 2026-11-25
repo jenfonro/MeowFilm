@@ -59,16 +59,14 @@ import MeowDebug
 /// checks. Revoking it synchronously cancels the tasks using that admission.
 @MainActor final class MusicCollectionPageBinding {
     weak var owner: MusicViewModel?
-    let generation: UUID
     let id = UUID()
     var active = true
 
     init(owner: MusicViewModel) {
-        self.owner = owner; generation = owner.accountAccessGeneration
+        self.owner = owner
     }
     func matches(_ owner: MusicViewModel) -> Bool {
-        active && self.owner === owner && !owner.isClosed &&
-        owner.accountAccessGeneration == generation
+        active && self.owner === owner && !owner.isClosed
     }
     func check(_ owner: MusicViewModel) throws {
         try Task.checkCancellation()
@@ -158,13 +156,12 @@ enum MusicCollectionOwnerChange {
     public var canEdit: Bool { canAct && collection?.canEdit == true }
     public var canRename: Bool { canEdit && collection?.kind == "playlist" }
     public var isCurrentCollection: Bool {
-        guard searchQuery.isEmpty, isAvailable, model.current != nil else { return false }
+        guard searchQuery.isEmpty, !model.isClosed, model.current != nil else { return false }
         if let currentQueueCollectionID {
             return currentQueueCollectionID()?.utf8.elementsEqual(collectionID.utf8) == true
         }
         guard let receipt = collectionQueue,
-              receipt.generation == model.accountAccessGeneration,
-              receipt.entries == model.queue.map(\.id), !receipt.entries.isEmpty else { return false }
+              receipt == model.queue.map(\.id), !receipt.isEmpty else { return false }
         return true
     }
     public var isPlayingCollection: Bool {
@@ -173,9 +170,8 @@ enum MusicCollectionOwnerChange {
     public var playAllTitle: String {
         isPlayingCollection ? "暂停播放" : isCurrentCollection ? "继续播放" : "播放全部"
     }
-    public var isAvailable: Bool { !model.isClosed }
     public var canAct: Bool {
-        visible && isAvailable && !isMissing && !isLoading && !isActing &&
+        visible && !model.isClosed && !isMissing && !isLoading && !isActing &&
         !needsReload && collection != nil && binding?.matches(model) == true
     }
 
@@ -196,7 +192,7 @@ enum MusicCollectionOwnerChange {
     private var favoriteReadID: UUID?
     // Receipt of this page's successful unfiltered queue transaction. Never
     // infer source identity from matching song titles or another list's tracks.
-    @Published private var collectionQueue: (generation: UUID, entries: [String])?
+    @Published private var collectionQueue: [String]?
 
     /// Supply the queue owner's authoritative local collection ID when it is
     /// exposed by product composition. nil provider means only this page's
@@ -225,19 +221,18 @@ enum MusicCollectionOwnerChange {
     }
     private func observeSongs() {
         songObservation?.cancel(); songObservation = nil
-        guard visible, isAvailable, let repository = model.service as? any MusicSongRepositoryReading else { return }
-        let access = model.accountAccessGeneration
+        guard visible, !model.isClosed, let repository = model.service as? any MusicSongRepositoryReading else { return }
         songObservation = Task { [weak self] in
             let changes = await repository.songChanges()
-            await self?.refreshSongProjections(repository, access: access)
+            await self?.refreshSongProjections(repository)
             for await changed in changes {
                 guard !Task.isCancelled else { return }
-                await self?.refreshSongProjections(repository, access: access, changed: changed)
+                await self?.refreshSongProjections(repository, changed: changed)
             }
         }
     }
-    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID, changed: Set<String>? = nil) async {
-        guard !Task.isCancelled, visible, isAvailable, model.accountAccessGeneration == access else { return }
+    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, changed: Set<String>? = nil) async {
+        guard !Task.isCancelled, visible, !model.isClosed else { return }
         let id = presentationID, projection = UUID()
         let referenced = Set((tracks + (editor?.tracks ?? [])).map(\.songId))
         let ids = changed.map { referenced.intersection($0) } ?? referenced
@@ -245,7 +240,7 @@ enum MusicCollectionOwnerChange {
         songProjectionID = projection
         do {
             let songs = try await repository.repositoryTracks(songIDs: ids)
-            guard !Task.isCancelled, visible, isAvailable, model.accountAccessGeneration == access,
+            guard !Task.isCancelled, visible, !model.isClosed,
                   presentationID == id, songProjectionID == projection else { return }
             tracks = tracks.map { $0.projected(songs) }; editor?.project(songs)
         } catch {
@@ -276,9 +271,9 @@ enum MusicCollectionOwnerChange {
         case .access:
             observeSongs()
             invalidate()
-            if isAvailable && !isMissing { reload() }
+            if !model.isClosed && !isMissing { reload() }
         case .catalogue(let rows):
-            guard isAvailable, !isMissing else { return }
+            guard !model.isClosed, !isMissing else { return }
             guard let next = rows.first(where: { $0.id.utf8.elementsEqual(collectionID.utf8) }) else {
                 invalidate(); isMissing = true; return
             }
@@ -303,13 +298,13 @@ enum MusicCollectionOwnerChange {
     }
     @discardableResult public func reload(preservingContent: Bool = false) -> Task<Void, Never>? {
         let retained: MusicCollectionPageSnapshot?
-        if preservingContent, visible, isAvailable, !isMissing,
+        if preservingContent, visible, !model.isClosed, !isMissing,
            editor == nil || editor?.ticket.consumed == true,
            binding?.matches(model) == true, let collection {
             retained = .init(collection: collection, tracks: tracks)
         } else { retained = nil }
         invalidate()
-        guard visible, isAvailable, !isMissing else { return nil }
+        guard visible, !model.isClosed, !isMissing else { return nil }
         // Retains the same owner's content during a refresh as display-only
         // until the fresh read succeeds.
         if let retained { collection = retained.collection; tracks = retained.tracks }
@@ -333,7 +328,7 @@ enum MusicCollectionOwnerChange {
                     self.favoriteSnapshot = (snapshot.collection, Set(snapshot.tracks.map(\.ref))); self.favoritesLoaded = true
                 } else { self.refreshFavorites() }
                 if let repository = self.model.service as? any MusicSongRepositoryReading {
-                    await self.refreshSongProjections(repository, access: self.model.accountAccessGeneration)
+                    await self.refreshSongProjections(repository)
                 }
             } catch {
                 guard own.matches(self.model), self.visible, self.binding === own else { return }
@@ -458,7 +453,7 @@ enum MusicCollectionOwnerChange {
             guard let self, self.filterID == filterID else { return }
             if !toggle, unfiltered, model.state.revision != previousRevision,
                model.queue.map({ Data($0.track.songId.utf8) }) == filtered.map({ Data($0.songId.utf8) }) {
-                self.collectionQueue = (model.accountAccessGeneration, model.queue.map(\.id))
+                self.collectionQueue = model.queue.map(\.id)
             } else if !toggle { self.collectionQueue = nil }
         }
     }

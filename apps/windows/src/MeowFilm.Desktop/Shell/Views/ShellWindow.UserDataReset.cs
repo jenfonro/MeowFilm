@@ -1,12 +1,8 @@
-using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
-
 namespace MeowFilm.Desktop;
 
 public sealed partial class ShellWindow
 {
     private readonly Func<Task>? _resetUserData;
-    private DependencyObject? _resetFocus;
     private bool _userDataResetStarted, _userDataResetBusy;
 
     internal bool IsUserDataResetStarted => _userDataResetStarted;
@@ -15,30 +11,21 @@ public sealed partial class ShellWindow
     {
         if (_resetUserData is null || _isClosing || _isClosed || _closeCoordinator.IsSessionEnding ||
             _closeCoordinator.IsChoiceQueued || IsSystemModalOpen) return;
-        _resetFocus = DesktopVisual.Focused(Root);
-        SetModalGatesEnabled(false);
-        ResetDialog.Open();
-        _nativeCaption?.RefreshImmediate();
+        _resetDialog.PrepareOpen();
+        ShowSystemModal(_resetDialog, zIndex: 110, onCloseRequested: CancelUserDataReset);
+        _resetDialog.FocusInitial();
     }
 
     internal void CancelUserDataReset()
     {
-        if (_userDataResetStarted || !ResetDialog.IsOpen || _isClosing || _closeCoordinator.IsSessionEnding) return;
-        ResetDialog.Visibility = Visibility.Collapsed;
-        SetModalGatesEnabled(true);
-        _nativeCaption?.RefreshImmediate();
-        var focus = _resetFocus;
-        _resetFocus = null;
-        if (focus is Control { IsEnabled: true, Visibility: Visibility.Visible } target) target.Focus(FocusState.Programmatic);
+        if (_userDataResetStarted || !_resetDialog.IsOpen || _isClosing || _closeCoordinator.IsSessionEnding) return;
+        DismissSystemModal(_resetDialog, restoreFocus: true);
     }
-
-    internal void ConfirmUserDataResetAction() => OnUserDataResetConfirmed();
 
     private async void OnUserDataResetConfirmed()
     {
-        if (_resetUserData is null || _userDataResetBusy || _isClosed || _closeCoordinator.IsSessionEnding || !ResetDialog.IsOpen) return;
+        if (_resetUserData is null || _userDataResetBusy || _isClosed || _closeCoordinator.IsSessionEnding || !_resetDialog.IsOpen) return;
         _userDataResetBusy = _userDataResetStarted = true;
-        _resetFocus = null;
         _isClosing = true;
         _state.IsInteractive = false;
         _modules.RetryPlan = null;
@@ -48,7 +35,7 @@ public sealed partial class ShellWindow
         CancelActive();
         CancelPageActivation();
         _modules.CancelAllRequests();
-        ResetDialog.SetBusy("正在清除…");
+        _resetDialog.SetBusy("正在清除…");
         try
         {
             await _resetUserData();
@@ -60,7 +47,7 @@ public sealed partial class ShellWindow
 
     internal void OnUserDataResetExit()
     {
-        if (!_userDataResetStarted || _userDataResetBusy || _isClosed || _closeCoordinator.IsSessionEnding || !ResetDialog.IsOpen) return;
+        if (!_userDataResetStarted || _userDataResetBusy || _isClosed || _closeCoordinator.IsSessionEnding || !_resetDialog.IsOpen) return;
         _userDataResetStarted = false;
         _ = _closeCoordinator.EnsureShutdownAsync();
         _ = _closeCoordinator.RequestFinalCloseAsync();
@@ -70,6 +57,6 @@ public sealed partial class ShellWindow
     {
         if (_isClosed || _closeCoordinator.IsSessionEnding) return;
         SetModalGatesEnabled(false);
-        ResetDialog.ShowFailure(message);
+        _resetDialog.ShowFailure(message);
     }
 }

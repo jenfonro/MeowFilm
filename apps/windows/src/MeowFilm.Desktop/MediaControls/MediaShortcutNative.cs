@@ -10,7 +10,7 @@ internal static class MediaShortcutNative
     internal const uint DestroyMessage = 0x0082;
     internal const uint NoRepeat = 0x4000;
     internal static readonly int RetirementMessage =
-        unchecked((int)RegisterWindowMessageW("MeowFilm.Desktop.MediaShortcut.RetireRegistration"));
+        unchecked((int)NativeWin32.RegisterWindowMessageW("MeowFilm.Desktop.MediaShortcut.RetireRegistration"));
 
     internal static bool Attach(nint hwnd, NativeWin32.SubclassProc callback, nuint id) => NativeWin32.SetWindowSubclass(hwnd, callback, id, 0);
     internal static bool Detach(nint hwnd, NativeWin32.SubclassProc callback, nuint id) => NativeWin32.RemoveWindowSubclass(hwnd, callback, id);
@@ -39,7 +39,7 @@ internal static class MediaShortcutNative
     }
 
     internal static bool PostRetirement(nint hwnd, int id) =>
-        RetirementMessage != 0 && PostMessageW(hwnd, RetirementMessage, id, 0);
+        RetirementMessage != 0 && NativeWin32.PostMessageW(hwnd, unchecked((uint)RetirementMessage), unchecked((nuint)id), 0);
 
     internal static nint ForegroundWindow => NativeWin32.GetForegroundWindow();
     internal static bool OwnsWindow(nint window, nint candidate)
@@ -88,11 +88,6 @@ internal static class MediaShortcutNative
     private static extern ushort GlobalAddAtomW(string name);
     [DllImport("kernel32.dll", ExactSpelling = true)]
     private static extern ushort GlobalDeleteAtom(ushort atom);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
-    private static extern uint RegisterWindowMessageW(string name);
-    [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostMessageW(nint hwnd, int message, nint wParam, nint lParam);
     [DllImport("user32.dll", ExactSpelling = true)]
     private static extern nint GetWindow(nint hwnd, uint command);
     [DllImport("user32.dll", ExactSpelling = true)]

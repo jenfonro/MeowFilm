@@ -16,7 +16,6 @@ import MeowDebug
     private nonisolated(unsafe) var draining: Task<Void, Never>?
     private nonisolated(unsafe) var authorization: MusicQueueAuthorization?
     private var requestID: UUID?
-    private var generation: UUID?
     private var epoch = UUID()
     private var active = false
     private var pendingMutation = false
@@ -26,15 +25,13 @@ import MeowDebug
         self.service = service; refresh = onLibraryChanged
     }
 
-    /// Call from meowfilm's application owner on scene/protection/account-generation
-    /// changes. No visible settings page is required, and inactive pages do not
+    /// Call from meowfilm's application owner on scene/lifecycle changes.
+    /// No visible settings page is required, and inactive pages do not
     /// create additional owners.
-    public func activate(isAvailable: Bool, accessGeneration: UUID, isForeground: Bool) {
-        let next = isAvailable && isForeground
-        guard next != active || accessGeneration != generation else { return }
+    public func setActive(_ shouldRun: Bool) {
+        guard shouldRun != active else { return }
         stop()
-        generation = accessGeneration
-        guard next else { return }
+        guard shouldRun else { return }
         active = true
         let own = epoch, service = service, previous = draining
         events = Task { [weak self] in

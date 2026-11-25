@@ -8,7 +8,7 @@ function cloneJSONValue(value) {
 }
 
 /** Stack contract shared by every protocol. */
-export const SCRIPT_LIMITS = Object.freeze({
+const SCRIPT_LIMITS = Object.freeze({
   maxStackBytes: 256 * 1024,
 });
 

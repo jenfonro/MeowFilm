@@ -9,7 +9,7 @@ const productNumber = 'YD00000558929251';
 const businessId = 'bd5d2f973ef74cd2a61325a412ae54d9';
 const failure = code => Object.assign(new Error(code), { code });
 
-// Use Node native HTTPS with a fixed 10-second budget and no redirects.
+// Use Node native HTTPS with a fixed 10-second budget and no redirect following.
 function downloadTool() {
   return new Promise((resolve, reject) => {
     const request = https.get(toolURL, { signal: AbortSignal.timeout(10_000) }, response => {

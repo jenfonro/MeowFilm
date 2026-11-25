@@ -67,7 +67,7 @@ public sealed partial class MusicQueueController
     public string PlaybackModeActionKey => PlaybackSourceActionKey + ":" + playbackController.Mode + ":" + RecommendationContinue;
     public string PlaybackFmTitle => PlaybackFmRuleId.Length > 0 || PlaybackFmTabTagId.Length > 0
         ? "频道漫游" : PlaybackFmMode == "scene"
-            ? catalogPort.CatalogFmScenes.FirstOrDefault(choice => choice.Key == PlaybackFmScene)?.Name ?? "私人漫游"
+            ? MusicCatalogDispatcher.FmScenes.FirstOrDefault(choice => choice.Key == PlaybackFmScene)?.Name ?? "私人漫游"
             : PlaybackFmModes.FirstOrDefault(choice => choice.Key == PlaybackFmMode)?.Name ?? "私人漫游";
     public bool CanChangePlaybackMode => !stopping && playbackController.QueueSaved;
     public MusicCatalogChoice[] PlaybackFmModes { get; } =
@@ -96,7 +96,7 @@ public sealed partial class MusicQueueController
         get
         {
             var account = accounts.Accounts.Single(value => value.Platform == "wy");
-            return recommendationCommandEpoch + ":" + recommendationRevision + ":" + catalogPort.CatalogActionGeneration + ":" +
+            return recommendationCommandEpoch + ":" + recommendationRevision + ":" + catalogActions.Generation + ":" +
                 accounts.AccountEpoch + ":" + account.UserId + ":" + account.Generation + ":" +
                 playbackController.QueueEpoch + ":" + playbackController.PlaybackPresentationKey;
         }
@@ -225,8 +225,8 @@ public sealed partial class MusicQueueController
         if (stopping) return;
         var token = recommendationLifetime.Token;
         long command = ++recommendationCommandEpoch;
-        if (!isStart && catalogPort.PreparingCatalogCard is { Kind: "fm" or "similar" or "heartbeat" })
-            catalogPort.ClearPreparingCatalogCard();
+        if (!isStart)
+            catalogActions.ClearPreparingCardIf(card => card.Kind is "fm" or "similar" or "heartbeat");
         RecommendationBindings();
         try
         {
@@ -265,28 +265,28 @@ public sealed partial class MusicQueueController
     public Task ChangePlaybackFmAsync(string mode, string submode, string actionKey)
     {
         if (!HasPlaybackFm || !CanChangePlaybackMode || actionKey != PlaybackFmActionKey ||
-            !(mode == "scene" ? catalogPort.CatalogFmScenes.Any(choice => choice.Key == submode) :
+            !(mode == "scene" ? MusicCatalogDispatcher.FmScenes.Any(choice => choice.Key == submode) :
                 submode.Length == 0 && PlaybackFmModes.Any(choice => choice.Key == mode))) return Task.CompletedTask;
-        return StartRecommendation(MusicCatalogController.Target("fm", "wy", "私人漫游", new(Mode: mode, Submode: submode)));
+        return StartRecommendation(MusicCatalogDispatcher.Target("fm", "wy", "私人漫游", new(Mode: mode, Submode: submode)));
     }
     public Task HeartbeatCurrentAsync(string presentationKey)
     {
         if (!CanHeartbeatCurrent || presentationKey != playbackController.PlaybackPresentationKey) return Task.CompletedTask;
         var entryId = playbackController.CurrentSong!.EntryId;
-        return StartRecommendation(MusicCatalogController.Target("heartbeat", "wy", "心动模式",
+        return StartRecommendation(MusicCatalogDispatcher.Target("heartbeat", "wy", "心动模式",
             new(Entry: "current", SongId: CurrentWyId, PlaylistId: HasHeartbeatContext ? HeartbeatPlaylistId : null, SeedEntryId: entryId)));
     }
     public Task RecommendCurrentAsync(string presentationKey)
     {
         if (!CanRecommendCurrent || presentationKey != playbackController.PlaybackPresentationKey) return Task.CompletedTask;
-        return StartRecommendation(MusicCatalogController.Target("queue", "wy", "单曲推荐",
+        return StartRecommendation(MusicCatalogDispatcher.Target("queue", "wy", "单曲推荐",
             new(SeedEntryId: playbackController.CurrentSong!.EntryId, Restore: true)));
     }
 
     internal void AwaitSearchRecommendationStart(long playbackEpoch)
     {
         searchRecommendationStart = new(playbackController.CurrentSong!.EntryId!, playbackEpoch, recommendationCommandEpoch,
-            accounts.AccountEpoch, catalogPort.CatalogAccountObservation("wy"));
+            accounts.AccountEpoch, accounts.PlatformObservation("wy"));
     }
 
     internal void ClearSearchRecommendationStart() => searchRecommendationStart = null;
@@ -298,7 +298,7 @@ public sealed partial class MusicQueueController
         var token = recommendationLifetime.Token;
         bool Current() => !stopping && ReferenceEquals(searchRecommendationStart, intent) &&
             intent.Command == recommendationCommandEpoch && intent.Account == accounts.AccountEpoch &&
-            intent.Observation == catalogPort.CatalogAccountObservation("wy") && intent.Playback == playbackController.PlaybackEpoch &&
+            intent.Observation == accounts.PlatformObservation("wy") && intent.Playback == playbackController.PlaybackEpoch &&
             intent.Entry == playbackController.CurrentSong?.EntryId && playbackController.OwnsCurrent && playback.HasMedia;
         try
         {
@@ -351,14 +351,14 @@ public sealed partial class MusicQueueController
     internal async Task StartRecommendation(CatalogTarget target, MusicCatalogCard? card = null)
     {
         if (stopping) return;
-        catalogPort.InvalidateCatalogAction();
+        catalogActions.Invalidate();
         long command = ++recommendationCommandEpoch;
-        long action = catalogPort.CatalogActionGeneration, navigation = ctx.NavigationSubmission;
-        long observation = catalogPort.CatalogAccountObservation(target.Platform);
+        long action = catalogActions.Generation, navigation = ctx.NavigationSubmission;
+        long observation = accounts.PlatformObservation(target.Platform);
         bool Current() => !stopping && command == recommendationCommandEpoch &&
-            action == catalogPort.CatalogActionGeneration && navigation == ctx.NavigationSubmission &&
-            observation == catalogPort.CatalogAccountObservation(target.Platform);
-        catalogPort.SetPreparingCatalogCard(card);
+            action == catalogActions.Generation && navigation == ctx.NavigationSubmission &&
+            observation == accounts.PlatformObservation(target.Platform);
+        catalogActions.SetPreparingCard(card);
         RecommendationBindings();
         try
         {
@@ -392,11 +392,11 @@ public sealed partial class MusicQueueController
             await RecommendationCommand(true, ct => application.StartRecommendationAsync(request, ct));
         }
         catch (OperationCanceledException) { }
-        catch (Exception error) { if (Current()) catalogPort.PublishCatalogActionError(error); }
+        catch (Exception error) { if (Current()) RecommendationActionError?.Invoke(error); }
         finally
         {
-            if (action == catalogPort.CatalogActionGeneration && ReferenceEquals(catalogPort.PreparingCatalogCard, card))
-                catalogPort.ClearPreparingCatalogCard();
+            if (action == catalogActions.Generation && ReferenceEquals(catalogActions.PreparingCard, card))
+                catalogActions.ClearPreparingCard();
         }
     }
 
@@ -503,6 +503,13 @@ public sealed partial class MusicQueueController
     internal Task<bool> AdvanceRecommendation(bool naturalEnd) => playbackController.CurrentSong?.EntryId is { } id
         ? application.TryAdvanceAsync(id, naturalEnd, true, recommendationLifetime.Token)
         : Task.FromResult(false);
+
+    internal async Task<bool> TryAdvanceRecommendationForStepAsync(bool naturalEnd, CancellationToken token)
+    {
+        if (!await AdvanceRecommendation(naturalEnd)) return false;
+        await RefreshRecommendationQueue(token);
+        return true;
+    }
 
     internal void SealRecommendations()
     {

@@ -168,9 +168,9 @@ public partial class MusicPlayerDetailView : UserControl
     private void RefreshDetailPalette()
     {
         bool contrast = DesktopTheme.GetIsHighContrast(this);
-        ((SolidColorBrush)Resources["Player.DetailText"]).Color = contrast ? SystemAppearance.GetElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText) :
-            global::Windows.UI.Color.FromArgb(255, 235, 234, 237);
-        Foreground = (Brush)Resources["Player.DetailText"];
+        Foreground = contrast
+            ? SystemAppearance.GetElementBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText)
+            : (Brush)DesktopVisual.Resource(this, "Player.DetailText");
         DetailMetadata.Opacity = contrast ? 1 : .68;
         PageBackdrop.Background = contrast
             ? SystemAppearance.GetElementBrush(global::Windows.UI.ViewManagement.UIElementType.Window)

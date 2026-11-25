@@ -13,7 +13,6 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
 {
     private readonly NovelCapability module;
     private readonly NovelWork work = new();
-    private readonly ManagementList sourceList = new(), ruleList = new();
     private readonly Button sourceSort, sourceGroups, sourceMore, ruleGroups, ruleMore;
     private readonly Dictionary<string, MenuFlyout> sourceRowMenus = new(StringComparer.Ordinal);
     private readonly Dictionary<string, MenuFlyout> ruleRowMenus = new(StringComparer.Ordinal);
@@ -67,18 +66,16 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     {
         this.module = module;
         InitializeComponent();
-        SourcesHost.Content = sourceList;
-        RulesHost.Content = ruleList;
         sourceSort = MenuButton("\uE8CB", "排序"); sourceGroups = MenuButton("\uE71C", "分组与协议"); sourceMore = MenuButton("\uE710", "添加书源");
         ruleGroups = MenuButton("\uE71C", "分组"); ruleMore = MenuButton("\uE712", "更多");
-        foreach (var button in new[] { sourceSort, sourceGroups, sourceMore }) sourceList.Tools.Children.Add(button);
-        foreach (var button in new[] { ruleGroups, ruleMore }) ruleList.Tools.Children.Add(button);
-        sourceList.Search.PlaceholderText = "搜索书源"; AutomationProperties.SetName(sourceList.Search, "搜索书源");
-        ruleList.Search.PlaceholderText = "搜索替换规则"; AutomationProperties.SetName(ruleList.Search, "搜索替换规则");
-        sourceList.Search.TextChanged += (_, _) => { sourceQuery = sourceList.Search.Text; RefreshSources(); };
-        ruleList.Search.TextChanged += (_, _) => { ruleQuery = ruleList.Search.Text; RefreshRules(); };
-        sourceList.Delete += () => Run(ct => RemoveSourcesAsync(module.Sources.Sources.Where(s => sourceList.Selected.Contains(s.InstallationId)).ToArray(), ct));
-        ruleList.Delete += () => Run(ct => RemoveRulesAsync(module.Library.Rules.Where(r => ruleList.Selected.Contains(r.Id)).ToArray(), ct));
+        foreach (var button in new[] { sourceSort, sourceGroups, sourceMore }) SourceList.Tools.Children.Add(button);
+        foreach (var button in new[] { ruleGroups, ruleMore }) RuleList.Tools.Children.Add(button);
+        SourceList.Search.PlaceholderText = "搜索书源"; AutomationProperties.SetName(SourceList.Search, "搜索书源");
+        RuleList.Search.PlaceholderText = "搜索替换规则"; AutomationProperties.SetName(RuleList.Search, "搜索替换规则");
+        SourceList.Search.TextChanged += (_, _) => { sourceQuery = SourceList.Search.Text; RefreshSources(); };
+        RuleList.Search.TextChanged += (_, _) => { ruleQuery = RuleList.Search.Text; RefreshRules(); };
+        SourceList.Delete += () => Run(ct => RemoveSourcesAsync(module.Sources.Sources.Where(s => SourceList.Selected.Contains(s.InstallationId)).ToArray(), ct));
+        RuleList.Delete += () => Run(ct => RemoveRulesAsync(module.Library.Rules.Where(r => RuleList.Selected.Contains(r.Id)).ToArray(), ct));
         InitSourceMenus();
         InitRuleMenus();
         visibility = new(this, visible =>
@@ -125,8 +122,8 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         {
             SourcesTab.IsChecked = tab == "sources";
             RulesTab.IsChecked = tab == "rules";
-            SourcesHost.Visibility = tab == "sources" ? Visibility.Visible : Visibility.Collapsed;
-            RulesHost.Visibility = tab == "rules" ? Visibility.Visible : Visibility.Collapsed;
+            SourceList.Visibility = tab == "sources" ? Visibility.Visible : Visibility.Collapsed;
+            RuleList.Visibility = tab == "rules" ? Visibility.Visible : Visibility.Collapsed;
         }
         finally { switchingTab = false; }
     }
@@ -163,7 +160,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         var validIds = allSources.Select(s => s.InstallationId).ToHashSet(StringComparer.Ordinal);
         foreach (string stale in sourceRowMenus.Keys.Where(id => !validIds.Contains(id)).ToArray())
             sourceRowMenus.Remove(stale);
-        sourceList.SetRows(VisibleSources().Select(source => new ManagementRow(source.InstallationId, source.Name,
+        SourceList.SetRows(VisibleSources().Select(source => new ManagementRow(source.InstallationId, source.Name,
             string.Join(" · ", new[] { NovelSourceFields.Title(source.Protocol), source.Group, source.ErrorCode }.Where(value => !string.IsNullOrEmpty(value))), source.Enabled,
             () => Run(ct => EditSourceAsync(source, source.Protocol, ct)), enabled => Run(ct => module.Sources.UpdateAsync(source, new { enabled }, ct)), GetSourceRowMenu(source.InstallationId), source.ErrorCode is not null)).ToArray(),
             allSources.Count, validIds, allSources.Count == 0 ? "暂无书源，请先导入" : "没有匹配的书源");
@@ -186,8 +183,8 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
             Item("粘贴导入", () => Run(async ct => await PreviewSourcesAsync(this, await module.Sources.PreviewImportAsync(text: await NovelPresentation.ClipboardTextAsync(), token: ct), ct))),
             Item("导出书源", () => Run(ct => ExportSourcesAsync(module.Sources.Sources.Select(s => s.InstallationId).ToArray(), ct))));
 
-        sourceList.More.ContextFlyout = Menu(
-            Item("导出选中书源", () => Run(ct => ExportSourcesAsync(sourceList.Selected.ToArray(), ct))),
+        SourceList.More.ContextFlyout = Menu(
+            Item("导出选中书源", () => Run(ct => ExportSourcesAsync(SourceList.Selected.ToArray(), ct))),
             Item("启用所选", () => Run(ct => BatchSourcesAsync(true, ct))),
             Item("禁用所选", () => Run(ct => BatchSourcesAsync(false, ct))));
     }
@@ -255,7 +252,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
 
     private async Task BatchSourcesAsync(bool enabled, CancellationToken token)
     {
-        foreach (var source in module.Sources.Sources.Where(s => sourceList.Selected.Contains(s.InstallationId)).ToArray())
+        foreach (var source in module.Sources.Sources.Where(s => SourceList.Selected.Contains(s.InstallationId)).ToArray())
             await module.Sources.UpdateAsync(source, new { enabled }, token);
     }
 

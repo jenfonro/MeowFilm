@@ -1,10 +1,9 @@
 using System.IO;
-using System.Security.Cryptography;
 using System.Text;
 
 namespace MeowFilm.Platform.Files;
 
-public sealed record SelectedLyricSnapshotData(string Text, string Sha256, string Basename);
+public sealed record SelectedLyricSnapshotData(string Text);
 public enum SelectedLyricSnapshotError { InvalidPath, Unavailable, TooLarge, InUse, ReadFailed, InvalidEncoding }
 public sealed class SelectedLyricSnapshotException(SelectedLyricSnapshotError error) : Exception(error.ToString())
 {
@@ -39,9 +38,7 @@ public static class SelectedLyricSnapshot
             else text = new UTF8Encoding(false, true).GetString(bytes);
             if (text.Length == 0 || text.Any(c => c < 32 && c is not ('\r' or '\n' or '\t')))
                 throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.InvalidEncoding);
-            string sha256 = Convert.ToHexStringLower(SHA256.HashData(snapshot.Bytes));
-            cancellationToken.ThrowIfCancellationRequested();
-            return new(text, sha256, snapshot.Basename);
+            return new(text);
         }
         catch (SelectedFileSnapshotException error)
         { throw new SelectedLyricSnapshotException((SelectedLyricSnapshotError)error.Error); }

@@ -217,14 +217,10 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
             if let current = aggregateCacheBinding?.value {
                 try await checkNativeCacheScope(current); return current
             }
-            let own = epoch
+            let own = epoch, cacheEpoch = localCacheEpoch
             var parts: [MusicAccountPlatform: MusicNativeCacheScope] = [:]
             let platforms = scopes.keys.sorted { $0.rawValue < $1.rawValue }
             for platform in platforms { parts[platform] = try await localCacheScope(platform: platform) }
-            let cacheEpoch = localCacheEpoch
-            for platform in platforms {
-                guard try await localCacheScope(platform: platform) == parts[platform] else { throw MusicServiceError.staleResult }
-            }
             try check(own)
             guard localCacheEpoch == cacheEpoch, cacheLifecycleTail == nil else {
                 throw MusicServiceError.staleResult
@@ -280,7 +276,6 @@ extension NativeMusicAccountService: MusicNativeHomeDisplayProviding {
             let local = try await localCacheScope(platform: .netease)
             let scope: String, guest: AccountSnapshot?
             if let local {
-                try await checkLocalCacheScope(local, platform: .netease)
                 guard let record = localCacheBindings[.netease], record.value == local else { throw MusicServiceError.staleResult }
                 scope = try nativeHomeScope(identity: identity, credentialRevision: record.credentialRevision)
                 guest = nil

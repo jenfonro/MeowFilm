@@ -292,7 +292,7 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
           resolve(baseUrl);
         };
         server.once('error', failure); server.once('listening', listening);
-        server.listen(0);
+        server.listen(0, '127.0.0.1');
       });
     },
     close() {

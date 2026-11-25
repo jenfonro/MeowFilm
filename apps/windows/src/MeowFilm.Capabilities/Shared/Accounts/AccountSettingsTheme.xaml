@@ -14,8 +14,7 @@
  <Style x:Key="Login.Segment" TargetType="RadioButton">
   <Setter Property="MinHeight" Value="32"/><Setter Property="Height" Value="32"/>
   <Setter Property="MinWidth" Value="0"/><Setter Property="Padding" Value="10,4"/><Setter Property="Margin" Value="0"/>
-  <Setter Property="FontSize" Value="13"/><Setter Property="FontWeight" Value="Normal"/>
-  <Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+  <Setter Property="FontSize" Value="13"/>
   <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
   <Setter Property="HorizontalAlignment" Value="Stretch"/><Setter Property="HorizontalContentAlignment" Value="Center"/>
   <Setter Property="VerticalContentAlignment" Value="Center"/><Setter Property="CornerRadius" Value="6"/>
@@ -41,7 +40,7 @@
                       ContentTemplate="{TemplateBinding ContentTemplate}"
                       HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
                       Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}"
-                      FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+                      FontSize="{TemplateBinding FontSize}"/>
    </Grid>
   </ControlTemplate></Setter.Value></Setter>
  </Style>
@@ -58,7 +57,6 @@
   <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.InputSurface}"/>
   <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
   <Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/>
-  <Setter Property="FontWeight" Value="Normal"/>
  </Style>
  <Style x:Key="Account.LoginSurface" TargetType="local:AccountLoginSurface">
   <Setter Property="Width" Value="360"/><Setter Property="Padding" Value="20"/>

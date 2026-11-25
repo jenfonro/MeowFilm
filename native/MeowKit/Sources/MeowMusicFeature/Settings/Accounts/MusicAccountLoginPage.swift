@@ -464,13 +464,12 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
     }
 
     private func presentQRShare(_ image: UIImage) {
-        guard presentedViewController == nil, view.window != nil else { return }
         let activity = UIActivityViewController(activityItems: [image], applicationActivities: nil)
         if let popover = activity.popoverPresentationController {
             popover.sourceView = qrActionButton
             popover.sourceRect = qrActionButton.bounds
         }
-        present(activity, animated: true)
+        presentPageModal(activity, animated: true)
     }
 
     private func closeCard() {

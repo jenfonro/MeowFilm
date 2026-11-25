@@ -42,34 +42,22 @@ public sealed class GrantedMediaFiles
     }
     public async Task<Uri> ResolveAsync(string id, CancellationToken cancellationToken = default)
     {
-        var file = await database.ReadAsync(db => Find(db, id), cancellationToken).ConfigureAwait(false);
-        if (file is null) throw new InvalidDataException("FILE_UNAVAILABLE");
-        ValidateCurrent(file);
+        var path = await database.ReadAsync(db => FindPath(db, id), cancellationToken).ConfigureAwait(false);
+        if (path is null || !Path.IsPathFullyQualified(path) || !extensions.Contains(Path.GetExtension(path)))
+            throw new InvalidDataException("FILE_UNAVAILABLE");
         return await Task.Run(() =>
         {
-            if (!File.Exists(file.Path)) throw new InvalidDataException("FILE_UNAVAILABLE");
-            return new Uri(file.Path);
+            if (!File.Exists(path)) throw new InvalidDataException("FILE_UNAVAILABLE");
+            return new Uri(path);
         }, cancellationToken).ConfigureAwait(false);
     }
-    private static GrantedFile? Find(DatabaseSession db, string id) =>
+    private static string? FindPath(DatabaseSession db, string id) =>
         db.TryQuerySingle(
-            "SELECT grant_id,file_path,title FROM windows_file_grants WHERE grant_id=$id",
-            row => new GrantedFile(row.GetString(0), row.GetString(1), row.GetString(2)),
-            out var file, ("$id", id))
-            ? file
+            "SELECT file_path FROM windows_file_grants WHERE grant_id=$id",
+            row => row.GetString(0),
+            out var path, ("$id", id))
+            ? path
             : null;
-    private void ValidateCurrent(GrantedFile file)
-    {
-        if (file.Id.Length != 70 || !file.Id.StartsWith("local:", StringComparison.Ordinal) ||
-            !IsLowerHex(file.Id.AsSpan(6)) ||
-            !Path.IsPathFullyQualified(file.Path) ||
-            !string.Equals(Path.GetFullPath(file.Path), file.Path, StringComparison.Ordinal) ||
-            !extensions.Contains(Path.GetExtension(file.Path)) ||
-            file.Title.Length == 0 || file.Title != Path.GetFileNameWithoutExtension(file.Path) ||
-            file.Id != "local:" + Convert.ToHexStringLower(SHA256.HashData(
-                Encoding.UTF8.GetBytes(file.Path.ToUpperInvariant()))))
-            throw Corrupt();
-    }
 
     private GrantedFile Grant(string path)
     {
@@ -92,13 +80,6 @@ public sealed class GrantedMediaFiles
         { throw new InvalidDataException("FILE_UNAVAILABLE"); }
     }
 
-    private static bool IsLowerHex(ReadOnlySpan<char> value)
-    {
-        foreach (char c in value)
-            if (c is not (>= '0' and <= '9' or >= 'a' and <= 'f')) return false;
-        return true;
-    }
-
     private static bool IsValidExtension(string extension)
     {
         if (extension.Length is < 2 or > 16 || extension[0] != '.') return false;
@@ -106,6 +87,4 @@ public sealed class GrantedMediaFiles
             if (!char.IsAsciiLetterOrDigit(extension[i])) return false;
         return true;
     }
-
-    private static InvalidDataException Corrupt() => new("CORRUPT_STORAGE");
 }

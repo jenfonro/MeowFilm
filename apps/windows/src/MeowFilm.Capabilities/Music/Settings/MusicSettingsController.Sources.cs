@@ -3,16 +3,22 @@ using System.ComponentModel;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Scripting;
 using MeowFilm.Core.Debug;
+using MeowFilm.Platform.Files;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>
-/// Source management projection: built-in providers and script installations in one table.
-/// Delegates non-UI state, transfer cancellation, file import, and bounded parallel checks
-/// to <see cref="MusicSourceManagementService"/>.
-/// </summary>
 public sealed partial class MusicSettingsController
 {
+    private static readonly string[] OfficialSourcePlatforms = ["wy", "tx", "kg"];
+
+    private readonly object sourceCheckGate = new();
+    private readonly Dictionary<string, MusicSourcePlatformState> officialSourceChecks = new(StringComparer.Ordinal);
+    private readonly HashSet<string> checkingSources = new(StringComparer.Ordinal);
+    private HashSet<string> officialSourcesEnabled = new(OfficialSourcePlatforms, StringComparer.Ordinal);
+    private long officialSourcesRevision;
+    private bool officialSourcesLoaded;
+    private bool scriptsUnavailable;
+    private CancellationTokenSource? sourceTransfer;
     private long sourceManagementGeneration;
     private bool sourceManagementActive = true;
     private bool suppressSourceRowBindings;
@@ -24,15 +30,18 @@ public sealed partial class MusicSettingsController
     {
         sourceManagementActive = false;
         sourceManagementGeneration++;
-        sourceManagement.MarkOfficialUnloaded();
+        officialSourcesLoaded = false;
     }
 
     public ObservableCollection<MusicSourceRow> Sources { get; } = [];
-    public bool CanEditOfficialSources => CanEdit && sourceManagement.OfficialSourcesLoaded;
-    public bool CanEditScripts => CanEdit && !sourceManagement.ScriptsUnavailable;
+    public bool CanEditOfficialSources => CanEdit && officialSourcesLoaded;
+    public bool CanEditScripts => CanEdit && !scriptsUnavailable;
     public bool CanCheckSelectedSources => !stopping && Sources.Any(row => row.Selected && !row.Checking);
     public bool CanRemoveSelectedSources => CanEditScripts && Sources.Any(row => row.Selected && row.IsScript);
-    public bool CanCancelSourceTransfer => sourceManagement.HasActiveTransfer;
+    public bool CanCancelSourceTransfer => sourceTransfer is not null;
+
+    private bool IsCheckingSource(string key) { lock (sourceCheckGate) return checkingSources.Contains(key); }
+    private MusicSourcePlatformState? GetOfficialSourceCheck(string platform) { lock (sourceCheckGate) return officialSourceChecks.GetValueOrDefault(platform); }
 
     internal void SourceBindings()
     {
@@ -85,7 +94,7 @@ public sealed partial class MusicSettingsController
         var settings = await application.GetOnlineSettingsAsync(token);
         token.ThrowIfCancellationRequested();
         if (sourceGeneration is { } current && !SourceManagementCurrent(current)) return;
-        lyricsPort.PublishOnlineSettings(settings.LyricsEnabled);
+        OnlineLyricsEnabledChanged?.Invoke(settings.LyricsEnabled);
     }
 
     private Task RunSourceManagementAsync(Func<long, Task> action)
@@ -110,7 +119,19 @@ public sealed partial class MusicSettingsController
         if (!SourceManagementCurrent(generation)) return;
         await RefreshOfficialSources(token, generation);
         if (!SourceManagementCurrent(generation)) return;
-        var (scripts, unavailableError) = await sourceManagement.ListScriptsAsync(token);
+        MusicScriptSourceItem[] scripts;
+        string? unavailableError = null;
+        try
+        {
+            scripts = (await application.ListSourcesAsync(token)).Items;
+            scriptsUnavailable = false;
+        }
+        catch (MusicOperationException error) when (error.Code == "SCRIPT_RUNTIME_UNAVAILABLE")
+        {
+            scriptsUnavailable = true;
+            scripts = [];
+            unavailableError = ErrorText(error);
+        }
         if (!SourceManagementCurrent(generation)) return;
         if (unavailableError is not null) ctx.SetStatus(unavailableError);
         PublishSources(scripts);
@@ -120,7 +141,10 @@ public sealed partial class MusicSettingsController
     {
         bool editOfficial = CanEditOfficialSources;
         bool editScripts = CanEditScripts;
-        var incoming = sourceManagement.BuildRows(scripts);
+        var incoming = OfficialSourcePlatforms
+            .Select(platform => MusicSourceRow.BuiltIn(platform, officialSourcesEnabled.Contains(platform), GetOfficialSourceCheck(platform)))
+            .Concat(scripts.Select(MusicSourceRow.FromScript))
+            .ToArray();
         var existingByKey = Sources.ToDictionary(row => row.Key, StringComparer.Ordinal);
         var nextRows = new MusicSourceRow[incoming.Length];
         suppressSourceRowBindings = true;
@@ -131,7 +155,7 @@ public sealed partial class MusicSettingsController
                 var candidate = incoming[index];
                 if (existingByKey.TryGetValue(candidate.Key, out var existing) && existing.MatchesData(candidate))
                 {
-                    existing.Checking = sourceManagement.IsChecking(existing.Key);
+                    existing.Checking = IsCheckingSource(existing.Key);
                     existing.CanToggle = existing.IsBuiltIn ? editOfficial : editScripts;
                     nextRows[index] = existing;
                 }
@@ -142,7 +166,7 @@ public sealed partial class MusicSettingsController
                         candidate.Selected = existing.Selected;
                         existing.PropertyChanged -= SourceRowChanged;
                     }
-                    candidate.Checking = sourceManagement.IsChecking(candidate.Key);
+                    candidate.Checking = IsCheckingSource(candidate.Key);
                     candidate.CanToggle = candidate.IsBuiltIn ? editOfficial : editScripts;
                     candidate.PropertyChanged += SourceRowChanged;
                     nextRows[index] = candidate;
@@ -166,7 +190,7 @@ public sealed partial class MusicSettingsController
         }
         finally { suppressSourceRowBindings = false; }
         SourceBindings();
-        playbackPort.PlaybackSourceBindings();
+        SourcesListUpdated?.Invoke();
     }
 
     private void SourceRowChanged(object? sender, PropertyChangedEventArgs args)
@@ -177,17 +201,19 @@ public sealed partial class MusicSettingsController
 
     private void ReplaceSource(MusicSourceRow next)
     {
-        int index = Sources.ToList().FindIndex(row => row.Key == next.Key);
+        int index = -1;
+        for (int i = 0; i < Sources.Count; i++)
+            if (Sources[i].Key == next.Key) { index = i; break; }
         if (index < 0) return;
         var previous = Sources[index];
         previous.PropertyChanged -= SourceRowChanged;
         next.Selected = previous.Selected;
-        next.Checking = sourceManagement.IsChecking(next.Key);
+        next.Checking = IsCheckingSource(next.Key);
         next.CanToggle = next.IsBuiltIn ? CanEditOfficialSources : CanEditScripts;
         next.PropertyChanged += SourceRowChanged;
         Sources[index] = next;
         SourceBindings();
-        playbackPort.PlaybackSourceBindings();
+        SourcesListUpdated?.Invoke();
     }
 
     private async Task RefreshOfficialSources(CancellationToken token, long generation)
@@ -200,17 +226,22 @@ public sealed partial class MusicSettingsController
         }
         catch
         {
-            if (SourceManagementCurrent(generation)) { sourceManagement.MarkOfficialUnloaded(); SourceBindings(); }
+            if (SourceManagementCurrent(generation)) { officialSourcesLoaded = false; SourceBindings(); }
             throw;
         }
     }
 
     private void PublishOfficialSources(MusicOfficialSourcesRecord value)
     {
-        if (sourceManagement.ApplyOfficialSources(value))
+        var enabled = value.Enabled.ToHashSet(StringComparer.Ordinal);
+        bool changed = officialSourcesRevision != value.Revision || !officialSourcesEnabled.SetEquals(enabled);
+        officialSourcesRevision = value.Revision;
+        officialSourcesLoaded = true;
+        officialSourcesEnabled = enabled;
+        if (changed)
         {
             ctx.NotifyMusicSourcesChanged();
-            playbackPort.CancelMusicPreload();
+            PreloadInvalidated?.Invoke();
         }
         SourceBindings();
     }
@@ -223,19 +254,21 @@ public sealed partial class MusicSettingsController
             if (!CanEditOfficialSources) return Task.CompletedTask;
             return RunSourceManagementAsync(async generation =>
             {
-                var nextEnabled = sourceManagement.ComputeNextOfficialEnabled(row.Platform!, enabled);
+                var nextSet = officialSourcesEnabled.ToHashSet(StringComparer.Ordinal);
+                if (enabled) nextSet.Add(row.Platform!); else nextSet.Remove(row.Platform!);
+                var nextEnabled = OfficialSourcePlatforms.Where(nextSet.Contains).ToArray();
                 bool saved = false;
                 try
                 {
                     var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.OfficialSources,
-                        ct => application.SaveOfficialSourcesAsync(sourceManagement.OfficialSourcesRevision, nextEnabled, ct), lifetime.Token);
+                        ct => application.SaveOfficialSourcesAsync(officialSourcesRevision, nextEnabled, ct), lifetime.Token);
                     if (SourceManagementCurrent(generation))
                     {
                         PublishOfficialSources(settings);
-                        foreach (var platform in MusicSourceManagementService.OfficialPlatforms)
+                        foreach (var platform in OfficialSourcePlatforms)
                         {
-                            var updated = MusicSourceRow.BuiltIn(platform, sourceManagement.IsOfficialEnabled(platform),
-                                sourceManagement.GetOfficialCheck(platform));
+                            var updated = MusicSourceRow.BuiltIn(platform, officialSourcesEnabled.Contains(platform),
+                                GetOfficialSourceCheck(platform));
                             if (Sources.FirstOrDefault(item => item.Key == updated.Key) is { } current && !current.MatchesData(updated))
                                 ReplaceSource(updated);
                         }
@@ -320,20 +353,11 @@ public sealed partial class MusicSettingsController
             {
                 switch (action)
                 {
-                    case "enable":
-                        await application.SetSourceEnabledAsync(row.InstallationId!, enabled: true, lifetime.Token);
-                        break;
-                    case "disable":
-                        await application.SetSourceEnabledAsync(row.InstallationId!, enabled: false, lifetime.Token);
-                        break;
-                    case "remove":
-                        await application.RemoveSourceAsync(row.InstallationId!, lifetime.Token);
-                        break;
-                    case "rollback":
-                        await application.RollbackSourceAsync(row.InstallationId!, lifetime.Token);
-                        break;
-                    default:
-                        throw new MusicOperationException("INVALID_REQUEST");
+                    case "enable": await application.SetSourceEnabledAsync(row.InstallationId!, enabled: true, lifetime.Token); break;
+                    case "disable": await application.SetSourceEnabledAsync(row.InstallationId!, enabled: false, lifetime.Token); break;
+                    case "remove": await application.RemoveSourceAsync(row.InstallationId!, lifetime.Token); break;
+                    case "rollback": await application.RollbackSourceAsync(row.InstallationId!, lifetime.Token); break;
+                    default: throw new MusicOperationException("INVALID_REQUEST");
                 }
             }
             finally { ctx.NotifyMusicSourcesChanged(); await ReloadSources(lifetime.Token, generation); }
@@ -343,9 +367,8 @@ public sealed partial class MusicSettingsController
     private async Task BeforeSourceChange(string installation, bool retire)
     {
         ctx.NotifyMusicSourcesChanged();
-        playbackPort.CancelMusicPreload();
-        if (!retire) return;
-        await playbackPort.RevokeChangedMusicSourceAsync(installation);
+        PreloadInvalidated?.Invoke();
+        if (retire && SourceRevoking is { } revoke) await revoke(installation);
     }
 
     public async Task<string?> ReadSourceAddressAsync(MusicSourceRow row)
@@ -378,6 +401,22 @@ public sealed partial class MusicSettingsController
         });
     }
 
+    private CancellationTokenSource BeginSourceTransfer()
+    {
+        sourceTransfer?.Cancel();
+        var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        sourceTransfer = request;
+        SourceBindings();
+        return request;
+    }
+
+    private void EndSourceTransfer(CancellationTokenSource request)
+    {
+        if (ReferenceEquals(sourceTransfer, request)) sourceTransfer = null;
+        request.Dispose();
+        SourceBindings();
+    }
+
     public Task UpdateSourceAsync(MusicSourceRow? row)
     {
         if (row is not { IsScript: true } || !Sources.Contains(row) || !CanEditScripts) return Task.CompletedTask;
@@ -390,13 +429,13 @@ public sealed partial class MusicSettingsController
                 await ChangeSourceFilesAsync([path], row, generation);
                 return;
             }
-            var request = sourceManagement.BeginTransfer(SourceBindings);
+            var request = BeginSourceTransfer();
             try
             {
                 await BeforeSourceChange(row.InstallationId!, retire: true);
                 await application.UpdateSourceAsync(row.InstallationId!, request.Token);
             }
-            finally { sourceManagement.EndTransfer(request, SourceBindings); ctx.NotifyMusicSourcesChanged(); await ReloadSources(lifetime.Token, generation); }
+            finally { EndSourceTransfer(request); ctx.NotifyMusicSourcesChanged(); await ReloadSources(lifetime.Token, generation); }
         });
     }
 
@@ -416,46 +455,58 @@ public sealed partial class MusicSettingsController
         if (!CanEditScripts) return Task.CompletedTask;
         return RunSourceManagementAsync(async generation =>
         {
-            var request = sourceManagement.BeginTransfer(SourceBindings);
+            var request = BeginSourceTransfer();
             try { await application.DownloadSourceAsync(address, request.Token); }
-            finally { sourceManagement.EndTransfer(request, SourceBindings); await ReloadSources(lifetime.Token, generation); }
+            finally { EndSourceTransfer(request); await ReloadSources(lifetime.Token, generation); }
         });
     }
 
     private async Task ChangeSourceFilesAsync(string[] paths, MusicSourceRow? update, long generation)
     {
-        var request = sourceManagement.BeginTransfer(SourceBindings);
+        var request = BeginSourceTransfer();
         try
         {
             if (update is not null) await BeforeSourceChange(update.InstallationId!, retire: true);
-            await sourceManagement.ImportFilesAsync(paths, update?.InstallationId, request.Token);
+            foreach (var path in paths)
+            {
+                var snapshot = await SelectedScriptSnapshot.ReadAsync(path, request.Token);
+                try
+                {
+                    _ = await application.ImportSourceAsync(snapshot.Bytes, snapshot.Basename,
+                        update?.InstallationId, request.Token);
+                }
+                catch (MusicOperationException error) when (error.Code == "CANCELLED" && request.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(request.Token);
+                }
+            }
         }
         finally
         {
-            sourceManagement.EndTransfer(request, SourceBindings);
+            EndSourceTransfer(request);
             if (update is not null) ctx.NotifyMusicSourcesChanged();
             await ReloadSources(lifetime.Token, generation);
         }
     }
 
-    public void CancelSourceTransfer() => sourceManagement.CancelTransfer();
+    public void CancelSourceTransfer() => sourceTransfer?.Cancel();
 
-    /// <summary>Light checks of the given rows, at most three at a time. A check never
-    /// changes enablement, the current playback or any song's matching state.</summary>
+    /// <summary>Light checks of the given rows, at most three at a time.</summary>
     public Task CheckSourcesAsync(IEnumerable<MusicSourceRow> requested)
     {
-        var rows = requested.Where(row => Sources.Contains(row) && !sourceManagement.IsChecking(row.Key)).ToArray();
+        var rows = requested.Where(row => Sources.Contains(row) && !IsCheckingSource(row.Key)).ToArray();
         if (stopping || rows.Length == 0) return Task.CompletedTask;
         long generation = sourceManagementGeneration;
         suppressSourceRowBindings = true;
         try
         {
-            foreach (var row in rows) { sourceManagement.TryMarkChecking(row.Key); row.Checking = true; }
+            lock (sourceCheckGate) foreach (var row in rows) checkingSources.Add(row.Key);
+            foreach (var row in rows) row.Checking = true;
         }
         finally { suppressSourceRowBindings = false; }
         SourceBindings();
         var work = Run();
-        ctx.AddEventWrite(work); _ = Observe();
+        AddEventWrite(work); _ = Observe();
         return work;
         async Task Observe()
         {
@@ -466,28 +517,68 @@ public sealed partial class MusicSettingsController
                 DebugLog.Warn(DebugCategories.MusicLibrary, "source-management", "check-sources-failed",
                     new { error = error.Message });
             }
-            finally { ctx.RemoveEventWrite(work); }
+            finally { RemoveEventWrite(work); }
         }
         async Task Run()
         {
-            string? failure = await sourceManagement.RunBoundedChecksAsync(
-                rows,
-                () => SourceManagementCurrent(generation),
-                key => Sources.FirstOrDefault(item => item.Key == key),
-                ReplaceSource,
-                key =>
+            using var gate = new SemaphoreSlim(3);
+            string? failure = null;
+            await Task.WhenAll(rows.Select(async row =>
+            {
+                bool entered = false, replaced = false;
+                try
                 {
-                    if (!sourceManagementActive || stopping || disposed) return;
-                    suppressSourceRowBindings = true;
-                    try
+                    await gate.WaitAsync(lifetime.Token); entered = true;
+                    if (row.IsBuiltIn)
                     {
-                        if (Sources.FirstOrDefault(item => item.Key == key) is { } current) current.Checking = false;
+                        var check = await application.CheckOfficialSourceAsync(row.Platform!, lifetime.Token);
+                        if (!SourceManagementCurrent(generation)) return;
+                        var state = new MusicSourcePlatformState(row.Platform!, check.State == "ok" ? "ok" : "failed");
+                        lock (sourceCheckGate) officialSourceChecks[row.Platform!] = state;
+                        if (Sources.FirstOrDefault(item => item.Key == row.Key) is { } current)
+                        {
+                            lock (sourceCheckGate) checkingSources.Remove(row.Key);
+                            ReplaceSource(MusicSourceRow.BuiltIn(row.Platform!, current.Enabled, state));
+                            replaced = true;
+                        }
                     }
-                    finally { suppressSourceRowBindings = false; }
-                    SourceBindings();
-                },
-                lifetime.Token);
-            if (failure is not null && SourceManagementCurrent(generation)) ctx.SetStatus(failure);
+                    else
+                    {
+                        var reply = await application.CheckSourceAsync(row.InstallationId!, lifetime.Token);
+                        if (SourceManagementCurrent(generation))
+                        {
+                            lock (sourceCheckGate) checkingSources.Remove(row.Key);
+                            ReplaceSource(MusicSourceRow.FromScript(reply.Item));
+                            replaced = true;
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception error)
+                {
+                    var text = ErrorText(error);
+                    lock (sourceCheckGate) failure ??= text;
+                }
+                finally
+                {
+                    if (entered) gate.Release();
+                    bool removed;
+                    lock (sourceCheckGate) removed = checkingSources.Remove(row.Key);
+                    if ((removed || !replaced) && sourceManagementActive && !stopping && !disposed)
+                    {
+                        suppressSourceRowBindings = true;
+                        try
+                        {
+                            if (Sources.FirstOrDefault(item => item.Key == row.Key) is { } current) current.Checking = false;
+                        }
+                        finally { suppressSourceRowBindings = false; }
+                        SourceBindings();
+                    }
+                }
+            }));
+            string? finalFailure;
+            lock (sourceCheckGate) finalFailure = failure;
+            if (finalFailure is not null && SourceManagementCurrent(generation)) ctx.SetStatus(finalFailure);
         }
     }
 

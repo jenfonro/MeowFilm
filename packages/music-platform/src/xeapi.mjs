@@ -11,9 +11,9 @@ const signKey = 'mUHCwVNWJbunMqAHf5MImuirT6plvs6VSFW62MGHstFQxhBGdEoIhLItH3djc4+
 const agent = 'NeteaseMusic/9.5.61.260802021928(9005061);Dalvik/2.1.0 (Linux; U; Android 12; HBN-AL00 Build/cd737a2.0)';
 const hmac = (key, value) => createHmac('sha256', key).update(value).digest();
 
-async function handshake(device, { transport, clock, signal }) {
+async function handshake(device, { transport, signal }) {
   const nonce = Array.from({ length: 16 }, () => randomInt(10)).join('');
-  const timestamp = String(clock());
+  const timestamp = String(Date.now());
   const keyReply = (await transport({ url: 'https://interface.music.163.com/api/bsr/sk/get', method: 'POST', signal,
     headers: { 'User-Agent': agent, Cookie: 'deviceId=' + device, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: form({ appVersion: '9.5.61', currentKeyVersion: '', deviceId: device, nonce, os: 'android', requestType: 'active',
@@ -58,7 +58,7 @@ async function ensureState(device, context) {
 }
 
 export async function xeapiRequest(path, params, context) {
-  const { transport, client, account, clock, signal, dispatched, keyState } = context;
+  const { transport, client, account, signal, dispatched, keyState } = context;
   const cookies = { ...client.cookies, ...cookieFields(account?.cookie) };
   const device = required(cookies.deviceId);
   const state = await ensureState(device, context);
@@ -80,7 +80,7 @@ export async function xeapiRequest(path, params, context) {
   const encoded = aes(Buffer.concat([mask, inner.subarray(rotate), inner.subarray(0, rotate)]), dynamicKey);
   Object.assign(cookies, { os: 'android', osver: cookies.os === 'android' ? cookies.osver ?? '16' : '16',
     appver: params.level === 'vivid' ? '9.5.61' : cookies.os === 'android' ? cookies.appver ?? '9.1.65' : '9.1.65',
-    buildver: cookies.buildver ?? String(Math.floor(clock() / 1000)), sDeviceId: cookies.sDeviceId ?? device });
+    buildver: cookies.buildver ?? String(Math.floor(Date.now() / 1000)), sDeviceId: cookies.sDeviceId ?? device });
   signal.throwIfAborted();
   const response = await transport({ url: 'https://interface3.music.163.com/xeapi/' + path.slice(5), method: 'POST', signal,
     dispatched,

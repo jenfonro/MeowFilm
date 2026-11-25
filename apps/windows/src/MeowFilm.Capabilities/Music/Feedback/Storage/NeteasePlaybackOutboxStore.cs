@@ -68,10 +68,6 @@ internal static class NeteasePlaybackOutboxStore
             if (revision == StorageRevision.Empty && rows.Length > 0)
                 throw new MusicFeedbackException("CORRUPT_STORAGE");
 
-            FeedbackProtocolRules.Require(rows.Select(e => e.PlaybackId).Distinct().Count() == rows.Length, "CORRUPT_STORAGE");
-            foreach (var entry in rows) Validate(entry);
-            var eventIds = rows.SelectMany(e => new[] { e.Start?.Id, e.End?.Id }).OfType<Guid>().ToArray();
-            FeedbackProtocolRules.Require(eventIds.Distinct().Count() == eventIds.Length, "CORRUPT_STORAGE");
             return (rows, revision);
         }, token);
 
@@ -203,30 +199,4 @@ internal static class NeteasePlaybackOutboxStore
 
         return new NeteasePlaybackEvent(id, at!.Value, inflight!.Value, time!.Value, realtime!.Value, reason!, rate!.Value);
     }
-
-    private static void Validate(NeteasePlaybackPending entry)
-    {
-        FeedbackProtocolRules.Require(entry is not null && entry.PlaybackId != Guid.Empty && entry.Account is not null &&
-            entry.ConsentRevision >= 0 &&
-            FeedbackProtocolRules.Text(entry.Account.Scope) && entry.Account.Generation >= 0 &&
-            FeedbackProtocolRules.Id(entry.Account.UserId) && FeedbackProtocolRules.Id(entry.RecordingId) &&
-            entry.Count > 0 && (entry.Start is null ? entry.StartConfirmed && entry.End is not null : !entry.StartConfirmed) &&
-            (entry.Source is null || FeedbackProtocolRules.Text(entry.Source)) &&
-            (entry.SourceId is null || entry.Source is not null && FeedbackProtocolRules.Text(entry.SourceId, true)) &&
-            (entry.Algorithm is null || FeedbackProtocolRules.Text(entry.Algorithm)) &&
-            (entry.PlayScene is null or "heartbeat"), "CORRUPT_STORAGE");
-        if (entry.Start is { } start)
-            FeedbackProtocolRules.Require(Valid(start) && start.Time == 0 && start.Realtime == 0 &&
-                start.Reason.Length == 0, "CORRUPT_STORAGE");
-        if (entry.End is { } end)
-            FeedbackProtocolRules.Require(Valid(end) && end.Reason is "playend" or "ui" or "interrupt" or "exception",
-                "CORRUPT_STORAGE");
-    }
-
-    private static bool Valid(NeteasePlaybackEvent value) => value.Id != Guid.Empty &&
-        value.At >= DateTimeOffset.UnixEpoch.ToUnixTimeMilliseconds() &&
-        value.At <= DateTimeOffset.MaxValue.ToUnixTimeMilliseconds() &&
-        double.IsFinite(value.Time) && value.Time >= 0 && double.IsFinite(value.Realtime) && value.Realtime >= 0 &&
-        double.IsFinite(value.Rate) && value.Rate > 0 &&
-        value.Reason is not null;
 }

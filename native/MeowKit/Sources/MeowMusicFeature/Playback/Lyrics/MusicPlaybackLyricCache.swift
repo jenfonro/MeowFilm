@@ -45,7 +45,6 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         fileprivate let id = UUID()
         fileprivate let occurrenceID: String
         fileprivate let scope: UUID
-        fileprivate let generation: UUID
         fileprivate let producerID: UUID?
         private weak var owner: MusicPlaybackLyricCache?
         private let lock = NSLock()
@@ -55,9 +54,9 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         private var cancelled = false
 
         fileprivate init(owner: MusicPlaybackLyricCache, occurrenceID: String, scope: UUID,
-                         generation: UUID, producerID: UUID?) {
+                         producerID: UUID?) {
             self.owner = owner; self.occurrenceID = occurrenceID; self.scope = scope
-            self.generation = generation; self.producerID = producerID
+            self.producerID = producerID
         }
         func value() async throws -> MusicLyricsSnapshot {
             try await withTaskCancellationHandler {
@@ -83,7 +82,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
             try Task.checkCancellation()
             guard !isCancelled else { throw CancellationError() }
             guard let owner else { throw MusicServiceError.closed }
-            try owner.checkDelivery(scope: scope, generation: generation)
+            try owner.checkDelivery(scope: scope)
         }
         func cancel() {
             revoke()
@@ -135,9 +134,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var available = false
     private var closed = false
-    private var generation: UUID?
     private var scope = UUID()
     private var entries: [Key: Entry] = [:]
     private var insertionOrder: [Key] = []
@@ -152,15 +149,6 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
     func flush() async {
         let tasks = locked { producers.values.compactMap(\.task) }
         for task in tasks { await task.value }
-    }
-
-    func setAccess(available: Bool, generation: UUID) {
-        let retirement = locked { () -> Retirement in
-            guard !closed, self.available != available || self.generation != generation else { return Retirement() }
-            self.available = available; self.generation = generation
-            return clearLocked()
-        }
-        retirement.finish()
     }
 
     /// Use for recording/catalogue changes not represented in Key.
@@ -179,7 +167,6 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
                 "maximumEntries": .int(Self.maximumEntries),
                 "maximumBytes": .int(Self.maximumBytes),
                 "inFlightCount": .int(producers.count),
-                "available": .bool(available),
                 "closed": .bool(closed)
             ])
         }
@@ -193,25 +180,22 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
 
     func close() {
         let retirement = locked { () -> Retirement in
-            closed = true; available = false
+            closed = true
             return clearLocked()
         }
         retirement.finish()
     }
 
-    func request(for key: Key, occurrenceID: String, generation: UUID,
+    func request(for key: Key, occurrenceID: String,
                  load: @escaping @Sendable () async throws -> MusicLyricsSnapshot) throws -> Request {
         guard !occurrenceID.isEmpty, occurrenceID.utf8.count <= 4_096 else { throw MusicServiceError.invalidRequest }
         try Task.checkCancellation()
         let time = ProcessInfo.processInfo.systemUptime
         return try locked {
             guard !closed else { throw MusicServiceError.closed }
-            guard available else { throw MusicServiceError.accessUnavailable }
-            guard self.generation == generation else { throw MusicServiceError.staleAccess }
             if let entry = entries[key] {
                 if entry.until > time {
-                    let request = Request(owner: self, occurrenceID: occurrenceID, scope: scope,
-                                          generation: generation, producerID: nil)
+                    let request = Request(owner: self, occurrenceID: occurrenceID, scope: scope, producerID: nil)
                     request.finish(.success(.init(occurrenceId: occurrenceID, state: .ready, lines: entry.lines)))
                     return request
                 }
@@ -228,8 +212,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
                 producer = Producer(key: key, scope: scope, occurrenceID: occurrenceID); isNew = true
                 producers[producer.id] = producer; active[key] = producer.id
             }
-            let request = Request(owner: self, occurrenceID: occurrenceID, scope: scope,
-                                  generation: generation, producerID: producer.id)
+            let request = Request(owner: self, occurrenceID: occurrenceID, scope: scope, producerID: producer.id)
             producer.waiters[request.id] = request
             if isNew {
                 let id = producer.id
@@ -252,14 +235,14 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
     private func locked<T>(_ action: () throws -> T) rethrows -> T {
         lock.lock(); defer { lock.unlock() }; return try action()
     }
-    private func checkDelivery(scope: UUID, generation: UUID) throws {
+    private func checkDelivery(scope: UUID) throws {
         try locked {
             guard !closed else { throw MusicServiceError.closed }
-            guard available, self.scope == scope, self.generation == generation else { throw MusicServiceError.staleAccess }
+            guard self.scope == scope else { throw MusicServiceError.staleAccess }
         }
     }
     private func canStart(_ id: UUID) -> Bool {
-        locked { !closed && available && producers[id].map { $0.accepting && $0.scope == scope } == true }
+        locked { !closed && producers[id].map { $0.accepting && $0.scope == scope } == true }
     }
     private func cancel(_ request: Request) {
         let task = locked { () -> Task<Void, Never>? in
@@ -299,7 +282,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
             guard let producer = producers.removeValue(forKey: id) else { return [] }
             if active[producer.key] == id { active.removeValue(forKey: producer.key) }
             let waiting = Array(producer.waiters.values)
-            guard !closed, available, producer.accepting, producer.scope == scope else {
+            guard !closed, producer.accepting, producer.scope == scope else {
                 return waiting.map { ($0, .failure(CancellationError())) }
             }
             var checked = result

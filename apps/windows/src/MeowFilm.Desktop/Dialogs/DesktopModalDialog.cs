@@ -34,3 +34,23 @@ public sealed class DesktopDialogRequest
 
     internal event Action<bool>? PrimaryEnabledChanged;
 }
+
+internal readonly record struct DesktopDebugButton(
+    string Label,
+    string Action,
+    bool Enabled,
+    string? AutomationName = null);
+
+internal sealed record DesktopDebugDialogDescription(
+    string Id,
+    string Kind,
+    string FallbackTitle,
+    string Message,
+    FrameworkElement Surface,
+    DesktopDebugButton[] Buttons);
+
+internal interface IDesktopDebugModal
+{
+    DesktopDebugDialogDescription DescribeDebugDialog();
+    object HandleDebugAction(string action);
+}

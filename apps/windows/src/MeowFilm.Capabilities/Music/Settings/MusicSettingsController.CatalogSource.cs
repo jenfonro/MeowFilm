@@ -7,11 +7,12 @@ public sealed partial class MusicSettingsController
     private string catalogSourcePlatform = "wy", catalogSourceStatus = "";
     private long catalogSourceRevision, catalogSourceGeneration;
     private bool catalogSourceLoaded, catalogSourceBusy;
-    private Task? catalogSourceRead;
+    private Task? catalogSourceReadTask;
     private Task catalogSourceWork = Task.CompletedTask;
     private CancellationTokenSource? catalogSourceReadCancellation;
-    private bool CatalogSourceCurrent(long generation) =>
-        generation == catalogSourceGeneration && !stopping && !disposed;
+
+    private bool CatalogSourceCurrent(long currentGeneration) =>
+        currentGeneration == catalogSourceGeneration && !stopping && !disposed;
 
     public MusicCatalogChoice[] CatalogSourceChoices { get; } =
         [new("wy", MusicPlatformInfo.DisplayName("wy")), new("kg", MusicPlatformInfo.DisplayName("kg"))];
@@ -24,7 +25,7 @@ public sealed partial class MusicSettingsController
 
     internal void CancelCatalogSourceReadForShutdown() => catalogSourceReadCancellation?.Cancel();
 
-    private void CatalogSourceBindings()
+    private void NotifyCatalogSourceBindings()
     {
         Changed(nameof(CatalogSourcePlatform));
         Changed(nameof(CatalogSourceStatus));
@@ -33,33 +34,30 @@ public sealed partial class MusicSettingsController
         Changed(nameof(CanReadCatalogSource));
     }
 
-    private void AcceptCatalogSourceSettings(MusicCatalogSourceRecord value)
+    private void AcceptCatalogSource(MusicCatalogSourceRecord value)
     {
-        var revision = value.Revision;
-        var platform = value.Platform;
-        MusicDto.Require(revision >= 0 && platform is "wy" or "kg");
-        var changed = platform != catalogSourcePlatform;
-        catalogSourcePlatform = platform;
-        catalogSourceRevision = revision;
+        bool changed = value.Platform != catalogSourcePlatform;
+        catalogSourcePlatform = value.Platform;
+        catalogSourceRevision = value.Revision;
         catalogSourceLoaded = true;
         catalogSourceStatus = "";
-        if (changed) catalogPort.RetireCatalogSourcePages();
-        CatalogSourceBindings();
+        if (changed) CatalogSourceInvalidated?.Invoke();
+        NotifyCatalogSourceBindings();
     }
 
     internal Task EnsureCatalogSourceSettingsAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         if (catalogSourceLoaded) return Task.CompletedTask;
-        if (catalogSourceRead is null)
+        if (catalogSourceReadTask is null)
         {
-            long generation = catalogSourceGeneration;
+            long currentGeneration = catalogSourceGeneration;
             var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             catalogSourceReadCancellation = cancellation;
             var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             loadDrains.Add(drained.Task);
-            catalogSourceRead = ReadAsync();
-            _ = ObserveReadAsync(catalogSourceRead);
+            catalogSourceReadTask = ReadAsync();
+            _ = ObserveReadAsync(catalogSourceReadTask);
             static async Task ObserveReadAsync(Task read)
             {
                 try { await read; }
@@ -67,22 +65,22 @@ public sealed partial class MusicSettingsController
             }
             async Task ReadAsync()
             {
-                await Task.Yield(); // Publish the shared read before any port can complete synchronously.
+                await Task.Yield();
                 try
                 {
                     var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.CatalogSource,
                         ct => application.GetCatalogSourceAsync(ct), cancellation.Token);
                     cancellation.Token.ThrowIfCancellationRequested();
-                    if (CatalogSourceCurrent(generation)) AcceptCatalogSourceSettings(settings);
+                    if (CatalogSourceCurrent(currentGeneration)) AcceptCatalogSource(settings);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch
                 {
-                    if (CatalogSourceCurrent(generation))
+                    if (CatalogSourceCurrent(currentGeneration))
                     {
                         catalogSourceLoaded = false;
                         catalogSourceStatus = "数据源设置读取失败";
-                        CatalogSourceBindings();
+                        NotifyCatalogSourceBindings();
                     }
                     throw;
                 }
@@ -91,7 +89,7 @@ public sealed partial class MusicSettingsController
                     if (ReferenceEquals(catalogSourceReadCancellation, cancellation))
                     {
                         catalogSourceReadCancellation = null;
-                        catalogSourceRead = null;
+                        catalogSourceReadTask = null;
                     }
                     cancellation.Dispose();
                     loadDrains.Remove(drained.Task);
@@ -99,7 +97,7 @@ public sealed partial class MusicSettingsController
                 }
             }
         }
-        return catalogSourceRead.WaitAsync(token);
+        return catalogSourceReadTask.WaitAsync(token);
     }
 
     public Task ReadCatalogSourceSettingsAsync()
@@ -113,51 +111,50 @@ public sealed partial class MusicSettingsController
         });
     }
 
-    public Task SetCatalogSourceAsync(string platform)
+    public Task SetCatalogSourceAsync(string nextPlatform)
     {
-        if (!CanEditCatalogSource || platform is not ("wy" or "kg") || platform == catalogSourcePlatform)
+        if (!CanEditCatalogSource || nextPlatform is not ("wy" or "kg") || nextPlatform == catalogSourcePlatform)
             return Task.CompletedTask;
-        var revision = catalogSourceRevision;
-        long generation = catalogSourceGeneration;
+        long expectedRevision = catalogSourceRevision;
+        long currentGeneration = catalogSourceGeneration;
         catalogSourceBusy = true;
         catalogSourceStatus = "";
-        CatalogSourceBindings();
+        NotifyCatalogSourceBindings();
         return catalogSourceWork = RunAsync(async () =>
         {
             try
             {
                 var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.CatalogSource,
-                    ct => application.SaveCatalogSourceAsync(revision, platform, ct), lifetime.Token);
-                if (CatalogSourceCurrent(generation)) AcceptCatalogSourceSettings(saved);
+                    ct => application.SaveCatalogSourceAsync(expectedRevision, nextPlatform, ct), lifetime.Token);
+                if (CatalogSourceCurrent(currentGeneration)) AcceptCatalogSource(saved);
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
             {
-                if (!CatalogSourceCurrent(generation)) return;
+                if (!CatalogSourceCurrent(currentGeneration)) return;
                 try
                 {
                     var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.CatalogSource,
                         ct => application.GetCatalogSourceAsync(ct), lifetime.Token);
-                    if (!CatalogSourceCurrent(generation)) return;
-                    AcceptCatalogSourceSettings(current);
-                    if (catalogSourcePlatform != platform)
-                        catalogSourceStatus = error.Code == "REVISION_CONFLICT"
-                            ? "数据源设置已更新" : "数据源设置保存失败";
+                    if (!CatalogSourceCurrent(currentGeneration)) return;
+                    AcceptCatalogSource(current);
+                    if (catalogSourcePlatform != nextPlatform)
+                        catalogSourceStatus = error.Code == "REVISION_CONFLICT" ? "数据源设置已更新" : "数据源设置保存失败";
                 }
                 catch
                 {
-                    if (!CatalogSourceCurrent(generation)) return;
+                    if (!CatalogSourceCurrent(currentGeneration)) return;
                     catalogSourceLoaded = false;
                     catalogSourceStatus = "数据源设置保存失败";
-                    catalogPort.RetireCatalogSourcePages();
+                    CatalogSourceInvalidated?.Invoke();
                 }
             }
-            catch (OperationCanceledException) { if (CatalogSourceCurrent(generation)) catalogSourceStatus = "已取消"; }
-            catch { if (CatalogSourceCurrent(generation)) catalogSourceStatus = "数据源设置保存失败"; }
+            catch (OperationCanceledException) { if (CatalogSourceCurrent(currentGeneration)) catalogSourceStatus = "已取消"; }
+            catch { if (CatalogSourceCurrent(currentGeneration)) catalogSourceStatus = "数据源设置保存失败"; }
             finally
             {
                 catalogSourceBusy = false;
-                if (CatalogSourceCurrent(generation)) CatalogSourceBindings();
+                if (CatalogSourceCurrent(currentGeneration)) NotifyCatalogSourceBindings();
             }
         });
     }
@@ -165,11 +162,11 @@ public sealed partial class MusicSettingsController
     internal async Task DeactivateCatalogSourceSettingsAsync(bool retirePage = false)
     {
         catalogSourceGeneration++;
-        if (retirePage || catalogSourceBusy || catalogSourceRead is not null) catalogSourceLoaded = false;
+        if (retirePage || catalogSourceBusy || catalogSourceReadTask is not null) catalogSourceLoaded = false;
         catalogSourceReadCancellation?.Cancel();
         catalogSourceReadCancellation = null;
-        catalogSourceRead = null;
-        CatalogSourceBindings();
+        catalogSourceReadTask = null;
+        NotifyCatalogSourceBindings();
         await catalogSourceWork;
     }
 }

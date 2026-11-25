@@ -341,7 +341,8 @@ private final class AudioOutputPipeline: @unchecked Sendable {
     private var output: AudioEngineOutput?
     private var first: AudioPCMChunk?
     private var queued: [(id: UUID, chunk: AudioPCMChunk)] = []
-    private var pump: Task<Void, Never>?
+    private var pump: (revision: UUID, task: Task<Void, Never>)?
+    private var retiringPumps: [UUID: Task<Void, Never>] = [:]
     private var pumpRevision = UUID()
     private var outputRevision = UUID()
     private var sessionRevision: UInt64
@@ -571,9 +572,12 @@ private final class AudioOutputPipeline: @unchecked Sendable {
             wasStalled = false
             let previous = pump
             pump = nil
+            if let previous {
+                retiringPumps[previous.revision] = previous.task
+            }
             let continuation = waiter
             waiter = nil
-            return (previous, continuation, output)
+            return (previous?.task, continuation, output)
         }
         previous?.cancel()
         continuation?.resume()
@@ -609,15 +613,19 @@ private final class AudioOutputPipeline: @unchecked Sendable {
     }
 
     func prepareForSeek(sessionRevision rev: UInt64) async {
-        let (previous, continuation, current): (Task<Void, Never>?, CheckedContinuation<Void, Never>?, AudioEngineOutput?) = scheduleLock.withLock {
+        let (pumpsToJoin, continuation, current): ([Task<Void, Never>], CheckedContinuation<Void, Never>?, AudioEngineOutput?) = scheduleLock.withLock {
             lock.withLock {
                 sessionRevision = rev
                 pumpRevision = UUID()
                 outputRevision = UUID()
                 paused = true
                 wasStalled = false
-                let previous = pump
-                pump = nil
+                var retiring = Array(retiringPumps.values)
+                retiringPumps.removeAll()
+                if let active = pump {
+                    pump = nil
+                    retiring.append(active.task)
+                }
                 let continuation = waiter
                 waiter = nil
                 let current = output
@@ -625,14 +633,14 @@ private final class AudioOutputPipeline: @unchecked Sendable {
                 first = nil
                 ended = false
                 endDelivered = false
-                return (previous, continuation, current)
+                return (retiring, continuation, current)
             }
         }
 
-        previous?.cancel()
+        for task in pumpsToJoin { task.cancel() }
         continuation?.resume()
         current?.stop()
-        await previous?.value
+        for task in pumpsToJoin { await task.value }
         scheduleLock.withLock {
             let active: AudioEngineOutput? = lock.withLock { output }
             active?.stop()
@@ -640,14 +648,17 @@ private final class AudioOutputPipeline: @unchecked Sendable {
     }
 
     func cancel() {
-        let state: (pump: Task<Void, Never>?, continuation: CheckedContinuation<Void, Never>?, output: AudioEngineOutput?)? = scheduleLock.withLock {
+        let state: (pumps: [Task<Void, Never>], continuation: CheckedContinuation<Void, Never>?, output: AudioEngineOutput?)? = scheduleLock.withLock {
             lock.withLock {
                 guard !closed else { return nil }
                 closed = true
                 paused = true
                 pumpRevision = UUID()
                 outputRevision = UUID()
-                let activePump = pump
+                var activePumps = Array(retiringPumps.values)
+                if let active = pump {
+                    activePumps.append(active.task)
+                }
                 let continuation = waiter
                 waiter = nil
                 let current = output
@@ -657,23 +668,30 @@ private final class AudioOutputPipeline: @unchecked Sendable {
                 onConfigurationChange = nil
                 onEnd = nil
                 onFailure = nil
-                return (activePump, continuation, current)
+                return (activePumps, continuation, current)
             }
         }
         guard let state else { return }
 
-        state.pump?.cancel()
+        for task in state.pumps { task.cancel() }
         state.continuation?.resume()
         state.output?.close()
     }
 
     func joinPump() async {
-        let activePump: Task<Void, Never>? = lock.withLock {
-            let active = pump
-            pump = nil
-            return active
+        while true {
+            let tasks: [Task<Void, Never>] = lock.withLock {
+                var pending = Array(retiringPumps.values)
+                retiringPumps.removeAll()
+                if let active = pump {
+                    pump = nil
+                    pending.append(active.task)
+                }
+                return pending
+            }
+            guard !tasks.isEmpty else { return }
+            for task in tasks { await task.value }
         }
-        await activePump?.value
     }
 
     func sample(currentPosition: Double, activeRate: Float) -> SampleSnapshot {
@@ -727,11 +745,12 @@ private final class AudioOutputPipeline: @unchecked Sendable {
             return
         }
         let myRevision = pumpRevision
+        let pendingRetiring = Array(retiringPumps.values)
         let task = Task.detached(priority: .high) { [weak self] in
             guard let self else { return }
-            await self.runPump(revision: myRevision)
+            await self.runPump(revision: myRevision, awaitingRetiring: pendingRetiring)
         }
-        pump = task
+        pump = (myRevision, task)
         lock.unlock()
     }
 
@@ -743,11 +762,15 @@ private final class AudioOutputPipeline: @unchecked Sendable {
         }
     }
 
-    private func runPump(revision myRevision: UUID) async {
+    private func runPump(revision myRevision: UUID, awaitingRetiring: [Task<Void, Never>]) async {
         defer {
             lock.withLock {
-                if pumpRevision == myRevision { pump = nil }
+                if pump?.revision == myRevision { pump = nil }
+                retiringPumps.removeValue(forKey: myRevision)
             }
+        }
+        for previous in awaitingRetiring {
+            await previous.value
         }
         do {
             while !Task.isCancelled {
@@ -896,7 +919,11 @@ private final class AudioEngineOutput: @unchecked Sendable {
     private let player = AVAudioPlayerNode()
     private let timePitch = AVAudioUnitTimePitch()
     private let format: AVAudioFormat
+    /// Guards all AVAudioEngine / AVAudioPlayerNode / AVAudioUnitTimePitch graph operations.
+    /// Lock ordering: always `graphLock -> lock`; buffer completion callbacks acquire only `lock`.
+    private let graphLock = NSLock()
     private let lock = NSLock()
+    private var closed = false
     private var notification: NSObjectProtocol?
     private var paused = true
     private var lastRendered: AVAudioFramePosition = 0
@@ -913,23 +940,34 @@ private final class AudioEngineOutput: @unchecked Sendable {
     }
 
     var volume: Float {
-        get { engine.mainMixerNode.outputVolume }
-        set { engine.mainMixerNode.outputVolume = newValue }
+        get {
+            graphLock.lock()
+            defer { graphLock.unlock() }
+            return engine.mainMixerNode.outputVolume
+        }
+        set {
+            graphLock.lock()
+            defer { graphLock.unlock() }
+            guard !closed else { return }
+            engine.mainMixerNode.outputVolume = newValue
+        }
     }
 
     var isPlaying: Bool { sampleRenderState().isPlaying }
 
-    private var sampleTime: AVAudioFramePosition? {
+    private var sampleTimeLocked: AVAudioFramePosition? {
         guard player.isPlaying, let time = player.lastRenderTime,
               let value = player.playerTime(forNodeTime: time), value.isSampleTimeValid else { return nil }
         return value.sampleTime
     }
 
     func sampleRenderState() -> RenderSample {
+        graphLock.lock()
+        defer { graphLock.unlock() }
         let now = ProcessInfo.processInfo.systemUptime
-        let engineRunning = engine.isRunning
-        let nodePlaying = player.isPlaying
-        let currentSample = engineRunning && nodePlaying ? sampleTime : nil
+        let engineRunning = !closed && engine.isRunning
+        let nodePlaying = !closed && player.isPlaying
+        let currentSample = engineRunning && nodePlaying ? sampleTimeLocked : nil
 
         lock.lock()
         defer { lock.unlock() }
@@ -982,7 +1020,14 @@ private final class AudioEngineOutput: @unchecked Sendable {
         }
     }
 
+    deinit {
+        close()
+    }
+
     func setRate(_ rate: Float) {
+        graphLock.lock()
+        defer { graphLock.unlock() }
+        guard !closed else { return }
         let shouldBypass = abs(rate - 1.0) < 0.0001
         if timePitch.rate != rate {
             timePitch.rate = rate
@@ -993,6 +1038,9 @@ private final class AudioEngineOutput: @unchecked Sendable {
     }
 
     func play() throws {
+        graphLock.lock()
+        defer { graphLock.unlock() }
+        guard !closed else { throw AudioCoreError.outputFailed }
         if !engine.isRunning {
             engine.prepare()
             do { try engine.start() } catch { throw AudioCoreError.outputFailed }
@@ -1009,7 +1057,11 @@ private final class AudioEngineOutput: @unchecked Sendable {
     }
 
     func pause() {
-        player.pause()
+        graphLock.lock()
+        defer { graphLock.unlock() }
+        if !closed {
+            player.pause()
+        }
         lock.lock()
         paused = true
         advancing = false
@@ -1019,7 +1071,7 @@ private final class AudioEngineOutput: @unchecked Sendable {
         lock.unlock()
     }
 
-    func stop() {
+    private func stopLocked() {
         lock.lock()
         revision = UUID()
         paused = true
@@ -1030,6 +1082,13 @@ private final class AudioEngineOutput: @unchecked Sendable {
         timeline = AudioRenderTimeline()
         lock.unlock()
         player.stop()
+    }
+
+    func stop() {
+        graphLock.lock()
+        defer { graphLock.unlock() }
+        guard !closed else { return }
+        stopLocked()
     }
 
     func schedule(_ chunk: AudioPCMChunk, completion: @escaping @Sendable () -> Void) throws {
@@ -1044,8 +1103,12 @@ private final class AudioEngineOutput: @unchecked Sendable {
         chunk.right.withUnsafeBufferPointer { src in
             if let base = src.baseAddress { channels[1].update(from: base, count: frameCount) }
         }
+
+        graphLock.lock()
+        defer { graphLock.unlock() }
+        guard !closed else { throw AudioCoreError.outputFailed }
         let id = UUID()
-        let currentSample = sampleTime ?? 0
+        let currentSample = sampleTimeLocked ?? 0
         lock.lock()
         let expectedRevision = revision
         _ = timeline.schedule(chunk, id: id, currentSampleTime: currentSample)
@@ -1065,13 +1128,21 @@ private final class AudioEngineOutput: @unchecked Sendable {
     }
 
     func close() {
-        if let notification {
-            NotificationCenter.default.removeObserver(notification)
-            self.notification = nil
+        graphLock.lock()
+        if closed {
+            graphLock.unlock()
+            return
         }
+        closed = true
+        let token = notification
+        notification = nil
         onConfigurationChange = nil
-        stop()
+        stopLocked()
         engine.stop()
+        graphLock.unlock()
+        if let token {
+            NotificationCenter.default.removeObserver(token)
+        }
     }
 }
 

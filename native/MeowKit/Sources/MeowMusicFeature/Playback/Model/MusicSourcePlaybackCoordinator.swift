@@ -1,5 +1,6 @@
 #if os(iOS) || os(macOS)
 import Foundation
+import MeowPlayback
 
 /// Owns source resolution, handoff, recovery, and audio-cache coordination
 /// state for MusicViewModel so MusicViewModel stays focused on public API
@@ -27,7 +28,7 @@ final class MusicSourcePlaybackCoordinator {
     var sourceRecoveryWantsPlayback: Bool?
     nonisolated(unsafe) var sourceSwitchTask: Task<MusicPreparedSource, Error>?
     var sourceSwitchID = UUID()
-    nonisolated(unsafe) var sourceMediaTask: Task<MusicPreparedPlayback, Error>?
+    nonisolated(unsafe) var sourceMediaTask: Task<PlaybackPreparedReplacement, Error>?
     nonisolated(unsafe) var cachedAudioObservation: Task<Void, Never>?
     nonisolated(unsafe) var remoteAudioRecoveryTask: Task<Void, Never>?
     // Keep cancelled continuations until their exact attempt cleanup finishes.

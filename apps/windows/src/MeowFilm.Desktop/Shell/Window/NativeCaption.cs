@@ -228,8 +228,6 @@ internal sealed class NativeCaption : IDisposable
     {
         DesktopPageHeader pageHeader => pageHeader.CaptionInteractiveRegions,
         DesktopModalHost modalHost => modalHost.ActiveContent is { } active ? [active] : [],
-        CloseWindowDialog closeDialog => [closeDialog.SurfaceElement],
-        UserDataResetDialog resetDialog => [resetDialog.SurfaceElement],
         _ => [rootControl]
     };
 

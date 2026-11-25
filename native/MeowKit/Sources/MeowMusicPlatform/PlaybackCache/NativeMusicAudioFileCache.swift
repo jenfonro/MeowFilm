@@ -274,8 +274,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             let directory = try open()
             try prune(directory)
             if var old = entries[key], old.identity == request.identity,
-               (try? old.inspection.quality(for: request.audio.delivery?.quality ?? request.identity.requestedQuality,
-                                           expectedDuration: request.expectedDuration)) != nil,
                directory.matches(old.file, expectedSize: old.fileSize) {
                 try request.authorization.perform {
                     old.lastPlayedAt = max(old.lastPlayedAt, request.confirmedAt)
@@ -607,20 +605,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         }
         let now = Date()
         for entry in saved {
-            let expectedExpiry = Self.expiry(entry.lastPlayedAt)
-            guard Self.valid(entry.identity), entry.key == Self.key(entry.identity),
-                  loaded[entry.key] == nil, Self.confirmed(entry.lastPlayedAt, now: now),
-                  entry.expiresAt > now,
-                  Self.sameEpochMillis(entry.expiresAt, expectedExpiry) else { continue }
-            do {
-                guard try entry.inspection.quality(for: entry.quality,
-                                                   expectedDuration: entry.inspection.duration) == entry.quality,
-                      value.matches(entry.file, expectedSize: entry.fileSize) else { continue }
-            } catch {
-                DebugRuntime.logError(.storage, sub: "music.audioCache", event: "open.validateEntryFailed", error: error,
-                                      data: .object(["key": .string(entry.key)]))
-                continue
-            }
+            guard entry.expiresAt > now, value.matches(entry.file, expectedSize: entry.fileSize) else { continue }
             loaded[entry.key] = entry
         }
         var total = loaded.values.reduce(Int64(0)) { $0 + $1.fileSize }
@@ -696,9 +681,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     }
     private static func expiry(_ date: Date) -> Date {
         date.addingTimeInterval(lifetime)
-    }
-    private static func sameEpochMillis(_ a: Date, _ b: Date) -> Bool {
-        Int64((a.timeIntervalSince1970 * 1000).rounded()) == Int64((b.timeIntervalSince1970 * 1000).rounded())
     }
 }
 

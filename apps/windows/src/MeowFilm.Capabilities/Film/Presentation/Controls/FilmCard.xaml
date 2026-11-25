@@ -8,15 +8,15 @@
      <local:FilmHoverShade x:Name="HoverShade" Opacity="0" local:CardMotion.HoverOpacity="True" />
      <local:FilmPlayMark Opacity="0" local:CardMotion.HoverOpacity="True" />
      <Border x:Name="ScoreBadge" Background="{ThemeResource Film.Brush.ScoreBadge}" Width="32" Height="32" CornerRadius="16" Margin="8" HorizontalAlignment="Right" VerticalAlignment="Top" local:CardMotion.HoverScale="0.1" Visibility="{x:Bind Item.HasScore, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
-      <TextBlock Text="{x:Bind Item.Score}" Foreground="{ThemeResource Film.Brush.BadgeForeground}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" />
+      <TextBlock x:Name="ScoreText" Text="{x:Bind Item.Score}" Foreground="{ThemeResource Film.Brush.BadgeForeground}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" />
      </Border>
     </Grid>
      <Border x:Name="TextBadge" Background="{ThemeResource Film.Brush.TextBadge}" CornerRadius="8" Padding="8,2" Margin="8" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="{x:Bind TextBadgeVisibility}">
-      <TextBlock Text="{x:Bind Item.TextBadge}" Foreground="{ThemeResource Film.Brush.BadgeForeground}" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis" />
+      <TextBlock x:Name="TextBadgeText" Text="{x:Bind Item.TextBadge}" Foreground="{ThemeResource Film.Brush.BadgeForeground}" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis" />
      </Border>
     </Grid>
    </local:AspectRatioDecorator>
-   <TextBlock Text="{x:Bind Item.Title}" Margin="0,9,0,0" Height="21" FontSize="15" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
+   <TextBlock x:Name="TitleText" Text="{x:Bind Item.Title}" Margin="0,9,0,0" Height="21" FontSize="15" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
    <Border x:Name="SiteLabel" Background="{ThemeResource Film.Brush.SiteBackground}" BorderBrush="{ThemeResource Film.Brush.SiteBorder}" Margin="0,3,0,0" Padding="8,2" CornerRadius="8" BorderThickness="1" HorizontalAlignment="Center" Visibility="{x:Bind Item.HasSubtitle, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
     <TextBlock x:Name="Subtitle" Text="{x:Bind Item.Subtitle}" Foreground="{ThemeResource Film.Brush.CardSubtitle}" FontSize="10" LineHeight="15" LineStackingStrategy="BlockLineHeight" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
    </Border>

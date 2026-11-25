@@ -12,8 +12,8 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDEIxgwoutfwoJxcGQeedgP7FG9qaIuS0qzfR8gWkrk
 -----END PUBLIC KEY-----`;
 const requiredWyCookies = ['deviceId', '_ntes_nuid', '_ntes_nnid', 'WNMCID', '__remember_me'];
 
-function fresh(clock) {
-  const now = clock(), nuid = hex(32), seed = hex(16), digits = Array.from({ length: 14 }, () => randomInt(10));
+function fresh() {
+  const now = Date.now(), nuid = hex(32), seed = hex(16), digits = Array.from({ length: 14 }, () => randomInt(10));
   const sum = digits.reduce((total, digit, index) => total + (index % 2 ? digit * 2 > 9 ? digit * 2 - 9 : digit * 2 : digit), 0);
   return {
     wy: { cookies: { deviceId: hex(26).toUpperCase(), _ntes_nuid: nuid, _ntes_nnid: `${nuid},${now}`,
@@ -24,8 +24,8 @@ function fresh(clock) {
       imei: digits.join('') + (10 - sum % 10) % 10, qimei: null, session: null },
   };
 }
-function qimeiRequest(device, clock) {
-  const now = clock(), timestamp = String(Math.floor(now / 1000)), key = hex(8), nonce = hex(8);
+function qimeiRequest(device) {
+  const now = Date.now(), timestamp = String(Math.floor(now / 1000)), key = hex(8), nonce = hex(8);
   const common = new Date(now).toISOString().slice(0, 7) + '-01' + randomInt(100000, 1000000) + '.' + randomInt(100000000, 1000000000);
   const commonKeys = new Set([1, 2, 13, 14, 17, 18, 21, 22, 25, 26, 29, 30, 33, 34, 37, 38]);
   const beacon = Array.from({ length: 40 }, (_, index) => {
@@ -66,7 +66,7 @@ function kgRegistration(seed) {
 }
 const chinaDay = time => Math.floor((time + 8 * 3600000) / 86400000);
 /** Credentials are native-owned; only anonymous protocol state is durable here. */
-export function createClientContexts({ dataRoot, transport, clock }) {
+export function createClientContexts({ dataRoot, transport }) {
   const store = createAnonymousClientStore(dataRoot);
   let state, loading, uncertain = false, writes = Promise.resolve();
   const selected = new Set();
@@ -83,7 +83,7 @@ export function createClientContexts({ dataRoot, transport, clock }) {
       }
       if (!current) {
         if (state) fail('STORAGE_ERROR');
-        current = fresh(clock);
+        current = fresh();
         try { await store.initialize(current); }
         catch (error) { uncertain = true; fail(commitCode(error)); }
       }
@@ -132,26 +132,26 @@ export function createClientContexts({ dataRoot, transport, clock }) {
   async function prepare(platform, signal) {
     let client = get(platform);
     if (platform !== 'tx') return client;
-    const now = clock();
+    const now = Date.now();
     if (!client.qimei || client.qimei.savedAt > now || now - client.qimei.savedAt >= 86400000) {
-      const reply = (await transport({ ...qimeiRequest(client, clock), signal })).value;
+      const reply = (await transport({ ...qimeiRequest(client), signal })).value;
       if (reply.code != null && required(reply.code) !== '0') fail('UPSTREAM_ERROR');
       const inner = decodeJSON(Buffer.from(required(reply.data)));
       if (inner.code != null && required(inner.code) !== '0') fail('UPSTREAM_ERROR');
       const data = object(inner.data);
       signal.throwIfAborted();
-      client = await save('tx', { ...client, qimei: { q36: required(data.q36), savedAt: clock() },
+      client = await save('tx', { ...client, qimei: { q36: required(data.q36), savedAt: Date.now() },
         session: null });
     }
-    const sessionCheckNow = clock();
+    const sessionCheckNow = Date.now();
     if (!client.session || client.session.savedAt > sessionCheckNow || chinaDay(client.session.savedAt) !== chinaDay(sessionCheckNow)) {
       const request = txRequest('music.getSession.session', 'GetSession', {
         uid: client.session?.uid ?? '', vkey: 0, caller: client.session ? 1 : 2,
-      }, { ...client, session: null }, null, clock);
+      }, { ...client, session: null }, null);
       const data = txSuccess((await transport({ ...request, signal })).value);
       const session = object(data.session);
       signal.throwIfAborted();
-      client = await save('tx', { ...client, session: { uid: required(session.uid), sid: required(session.sid), savedAt: clock() } });
+      client = await save('tx', { ...client, session: { uid: required(session.uid), sid: required(session.sid), savedAt: Date.now() } });
     }
     return client;
   }
@@ -184,7 +184,7 @@ export function createClientContexts({ dataRoot, transport, clock }) {
       const portrait = publicEncrypt({ key: kgPublicKey, padding: constants.RSA_PKCS1_PADDING },
         Buffer.from(JSON.stringify({ aes: secret, uid: 0, token: '' }))).toString('hex').toUpperCase();
       const request = kgRequest('/risk/v2/r_register_dev', { part: '1', platid: '1', p: portrait },
-        client, null, clock, null, encrypted, 'https://userservice.kugou.com');
+        client, null, null, encrypted, 'https://userservice.kugou.com');
       request.headers['Content-Type'] = 'application/x-www-form-urlencoded';
       const response = await transport({ ...request, json: false, signal: flightSignal });
       if (response.headers.get('ssa-code')) fail('VERIFICATION_REQUIRED');
@@ -221,7 +221,7 @@ export function createClientContexts({ dataRoot, transport, clock }) {
       if (account) return;
       return save('wy', client => {
         const cookies = responseCookies(headers,
-          ['deviceId', '_ntes_nuid', '_ntes_nnid', 'WNMCID', 'NMTID', 'MUSIC_A'], client.cookies, clock, host);
+          ['deviceId', '_ntes_nuid', '_ntes_nnid', 'WNMCID', 'NMTID', 'MUSIC_A'], client.cookies, host);
         if (cookies.deviceId && cookies.deviceId !== client.cookies.deviceId) fail('VERIFICATION_REQUIRED');
         for (const key of requiredWyCookies) {
           if (!cookies[key]) cookies[key] = client.cookies[key];

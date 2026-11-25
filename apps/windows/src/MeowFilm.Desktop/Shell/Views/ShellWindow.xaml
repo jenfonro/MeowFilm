@@ -32,7 +32,7 @@
      </VisualStateManager.VisualStateGroups>
      <Grid.ColumnDefinitions><ColumnDefinition Width="28"/><ColumnDefinition Width="*"/><ColumnDefinition Width="28"/></Grid.ColumnDefinitions>
      <Border x:Name="ScopeSurface" Grid.ColumnSpan="3" Background="Transparent" CornerRadius="8"/>
-     <ContentPresenter x:Name="ContentPresenter" Content="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12" FontWeight="Normal"/>
+     <ContentPresenter x:Name="ContentPresenter" Content="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12"/>
      <FontIcon x:Name="DropDownGlyph" Grid.Column="2" Glyph="&#xE70D;" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource MeowFilm.Brush.Muted}" IsHitTestVisible="False"/>
     </Grid>
    </ControlTemplate>
@@ -145,8 +145,7 @@
     </Border>
    </Grid>
    </ContentControl>
-   <local:CloseWindowDialog x:Name="CloseDialog" Canvas.ZIndex="90" Visibility="Collapsed"/>
-   <local:UserDataResetDialog x:Name="ResetDialog" Canvas.ZIndex="110" Visibility="Collapsed"/>
+   <local:DesktopModalHost x:Name="SystemDialogHost" Style="{StaticResource MeowFilm.DialogHost}" Canvas.ZIndex="90"/>
    <ContentControl x:Name="NotificationInteractionGate" Canvas.ZIndex="100" IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
    <StackPanel x:Name="NotificationOverlay" HorizontalAlignment="Right" VerticalAlignment="Bottom" MaxWidth="460" Margin="24,16,24,84">
     <Border x:Name="StatusPanel" Style="{StaticResource MeowFilm.FloatingSurface}" Translation="0,0,16" Margin="0,0,0,8" Padding="14,10" CornerRadius="10" Visibility="Collapsed">

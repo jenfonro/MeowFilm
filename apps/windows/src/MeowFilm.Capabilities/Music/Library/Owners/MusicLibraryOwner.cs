@@ -33,7 +33,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         LocalLyrics,
         Metadata,
         NetworkPlaylists,
-        OnlineSettings,
         OfficialSources,
         Quality,
         Queue,

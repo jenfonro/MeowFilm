@@ -9,7 +9,6 @@ import MeowPlayback
 @MainActor
 public final class MusicAccessState: ObservableObject {
     @Published public internal(set) var isClosed = false
-    @Published public internal(set) var generation = UUID()
 }
 
 @MainActor
@@ -116,8 +115,7 @@ private func merged(_ publishers: AnyPublisher<Void, Never>...) -> AnyPublisher<
 
 public extension MusicViewModel {
     var accessChanges: AnyPublisher<Void, Never> {
-        merged(distinctChanges(accessState.$isClosed),
-               distinctChanges(accessState.$generation))
+        distinctChanges(accessState.$isClosed)
     }
 
     var searchAccessChanges: AnyPublisher<Void, Never> {

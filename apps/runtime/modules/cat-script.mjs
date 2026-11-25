@@ -1,7 +1,5 @@
 import { performance } from 'node:perf_hooks';
 import { createCatRuntime, ScriptHostError } from '@meowfilm/script-host';
-import { validateJSONValue } from '@meowfilm/runtime-bridge';
-import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { SourceCandidates } from './source-candidates.mjs';
 import { runCatSourceProbe } from './cat-probe.mjs';
 import { contracts } from '../contracts.mjs';
@@ -18,10 +16,9 @@ const sourceURL = value => {
   try { url = new URL(value); } catch { requireValue(false); }
   requireValue(['http:', 'https:'].includes(url.protocol));
 };
-const snapshot = cloneJSONValue;
 const failure = error => ({ ok: false, contract: catScriptContract,
   code: error instanceof ScriptHostError && contracts.cat.codes.has(error.code) ? error.code : 'SCRIPT_EXCEPTION' });
-const success = value => { validateJSONValue(value ?? null); return { ok: true, contract: catScriptContract, value: value ?? null }; };
+const success = value => ({ ok: true, contract: catScriptContract, value: value ?? null });
 
 /** Passive Cat protocol owner; the caller owns its data-root and session. */
 export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, configuration, debug } = {}) {
@@ -47,11 +44,8 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
           requireValue(object(input));
           requireValue(context.signal === undefined || context.signal instanceof AbortSignal);
           if (context.signal?.aborted) throw new ScriptHostError('CANCELLED');
-          let captured;
-          try {
-            captured = snapshot(Object.fromEntries(parameters.filter(key => Object.hasOwn(input, key))
-              .map(key => [key, input[key]])));
-          } catch { throw new ScriptHostError('INVALID_ARGUMENT'); }
+          const captured = Object.fromEntries(parameters.filter(key => Object.hasOwn(input, key))
+            .map(key => [key, input[key]]));
           const signal = context.signal ? AbortSignal.any([context.signal, lifetime.signal]) : lifetime.signal;
           if (signal.aborted) throw new ScriptHostError('CANCELLED');
           const value = await body(captured, signal, context);

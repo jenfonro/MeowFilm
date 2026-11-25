@@ -66,6 +66,20 @@ internal sealed record CatalogTarget(string Operation, string Platform, string T
 /// <summary>Pure non-UI catalog operation dispatcher and section/route helpers.</summary>
 internal static class MusicCatalogDispatcher
 {
+    internal static readonly MusicCatalogChoice[] FmScenes =
+    [
+        new("NIGHT_EMO", "伤感"), new("EXERCISE", "运动"), new("SLEEP_HELP", "助眠"), new("RELAX", "放松"),
+        new("CHEERFUL", "欢快"), new("LYRICAL", "抒情"), new("CURE", "治愈"), new("FOCUS", "专注"),
+        new("SWEET", "情歌"), new("RHYTHM_BLUES", "R&B"), new("RAINY", "下雨天"), new("GAMES", "打游戏"),
+        new("RAP", "说唱"), new("K_POP", "K-Pop"), new("ORIGINAL_MUSICIAL", "宝藏原创"), new("ELECTRONIC", "电音"),
+        new("COMMUTE", "出行"), new("TAKE_SHOWER", "洗澡"), new("COFFEE_SHOP", "咖啡馆"), new("ROCK", "摇滚"),
+        new("INSPIRATIONAL", "励志"), new("CHINESE", "华语"), new("ENGLISH", "欧美"), new("YUEYU", "粤语"),
+        new("MANYAO", "慢摇DJ"), new("JINGDIAN", "经典"), new("LIGHT", "轻音乐"), new("GUOFENG", "国风"),
+        new("FOLK", "民谣"), new("ACG", "二次元"), new("GUDIAN", "古典"), new("JAZZ", "爵士"),
+        new("JAPANESE", "日语"), new("GLOBAL", "全球"), new("FRANCH", "法语"), new("BLUE", "蓝调"),
+        new("DANCE", "舞蹈"), new("LATIN", "拉丁"), new("PUNK", "放克"), new("COUNTRY", "乡村乐"),
+        new("MUSICAL", "音乐剧"), new("YINGSHI", "影视"), new("HOT_SONG", "热歌")
+    ];
     internal static bool IsCatalogSourceRoute(string route) =>
         route is "catalog-home" or "catalog-channels" || route.StartsWith("catalog-channel/", StringComparison.Ordinal);
 

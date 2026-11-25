@@ -219,7 +219,7 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard let id = dataSource.itemIdentifier(for: indexPath), let entry = projection[id] else { return }
         let channel = entry.channel
-        dismiss(animated: true) { [onSelect = self.onSelect] in onSelect(channel) }
+        dismissSelf(animated: true) { [onSelect = self.onSelect] in onSelect(channel) }
     }
 }
 

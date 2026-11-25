@@ -26,7 +26,7 @@ function wyBatch(c, kind, source, context, extra = {}, algorithms = {}, feedback
         ...(feedbackSource ? { feedbackSource: text(feedbackSource) } : {}),
         ...(feedbackSourceId == null ? {} : { feedbackSourceId: scalar(feedbackSourceId) }) };
     }),
-    fetchedAt: c.clock(), expiresAt: null, ...extra };
+    fetchedAt: Date.now(), expiresAt: null, ...extra };
 }
 async function wyPlaylist(c, { id, page: current = 1, limit = 100 }, complete = false) {
   id = input(id); current = pageNumber(current); limit = pageNumber(limit, 100);
@@ -118,7 +118,7 @@ export const wyProvider = {
     if (!c.account) return browsePage({ platform: 'wy', id: 'wy:artistActivity', sections: [], more: false, continuation: null });
     const data = await c.wy('/api/sub/artist/new/works/song-mv/list/v2', {
       limit: 10, sourceType: 1, firstRequest: before == null,
-      startTimestamp: before == null ? c.clock() : input(before),
+      startTimestamp: before == null ? Date.now() : input(before),
     }, false, { dataStatus: true });
     const body = record(data?.data ?? data), works = array(body.newWorks).map(record);
     c.observe('newWorks', body.newWorks);
@@ -229,8 +229,8 @@ export const wyProvider = {
       const body = record(data?.data ?? data);
       const source = array(first(body.dailySongs, data?.recommend));
       fc.observe('dailySongs', first(body.dailySongs, data?.recommend));
-      const local = new Date(fc.clock() + 8 * 3600000), next = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), 6) - 8 * 3600000;
-      const expiry = branch === 'style' ? fc.clock() + 60000 : next > fc.clock() ? next : next + 86400000;
+      const now = Date.now(), local = new Date(now + 8 * 3600000), next = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), 6) - 8 * 3600000;
+      const expiry = branch === 'style' ? now + 60000 : next > now ? next : next + 86400000;
       return wyBatch(fc, 'daily', source, { branch }, { id: 'daily:' + branch, branch,
         name: branch === 'style' ? '风格推荐' : '每日推荐', source: 'wy',
         engine: 'NeteaseCollection', more: false, cover: image(source[0]?.al?.picUrl), expiresAt: expiry,
@@ -365,7 +365,7 @@ export const wyProvider = {
       : Object.keys(levelMap).find(key => levelMap[key] === row.level) ?? '';
     return { url: mediaURL(row.url), headers: {}, requestQuality: quality,
       actualQuality, qualityVerified: Boolean(actualQuality),
-      duration, size: number(row.size), expiresAt: row.expi == null ? null : c.clock() + number(row.expi) * 1000, full: true };
+      duration, size: number(row.size), expiresAt: row.expi == null ? null : Date.now() + number(row.expi) * 1000, full: true };
   },
   async 'audio.options'(c) {
     return { qualities: c.account ? Object.keys(levelMap) : ['128k'] };

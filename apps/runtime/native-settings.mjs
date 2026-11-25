@@ -1,12 +1,24 @@
 import { isUtf8 } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
 import { BridgeError } from '@meowfilm/runtime-bridge';
-import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
+import { isRawJSON, parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
-const blocks = new Set(['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences']);
+export const APP_SETTINGS_BLOCKS = new Set(['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const revision = value => Number.isSafeInteger(value) && value >= 0;
 const providers = new Set(['baidu', 'quark', 'uc', 'tianyi', 'yidong']);
+
+function cloneValue(value) {
+  if (value === null || typeof value !== 'object' || isRawJSON(value)) return value;
+  if (Array.isArray(value)) return value.map(cloneValue);
+  const copy = {};
+  for (const key of Object.keys(value)) {
+    const next = cloneValue(value[key]);
+    if (key === '__proto__') Object.defineProperty(copy, key, { value: next, enumerable: true, writable: true, configurable: true });
+    else copy[key] = next;
+  }
+  return copy;
+}
 
 /** An in-memory read capability over an App-owned private stream, never a settings store. */
 export function createNativeSettings(stream, stop, { debug } = {}) {
@@ -33,7 +45,7 @@ export function createNativeSettings(stream, stop, { debug } = {}) {
   }
   function request(kind, block, extra = {}) {
     if (closed) return Promise.reject(new BridgeError('CLOSED'));
-    if (!blocks.has(block) || !Number.isSafeInteger(sequence + 1))
+    if (!APP_SETTINGS_BLOCKS.has(block) || !Number.isSafeInteger(sequence + 1))
       return Promise.reject(new BridgeError('INVALID_REQUEST'));
     const id = ++sequence;
     const line = stringifyJSONValue({ kind, id, block, ...extra }, -2) + '\n';
@@ -94,37 +106,37 @@ export function createNativeSettings(stream, stop, { debug } = {}) {
             id: reply.id, kind: exchange.kind, block: exchange.block, ok: true,
             revision: reply.revision, document: reply.document,
           }, { durationMs });
-          snapshots.set(exchange.block, cloneJSONValue(value, -2));
-          exchange.resolve(cloneJSONValue(value, -2));
+          snapshots.set(exchange.block, value);
+          exchange.resolve(cloneValue(value));
         }
       }
     },
     async reload(block) { return (await request('settings.read', block)).document; },
-    async initialize() { for (const block of blocks) await request('settings.read', block); },
+    async initialize() { for (const block of APP_SETTINGS_BLOCKS) await request('settings.read', block); },
     read(block) {
       if (closed) throw new BridgeError('CLOSED');
       if (!snapshots.has(block)) throw new BridgeError('INVALID_REQUEST');
-      return cloneJSONValue(snapshots.get(block).document);
+      return cloneValue(snapshots.get(block).document);
     },
     update,
     accounts(block) {
       if (closed) throw new BridgeError('CLOSED');
       if (block !== 'pan.accounts' || !snapshots.has(block)) throw new BridgeError('INVALID_REQUEST');
-      let current = cloneJSONValue(snapshots.get(block), -2);
+      let current = cloneValue(snapshots.get(block));
       const open = () => { if (current === null || closed) throw new BridgeError('CLOSED'); };
       return {
-        read() { open(); return cloneJSONValue(current.document); },
+        read() { open(); return cloneValue(current.document); },
         async reload() {
           open();
           const value = await request('settings.read', block);
           open(); current = value;
-          return cloneJSONValue(current.document);
+          return cloneValue(current.document);
         },
         async update(command) {
           open();
           const value = await update(block, command);
           open(); current = value;
-          return cloneJSONValue(current.document);
+          return cloneValue(current.document);
         },
         close() { current = null; },
       };

@@ -50,7 +50,7 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
         }
     }
 
-    private void Released(Lease lease, bool failed)
+    private void Released(Lease lease)
     {
         bool removed;
         lock (sync)
@@ -59,7 +59,11 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
                 leases.Remove(lease.Id);
         }
         if (removed) Interlocked.Decrement(ref activeLeases);
-        if (failed && DebugLog.IsEnabled)
+    }
+
+    private void LogReleaseFailed(Lease lease)
+    {
+        if (DebugLog.IsEnabled)
         {
             DebugLog.Warn(DebugCategories.FilmPlayback, "media-authority", "lease.release_failed",
                 new { resourceId = lease.Id });
@@ -80,7 +84,7 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
         await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         bool failed = false;
         try { lifetime.Cancel(); } catch { failed = true; }
-        try { await Task.WhenAll(accepted.Select(lease => lease.DisposeAsync().AsTask())).ConfigureAwait(false); }
+        try { await Task.WhenAll(accepted.Select(lease => lease.CloseForAuthorityAsync())).ConfigureAwait(false); }
         catch { failed = true; }
         finally
         {
@@ -99,6 +103,7 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
         private readonly Func<string, ValueTask> releaseResource;
         private readonly CancellationTokenSource lifetime;
         private Task? release;
+        private bool released, lifetimeCancelled, lifetimeDisposed;
         internal string Id { get; }
         public Uri Address { get; }
         public IReadOnlyDictionary<string, string> Headers => NoHeaders;
@@ -117,22 +122,64 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
 
         public ValueTask DisposeAsync()
         {
-            lock (sync) return new(release ??= ReleaseAsync());
+            lock (sync)
+            {
+                if (released) return ValueTask.CompletedTask;
+                if (release is { IsCompleted: false } inFlight) return new(inFlight);
+                return new(release = ReleaseAsync());
+            }
+        }
+
+        internal async Task CloseForAuthorityAsync()
+        {
+            try { await DisposeAsync().ConfigureAwait(false); }
+            finally
+            {
+                // Detach authority accounting and local CTS even if remote RPC release failed;
+                // `released` stays false so a caller-held retry can still invoke releaseResource(Id).
+                owner.Released(this);
+                DisposeLifetimeOnce();
+            }
+        }
+
+        private void DisposeLifetimeOnce()
+        {
+            lock (sync)
+            {
+                if (lifetimeDisposed) return;
+                lifetimeDisposed = true;
+            }
+            lifetime.Dispose();
         }
 
         private async Task ReleaseAsync()
         {
             await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
-            bool failed = false;
-            try { lifetime.Cancel(); } catch { failed = true; }
-            try { await releaseResource(Id).ConfigureAwait(false); }
-            catch { failed = true; }
-            finally
+            bool shouldCancel, cancelFailed = false;
+            lock (sync)
             {
-                lifetime.Dispose();
-                owner.Released(this, failed);
+                shouldCancel = !lifetimeCancelled && !lifetimeDisposed;
+                lifetimeCancelled = true;
             }
-            if (failed) throw new PlaybackException(PlaybackError.ReleaseFailed);
+            if (shouldCancel)
+            {
+                try { lifetime.Cancel(); }
+                catch (ObjectDisposedException) { }
+                catch { cancelFailed = true; }
+            }
+            bool resourceFailed = false;
+            try { await releaseResource(Id).ConfigureAwait(false); }
+            catch { resourceFailed = true; }
+            if (resourceFailed)
+            {
+                lock (sync) release = null;
+                owner.LogReleaseFailed(this);
+                throw new PlaybackException(PlaybackError.ReleaseFailed);
+            }
+            lock (sync) released = true;
+            DisposeLifetimeOnce();
+            owner.Released(this);
+            if (cancelFailed) throw new PlaybackException(PlaybackError.ReleaseFailed);
         }
     }
 }

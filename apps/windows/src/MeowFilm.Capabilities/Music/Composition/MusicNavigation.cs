@@ -40,7 +40,8 @@ public sealed partial class MusicCapability
     internal void RememberLocation()
     {
         ctx.Locations[ctx.CurrentLocation.Key] = CaptureLocation();
-        Catalog.RememberCatalogLocation();
+        if (Search.IsSearchPage) Search.RememberSearch();
+        else Catalog.RememberCatalogLocation();
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
@@ -114,6 +115,7 @@ public sealed partial class MusicCapability
         Catalog.InvalidateCatalogAction();
         if (remember) RememberLocation();
         if (route == "catalog-discovery") return Discovery.LoadDiscoveryAsync(false, cancellationToken);
+        if (route == "catalog-search") return Search.RestoreSearchAsync(cancellationToken);
         if (route.StartsWith("search-local/", StringComparison.Ordinal))
         {
             string query = Uri.UnescapeDataString(route[13..]);
@@ -183,7 +185,8 @@ public sealed partial class MusicCapability
         long navigation = ctx.NavigationSubmission;
         if (Discovery.IsDiscovery || Discovery.HasActiveRequest) await Discovery.RetireDiscoveryPageAsync();
         if (ctx.Stopping || submission != ctx.SearchSubmission || pageGeneration != ctx.LoadGeneration || navigation != ctx.NavigationSubmission) return;
-        await Settings.RecordSearchHistory(query, online, cancellationToken);
+        string historyKind = online ? (Search.SearchKindLabel == "歌单" ? "playlists" : "songs") : "local";
+        await Settings.RecordSearchHistory(query, historyKind, cancellationToken);
         if (ctx.Stopping || submission != ctx.SearchSubmission || pageGeneration != ctx.LoadGeneration || navigation != ctx.NavigationSubmission) return;
         if (online) { await Search.BeginSearchAsync(query, cancellationToken); return; }
         var target = new MusicLocation("search", query);
@@ -205,7 +208,7 @@ public sealed partial class MusicCapability
         if (Discovery.IsDiscovery || Discovery.HasActiveRequest) await Discovery.RetireDiscoveryPageAsync();
         token.ThrowIfCancellationRequested();
         if (ctx.Stopping || submission != ctx.SearchSubmission || pageGeneration != ctx.LoadGeneration || navigation != ctx.NavigationSubmission) return;
-        await Settings.RecordSearchHistory(query, true, token);
+        await Settings.RecordSearchHistory(query, Search.SearchKindLabel == "歌单" ? "playlists" : "songs", token);
         token.ThrowIfCancellationRequested();
         if (ctx.Stopping || submission != ctx.SearchSubmission || pageGeneration != ctx.LoadGeneration || navigation != ctx.NavigationSubmission) return;
         if (Search.HasSearchSession && Search.SearchKeyword == query && Search.SearchAccountEpoch == Accounts.AccountEpoch)

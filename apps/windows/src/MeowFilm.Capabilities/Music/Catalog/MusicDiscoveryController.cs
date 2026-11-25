@@ -32,6 +32,7 @@ public sealed class MusicDiscoveryController : MusicController
 {
     private readonly MusicSettingsController settings;
     private readonly MusicPlaybackController playbackController;
+    private readonly MusicCatalogActionState catalogActions;
     private MusicSearchDiscoverySnapshot? discoverySnapshot;
     private CancellationTokenSource? discoveryRequest;
     private Task discoveryTail = Task.CompletedTask;
@@ -39,21 +40,20 @@ public sealed class MusicDiscoveryController : MusicController
     private bool discoveryViewVisible;
     private string discoveryStatus = "";
 
-    internal MusicDiscoveryController(MusicRuntimeContext ctx, MusicSettingsController settings, MusicPlaybackController playbackController) : base(ctx)
+    internal MusicDiscoveryController(
+        MusicRuntimeContext ctx,
+        MusicSettingsController settings,
+        MusicPlaybackController playbackController,
+        MusicCatalogActionState catalogActions) : base(ctx)
     {
         this.settings = settings;
         this.playbackController = playbackController;
+        this.catalogActions = catalogActions;
         application.DiscoveryInvalidated += DiscoveryInvalidated;
     }
 
-    private IMusicCatalogCoordinator catalogPort = null!;
-    private IMusicSearchCoordinator searchPort = null!;
-
-    internal void AttachPorts(IMusicCatalogCoordinator catalog, IMusicSearchCoordinator search)
-    {
-        catalogPort = catalog;
-        searchPort = search;
-    }
+    internal event Action? DiscoveryLoading;
+    internal event Func<CatalogTarget, string?, Task>? CatalogTargetRequested;
 
     public ObservableCollection<MusicDiscoveryKeyword> DiscoveryHot { get; } = [];
     public ObservableCollection<MusicDiscoveryKeyword> DiscoveryRecommended { get; } = [];
@@ -101,8 +101,6 @@ public sealed class MusicDiscoveryController : MusicController
         _ = ctx.Dispatcher.EnqueueAsync(() =>
         {
             if (disposed || stopping) return;
-            // Initial hydration may precede this callback but a new valid read may
-            // already have completed. Never clear that newer, current snapshot.
             if (discoverySnapshot is { } old && !application.IsDiscoveryCurrent(old.Generation))
             { ClearDiscovery(); discoveryStatus = "账号状态已变更"; }
             DiscoveryBindings();
@@ -141,7 +139,7 @@ public sealed class MusicDiscoveryController : MusicController
         discoveryRequest = request; ctx.LoadCancellation = request;
         var previousSelection = ctx.CaptureContentSelection();
         ctx.SetLocation(new("catalog-discovery"), heading: "搜索发现", clearLibrary: true);
-        catalogPort.ClearCatalogSectionsAndTags();
+        DiscoveryLoading?.Invoke();
         if (!retainCompleted) ClearDiscovery();
         discoveryStatus = "加载中"; ctx.PublishContentSelection(previousSelection); ctx.RefreshBindings();
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -191,8 +189,6 @@ public sealed class MusicDiscoveryController : MusicController
         async Task Retire()
         {
             await Task.Yield();
-            // Retire only the page subscription. The service owns its in-flight
-            // snapshot and the next page may join it without another request.
             await previous;
         }
     }
@@ -223,9 +219,6 @@ public sealed class MusicDiscoveryController : MusicController
             await searchHistory;
             return;
         }
-        // A Loaded following Unloaded must retain its intent even while the old
-        // cancelled HTTP/read/dispose still owns resources. Conversely an ordinary
-        // first load failure is not an invitation for an automatic retry.
         await Task.WhenAll(LoadDiscoveryAsync(false, lifetime.Token), searchHistory);
     }
 
@@ -282,7 +275,7 @@ public sealed class MusicDiscoveryController : MusicController
         if (!CanUseDiscovery || commands > 0 || word is null || keyword.Length == 0 || keyword.Any(char.IsControl) ||
             !(DiscoveryHot.Any(r => ReferenceEquals(r, word)) || DiscoveryRecommended.Any(r => ReferenceEquals(r, word)))) return;
         await ctx.SearchAsync(keyword, lifetime.Token);
-        if (!stopping && searchPort.IsSearchPage && searchPort.SearchKeyword == keyword)
+        if (!stopping && ctx.CurrentRoute == "catalog-search" && ctx.CurrentLocation.Query == keyword)
             await RequestNavigationAsync("catalog-search");
     }
 
@@ -295,14 +288,13 @@ public sealed class MusicDiscoveryController : MusicController
         string artwork = chart.Cover.Length > 0
             ? chart.Cover
             : chart.Songs.Select(s => s.Song.Cover).FirstOrDefault(c => c.Length > 0) ?? "";
-        return catalogPort.OpenCatalogTargetAsync(
-            MusicCatalogController.Target("playlist", "wy", chart.Name, new(Id: chart.Id)) with
-            {
-                Artwork = artwork,
-                Subtitle = chart.Creator,
-                Count = chart.Songs.Length > 0 ? chart.Songs.Length : null
-            },
-            chart.Id);
+        var target = MusicCatalogDispatcher.Target("playlist", "wy", chart.Name, new(Id: chart.Id)) with
+        {
+            Artwork = artwork,
+            Subtitle = chart.Creator,
+            Count = chart.Songs.Length > 0 ? chart.Songs.Length : null
+        };
+        return CatalogTargetRequested?.Invoke(target, chart.Id) ?? Task.CompletedTask;
     }
 
     public Task UseDiscoverySongAsync(MusicDiscoverySong row, bool play)
@@ -314,7 +306,7 @@ public sealed class MusicDiscoveryController : MusicController
         if (play)
         {
             playbackController.TrackMusicRecovery(playbackController.RetireMusicRecovery());
-            catalogPort.InvalidateCatalogAction(); playbackController.CancelOnline();
+            catalogActions.Invalidate(); playbackController.CancelOnline();
             return RunPlaybackActionAsync(async generation =>
             {
                 if (epoch != discoveryEpoch || !CurrentDiscoveryChart(chart)) return;

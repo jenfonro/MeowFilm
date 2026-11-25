@@ -4,55 +4,6 @@ import MeowContracts
 import MeowPlayback
 
 @MainActor
-public final class MusicPreparedPlayback {
-    public var duration: Double? { durationAction() }
-    private let durationAction: @MainActor () -> Double?
-    private let synchronizeAction: @MainActor () async throws -> Void
-    private let commitAction: @MainActor () throws -> MusicPlayerAttempt
-    private nonisolated let lifetime: Lifetime
-
-    public init(duration: @autoclosure @escaping @MainActor () -> Double?,
-                synchronize: @escaping @MainActor () async throws -> Void,
-                commit: @escaping @MainActor () throws -> MusicPlayerAttempt,
-                cancel: @escaping @MainActor () -> Void) {
-        durationAction = duration; synchronizeAction = synchronize; commitAction = commit
-        lifetime = Lifetime(cancelAction: cancel)
-    }
-    func synchronize() async throws {
-        guard !lifetime.settled else { throw MusicServiceError.staleResult }
-        try await synchronizeAction()
-    }
-    func commit() throws -> MusicPlayerAttempt {
-        guard !lifetime.settled else { throw MusicServiceError.staleResult }
-        let result = try commitAction()
-        lifetime.settled = true
-        return result
-    }
-    func cancel() { lifetime.cancel() }
-
-    nonisolated deinit {
-        let holder = lifetime
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { holder.cancel() }
-        } else {
-            DispatchQueue.main.async { MainActor.assumeIsolated { holder.cancel() } }
-        }
-    }
-
-    @MainActor
-    private final class Lifetime {
-        var settled = false
-        private let cancelAction: @MainActor () -> Void
-        init(cancelAction: @escaping @MainActor () -> Void) { self.cancelAction = cancelAction }
-        func cancel() {
-            guard !settled else { return }
-            settled = true
-            cancelAction()
-        }
-    }
-}
-
-@MainActor
 extension MusicViewModel {
     public func switchQuality(_ quality: String) async {
         guard MusicSourceQualityPolicy.qualities.contains(quality) else { return }
@@ -147,7 +98,7 @@ extension MusicViewModel {
         sourcePlayback.sourceSwitchID = operation
         sourcePlayback.pendingSourceSelection = (operation, intent, lifetime)
         playbackState.isResolving = true; error = nil
-        var prepared: MusicPreparedSource?, media: MusicPreparedPlayback?
+        var prepared: MusicPreparedSource?, media: PlaybackPreparedReplacement?
         var committed = false, rejectedDonor = false, mediaWithoutDonor = false
         defer {
             if !committed { media?.cancel() }
@@ -224,9 +175,10 @@ extension MusicViewModel {
                     let autoplay = !wrongSource && (sourcePlayback.sourceRecoveryWantsPlayback ?? (phase != .paused))
                     let mediaTask = Task {
                         if let previousNative {
-                            return try await self.player.prepareReplacement(resource, replacing: previousNative)
+                            guard self.playback.isCurrent(previousNative) else { throw MusicServiceError.staleResult }
+                            return try await self.playback.prepareReplacement(resource: resource, replacing: previousNative)
                         }
-                        return try await self.player.preparePlayback(resource, autoplay: autoplay)
+                        return try await self.playback.preparePlayback(resource: resource, owner: "music", autoplay: autoplay)
                     }
                     sourcePlayback.sourceMediaTask = mediaTask
                     media = try await withTaskCancellationHandler { try await mediaTask.value } onCancel: { mediaTask.cancel() }
@@ -275,7 +227,7 @@ extension MusicViewModel {
                             }
                             // All asynchronous business admission is complete.
                             // Re-align now, not before waiting for facts/activation.
-                            let synchronization = Task { try await media.synchronize(); return media }
+                            let synchronization = Task { try await self.playback.synchronizeReplacement(media); return media }
                             sourcePlayback.sourceMediaTask = synchronization
                             do {
                                 _ = try await withTaskCancellationHandler { try await synchronization.value }
@@ -314,10 +266,10 @@ extension MusicViewModel {
                             sourcePlayback.sourceCommit = (result.candidate.attemptId, nil, false)
                             do {
                                 let commit = {
-                                    if let admission { return try admission.perform { try media.commit() } }
-                                    return try media.commit()
+                                    if let admission { return try admission.perform { try self.playback.commitReplacement(media) } }
+                                    return try self.playback.commitReplacement(media)
                                 }
-                                let started: MusicPlayerAttempt
+                                let started: PlayAttempt
                                 if let authorization = result.candidate.playbackAuthorization ?? result.candidate.fileAuthorization {
                                     started = try authorization.perform(commit)
                                 } else { started = try commit() }
@@ -331,7 +283,7 @@ extension MusicViewModel {
                                 if mediaWithoutDonor {
                                     position = result.candidate.startPosition
                                     if wrongSource { playbackState.phase = .paused }
-                                    if wrongSource, resumeAfterExclusion == playbackControlRevision { player.resume(started) }
+                                    if wrongSource, resumeAfterExclusion == playbackControlRevision { playback.resume(attempt: started) }
                                 }
                                 committed = true; capturePrimaryPlayback(); beginPlaybackMetadata(refreshSources: true)
                                 if let failure = committedFailure?.failure {
@@ -395,7 +347,7 @@ extension MusicViewModel {
                     if case .quality = intent, failure == .sourceUnavailable { self.error = "未匹配到对应音质" }
                     else { report(error, epoch: own) }
                 }
-                if wrongSource, let nativeAttempt { player.pause(nativeAttempt) }
+                if wrongSource, let nativeAttempt { playback.pause(attempt: nativeAttempt) }
                 if previousNative == nil { playbackState.phase = recovering && failure != .cancelled ? .failed : .paused }
             }
         }

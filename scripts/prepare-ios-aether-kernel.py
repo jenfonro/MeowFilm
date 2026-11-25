@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Prepare the pinned Aether source and binary closure; never resolve floating packages."""
 import argparse
-from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import os
@@ -15,7 +13,12 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
+
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from ios_prepare_common import digest, download_with_proxy, file_lock as guard, identity
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = ROOT / "scripts/ios-aether-kernel.json"
@@ -27,26 +30,6 @@ SLICES = {
     "ios-arm64_x86_64-simulator": (7, {"arm64", "x86_64"}, "16.0"),
     "macos-arm64_x86_64": (1, {"arm64", "x86_64"}, "14.0")
 }
-
-
-def digest(path):
-    value = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            value.update(block)
-    return value.hexdigest()
-
-
-def identity(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
-
-
-@contextmanager
-def guard(path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        yield
 
 
 def read_lock():
@@ -68,19 +51,14 @@ def archive_for(source):
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             partial = path.with_suffix(".partial")
-            proxy = "http://127.0.0.1:7890" if sys.platform == "win32" else "http://10.0.0.1:7890"
             try:
-                for index, proxies in enumerate(({"http": proxy, "https": proxy}, {})):
-                    try:
-                        request = urllib.request.Request(source["url"], headers={"User-Agent": "Meowfilm-Aether-prepare"})
-                        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
-                        with opener.open(request, timeout=10 if index == 0 else 120) as response, partial.open("wb") as stream:
-                            for block in iter(lambda: response.read(1024 * 1024), b""):
-                                stream.write(block)
-                        break
-                    except OSError:
-                        if index:
-                            raise
+                download_with_proxy(
+                    source["url"],
+                    partial,
+                    user_agent="Meowfilm-Aether-prepare",
+                    proxy_timeout=10,
+                    direct_timeout=120,
+                )
                 if digest(partial) != source["sha256"]:
                     raise ValueError("Aether archive hash mismatch")
                 partial.replace(path)

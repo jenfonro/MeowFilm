@@ -80,7 +80,7 @@ extension NativeMusicService {
             let current = try read()
             try musicRequire(similarMode.restoring == restoration &&
                 current.queue.similar == saved, .targetChanged)
-            try musicRequire(!scope.isEmpty && musicSame(scope, saved.similarScope), .staleAccess)
+            try musicRequire(!scope.isEmpty && scope == saved.similarScope, .staleAccess)
             let context: MusicSimilarHeartbeatContext?
             if let pid = saved.providerPID, let sid = saved.providerSID, let count = saved.providerCount {
                 context = MusicSimilarHeartbeatContext(playlistID: pid, seedID: sid, count: count)

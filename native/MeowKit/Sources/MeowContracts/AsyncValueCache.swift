@@ -23,20 +23,19 @@ public actor AsyncValueCache<Key: Hashable & Sendable, Value: Sendable> {
     private let capacity: Int?
     private let maximumCost: Int
     private let cost: @Sendable (Value) -> Int
-    private let now: @Sendable () -> Date
     /// `nil` capacity keeps only the cost budget; a finite capacity is still
     /// normalized to at least one entry.
     public init(capacity: Int?, maximumCost: Int = .max,
-                cost: @escaping @Sendable (Value) -> Int = { _ in 1 },
-                clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.capacity = capacity.map { max(1, $0) }; now = clock
+                cost: @escaping @Sendable (Value) -> Int = { _ in 1 }) {
+        self.capacity = capacity.map { max(1, $0) }
         self.maximumCost = max(1, maximumCost); self.cost = cost
     }
     public func value(for key: Key, lifetime: TimeInterval,
                       observe: @escaping @Sendable (Access) -> Void = { _ in },
                       load: @escaping @Sendable () async throws -> Value) async throws -> Value {
         try Task.checkCancellation()
-        entries = entries.filter { $0.value.expires > now() }
+        let current = Date()
+        entries = entries.filter { $0.value.expires > current }
         if let entry = entries[key] {
             sequence &+= 1
             entries[key] = .init(value: entry.value, expires: entry.expires, sequence: sequence, cost: entry.cost)
@@ -101,7 +100,7 @@ public actor AsyncValueCache<Key: Hashable & Sendable, Value: Sendable> {
         if case .success(let value) = result, lifetime.isFinite, lifetime > 0 {
             let valueCost = cost(value)
             if valueCost >= 0, valueCost <= maximumCost {
-                let current = now()
+                let current = Date()
                 entries = entries.filter { $0.value.expires > current }
                 sequence &+= 1
                 entries[key] = .init(value: value, expires: current.addingTimeInterval(lifetime),

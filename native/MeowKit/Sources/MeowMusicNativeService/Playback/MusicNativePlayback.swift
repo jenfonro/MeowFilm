@@ -26,8 +26,8 @@ extension NativeMusicService {
     }
 
     func target(_ song: MusicSongRecord, _ key: String) throws -> (MusicNativeSource, MusicSongSourceRecord) {
-        guard let row = song.sources.first(where: { $0.sourceKey.utf8.elementsEqual(key.utf8) }),
-              let source = try MusicModel.sources(song).first(where: { $0.sourceKey.utf8.elementsEqual(key.utf8) }) else {
+        guard let row = song.sources.first(where: { $0.sourceKey == key }),
+              let source = try MusicModel.sources(song).first(where: { $0.sourceKey == key }) else {
             throw MusicServiceError.targetChanged
         }
         return (source, row)
@@ -121,7 +121,6 @@ extension NativeMusicService {
                 let execution = try await work(label: "playback") { try await scripts.resolve(request: request) }
                 try executedScript(execution.source, from: snapshot)
                 let current = execution.source
-                _ = try validate(current, site: source.platform, quality: selection.quality)
                 try musicRequire(attempt?.id == attemptId, .staleResult)
                 attempt?.scriptSource = current
                 resolvedSelection = .init(installationId: current.installationID, generation: current.generation,
@@ -159,7 +158,6 @@ extension NativeMusicService {
                 requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
                 expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
                 delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
-            _ = try candidate.resource()
             try pinPlaybackRecovery(candidate: candidate, song: latestSong, state: latest)
             let publish = {
                 self.attempt?.authorization = authorization
@@ -288,8 +286,7 @@ extension NativeMusicService {
                 sourceKey: sourceKey, quality: selection.quality, musicInfo: infoBytes)
             let execution = try await work(label: "lyrics") { try await scripts.lyrics(request: request) }
             try executedScript(execution.source, from: live)
-            let current = try await work(label: "lyrics") { try await scripts.source(installationID: live.installationID) }
-            try sameSource(current, live); _ = try validate(current, site: source.platform, action: "lyric")
+            _ = try validate(execution.source, site: source.platform, action: "lyric")
             try musicRequire(attempt?.id == chosen.id, .staleResult)
             lines = try MusicNativeLyricsParser.parse(execution.value, duration: song.effectiveDuration)
         }
@@ -314,8 +311,6 @@ extension NativeMusicService {
             do { execution = try await work(label: "lyrics") { try await scripts.lyrics(request: request) } }
             catch MusicServiceError.sourceUnavailable { continue }
             try executedScript(execution.source, from: snapshot)
-            let current = try await work(label: "lyrics") { try await scripts.source(installationID: snapshot.installationID) }
-            try sameSource(current, execution.source)
             let lines = try MusicNativeLyricsParser.parse(execution.value, duration: duration)
             if !lines.isEmpty { return lines }
         }

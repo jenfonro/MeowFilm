@@ -9,13 +9,10 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
     @Published public private(set) var preferences: FilmPlaybackPreferences?
     @Published public private(set) var draft: FilmPlaybackPreferences?
     @Published public private(set) var library: FilmPlaybackLibrary?
-    @Published public private(set) var hasMoreHistory = false
     @Published public private(set) var busy = false
     @Published public private(set) var preferencesBusy = false
     private let transport: FilmPlaybackTransport
     private let settingsRepository: FilmSettingsRepository
-    private var historyCursor: RuntimeValue?
-    private var historySeenCursors: [RuntimeValue] = []
     public var playbackSnapshot: (@MainActor () -> FilmPlaybackSnapshot?)?
 
     public init(transport: FilmPlaybackTransport, settingsRepository: FilmSettingsRepository) {
@@ -51,43 +48,7 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
         try begin(); defer { busy = false }
         let page = try await transport.call("library.get", parameters: .object(["limit": .number(200)])).filmRequiredObject()
         try Task.checkCancellation()
-        if area == .manual {
-            guard page["history"]?.filmArray != nil, let cursor = page["historyAfter"],
-                  cursor == .null || cursor.filmObject != nil else { throw FilmPlaybackError.invalidResponse }
-            historyCursor = cursor == .null ? nil : cursor
-            historySeenCursors = cursor == .null ? [] : [cursor]
-            hasMoreHistory = cursor != .null
-        } else {
-            historyCursor = nil
-            historySeenCursors = []
-            hasMoreHistory = false
-        }
         library = try FilmPlaybackLibrary(.object(page), area: area)
-    }
-
-    public func loadMoreHistory() async throws {
-        guard let cursor = historyCursor, var current = library, current.area == .manual else { return }
-        try begin(); defer { busy = false }
-        let page = try await transport.call("library.get", parameters: .object([
-            "limit": .number(200),
-            "historyAfter": cursor,
-        ])).filmRequiredObject()
-        try Task.checkCancellation()
-        guard let rows = page["history"]?.filmArray, let nextCursor = page["historyAfter"],
-              nextCursor == .null || nextCursor.filmObject != nil else { throw FilmPlaybackError.invalidResponse }
-        if nextCursor != .null {
-            guard !historySeenCursors.contains(nextCursor) else { throw FilmPlaybackError.invalidResponse }
-            historySeenCursors.append(nextCursor)
-            historyCursor = nextCursor
-            hasMoreHistory = true
-        } else {
-            historyCursor = nil
-            hasMoreHistory = false
-        }
-        let appended = try FilmPlaybackLibrary.items(rows, kind: "history", transform: FilmPlaybackHistory.init)
-        let existingKeys = Set(current.history.map(\.targetID))
-        current.history.append(contentsOf: appended.filter { !existingKeys.contains($0.targetID) })
-        library = current
     }
 
     public func edit(_ transform: (inout FilmPlaybackPreferences) -> Void) {

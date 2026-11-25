@@ -22,13 +22,11 @@ public sealed class MusicPlatformPriorityRow(string platform, bool enabled) : IS
 }
 
 /// <summary>
-/// Standalone owner for all music settings: lifecycle, appearance, catalog source, desktop lyrics style,
-/// device volume, feedback settings, metadata policy, quality policy, search preferences, script sources,
-/// source exclusions, and playback cache clearing.
+/// Layer-1 owner for all music settings, organized into cohesive partial files by setting domain
+/// and notifying downstream domains exclusively via explicit events.
 /// </summary>
 public sealed partial class MusicSettingsController : MusicController
 {
-    private readonly MusicSourceManagementService sourceManagement;
     private readonly object settingsLifecycleGate = new();
     private Task settingsLifecycleTail = Task.CompletedTask;
     private CancellationTokenSource? settingsActivation;
@@ -38,10 +36,29 @@ public sealed partial class MusicSettingsController : MusicController
     private int savedVolume = 100;
     private bool deviceSettingsLoaded;
 
-    internal MusicSettingsController(MusicRuntimeContext ctx) : base(ctx)
-    {
-        sourceManagement = new(ctx);
-    }
+    internal MusicSettingsController(MusicRuntimeContext ctx) : base(ctx) { }
+
+    // Explicit cross-domain lifecycle & state events (wired at MusicCapability composition root).
+    internal event Func<CancellationToken, Task>? PlatformSettingsActivating;
+    internal event Func<Task>? AccountTransferRetiring;
+    internal event Func<Task>? LibrarySyncDeactivating;
+    internal event Func<Task>? AccountDetailsDeactivating;
+    internal event Action<string>? FeedbackPlatformChanged;
+    internal event Action? CatalogSourceInvalidated;
+    internal event Action? DesktopLyricLayoutChanged;
+    internal event Action<bool>? OnlineLyricsEnabledChanged;
+    internal event Action? MetadataPolicyChanging;
+    internal event Func<Task>? MetadataPolicyApplied;
+    internal event Func<CancellationToken, Task>? MetadataArtworkRefreshRequested;
+    internal event Action? VolumeSynced;
+    internal event Action<string, bool>? QualityPolicyAccepted;
+    internal event Action? SourcesListUpdated;
+    internal event Action? PreloadInvalidated;
+    internal event Func<string?, Task>? SourceRevoking;
+    internal event Action<string, string, string>? SourceExclusionAdmitted;
+    internal event Action<string, string, string>? SourceExclusionAdded;
+    internal event Func<string, CancellationToken, Task>? SourceExclusionRemoved;
+    internal event Func<Task>? SearchPolicyChanging;
 
     internal static void ReconcilePriorityRows<T>(ObservableCollection<T> destination, IReadOnlyList<string> keys,
         Func<T, string> keyOf, Func<string, T> create, Action<T, string> apply)
@@ -59,26 +76,6 @@ public sealed partial class MusicSettingsController : MusicController
             else if (currentIndex != index) destination.Move(currentIndex, index);
         }
         while (destination.Count > keys.Count) destination.RemoveAt(destination.Count - 1);
-    }
-
-    private IMusicAccountsCoordinator accountsPort = null!;
-    private IMusicCatalogCoordinator catalogPort = null!;
-    private IMusicLyricsCoordinator lyricsPort = null!;
-    private IMusicPlaybackCoordinator playbackPort = null!;
-    private IMusicSearchCoordinator searchPort = null!;
-
-    internal void AttachPorts(
-        IMusicAccountsCoordinator accounts,
-        IMusicCatalogCoordinator catalog,
-        IMusicLyricsCoordinator lyrics,
-        IMusicPlaybackCoordinator playback,
-        IMusicSearchCoordinator search)
-    {
-        accountsPort = accounts;
-        catalogPort = catalog;
-        lyricsPort = lyrics;
-        playbackPort = playback;
-        searchPort = search;
     }
 
     public string Status => ctx.Status;
@@ -99,9 +96,9 @@ public sealed partial class MusicSettingsController : MusicController
         Changed(nameof(CanEditMetadata));
         Changed(nameof(CanEditFeedback));
         Changed(nameof(CanEditSearchPreferences));
+        Changed(nameof(CanEditDesktopLyricSettings));
         SourceBindings();
-        DesktopLyricSettingsBindings();
-        CatalogSourceBindings();
+        NotifyCatalogSourceBindings();
         RefreshExclusionRestoreAvailability();
     }
 
@@ -129,7 +126,7 @@ public sealed partial class MusicSettingsController : MusicController
         if (edit == volumeEdit && (playback.OwnerId is null || playback.OwnerId == Id))
         {
             playback.Volume = savedVolume;
-            playbackPort.NotifyVolumeChanged();
+            VolumeSynced?.Invoke();
         }
     }
 
@@ -138,7 +135,6 @@ public sealed partial class MusicSettingsController : MusicController
     internal async Task SaveVolumeCore(CancellationToken token)
     {
         if (!deviceSettingsLoaded || volumeEdit == 0 || savedVolume == playback.Volume) return;
-        // Runs in the existing command lane (or after its shutdown drain). Not per slider tick.
         AcceptDeviceSettings(await RunSettingReceiptAsync(MusicSettingReceiptKeys.DeviceSettings,
             ct => application.SaveDeviceSettingsAsync(deviceSettingsRevision, playback.Volume, ct), token));
     }
@@ -180,7 +176,7 @@ public sealed partial class MusicSettingsController : MusicController
             {
                 RetireMetadataSettings();
                 ReleaseQualitySurface(QualitySettingsSurface.Settings);
-                RetireSearchPreferencesSettings();
+                searchPreferencesGeneration++;
                 RetireFeedbackSettings();
                 try { retirement?.Cancel(); } catch (ObjectDisposedException) { }
             }
@@ -195,11 +191,7 @@ public sealed partial class MusicSettingsController : MusicController
     {
         if (ready is not null) await ready;
         try { await previous; }
-        catch
-        {
-            // A failed visible generation cannot prevent the following explicit
-            // Loaded/Unloaded generation from owning and cleaning the surface.
-        }
+        catch { }
 
         if (active)
         {
@@ -221,7 +213,8 @@ public sealed partial class MusicSettingsController : MusicController
     {
         token.ThrowIfCancellationRequested();
         var searchHistory = ActivateSearchHistoryAsync(SearchHistorySurface.Settings);
-        await accountsPort.ActivatePlatformSettingsAsync(token);
+        if (PlatformSettingsActivating is { } activatePlatforms)
+            await activatePlatforms(token);
         token.ThrowIfCancellationRequested();
 
         try { await ReadSearchPreferences(token); }
@@ -241,7 +234,7 @@ public sealed partial class MusicSettingsController : MusicController
         }
         await ActivateQualitySettingsAsync(QualitySettingsSurface.Settings);
         token.ThrowIfCancellationRequested();
-        try { await ReloadSourceExclusions(token); }
+        try { await ReloadExclusionsAsync(token); }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception error) { ctx.SetStatus(ErrorText(error)); }
         await searchHistory;
@@ -252,13 +245,13 @@ public sealed partial class MusicSettingsController : MusicController
         Exception? failure = null;
         foreach (var retire in new Func<Task>[]
         {
-            () => accountsPort.RetireAccountTransferAsync(),
+            () => AccountTransferRetiring?.Invoke() ?? Task.CompletedTask,
             () => DeactivateSearchHistoryAsync(SearchHistorySurface.Settings),
             () => metadataWork,
             () => searchPreferencesWork,
             () => qualityWork,
-            () => accountsPort.DeactivateLibrarySyncAsync(),
-            () => accountsPort.DeactivateAccountDetailsAsync()
+            () => LibrarySyncDeactivating?.Invoke() ?? Task.CompletedTask,
+            () => AccountDetailsDeactivating?.Invoke() ?? Task.CompletedTask
         })
         {
             try { await retire(); }

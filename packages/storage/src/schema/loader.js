@@ -2,9 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { storageError } from '../engine/errors.js';
 
-export const DATA_APPLICATION_ID = 0x4d464442;
-export const CACHE_APPLICATION_ID = 0x4d464348;
-export const SCHEMA_VERSION = 1;
+const DATA_APPLICATION_ID = 0x4d464442;
+const CACHE_APPLICATION_ID = 0x4d464348;
+const SCHEMA_VERSION = 1;
 
 const ROLE_SPEC = Object.freeze({
   data: Object.freeze({

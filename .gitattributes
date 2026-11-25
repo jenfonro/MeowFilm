@@ -47,3 +47,5 @@ LICENSES/WTFPL-2.0.txt whitespace=-blank-at-eof
 # Native engine sources are verified byte-for-byte, including on autocrlf hosts.
 native/JavaScript/quickjs/* -text
 native/JavaScript/*.c text eol=lf
+apps/windows/native/FilmKernel/ffmpeg-private.h text eol=lf
+scripts/windows/build-film-kernel-*.wrap text eol=lf

@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 /// Pure UIKit film playback preferences (`preferences`, `siteClean`, `autoPrepare`) built directly
@@ -47,7 +48,11 @@ final class FilmPlaybackPreferencesController: SettingsListViewController {
             owner.edit { if self.area == .siteClean { $0.siteCleanKeywords = values } else { $0.keywords = values } }
         }, for: .editingChanged)
         keywords.addAction(UIAction { [weak self] _ in self?.update() }, for: .editingDidEnd)
-        observe(owner, whenVisible: true) { [weak self] in
+        let changes = Publishers.Merge(
+            owner.$draft.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            owner.$preferencesBusy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher()
+        ).eraseToAnyPublisher()
+        observe(changes, whenVisible: true) { [weak self] in
             guard let self else { return }
             if !self.keywords.isFirstResponder { self.update() }
         }

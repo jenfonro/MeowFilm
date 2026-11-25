@@ -44,10 +44,9 @@ struct MusicReferenceHistoryDisplayIdentity: Equatable, Sendable {
     let title: String
     let count: Int
     let at: Double
-    let access: UUID
 
-    init(_ summary: MusicPlayedPlaylist, access: UUID) {
+    init(_ summary: MusicPlayedPlaylist) {
         id = summary.id; title = summary.title; count = summary.count
-        at = summary.at; self.access = access
+        at = summary.at
     }
 }

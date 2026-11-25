@@ -26,12 +26,12 @@ import MeowDebug
     private let smsService: (any MusicAccountsSMSServing)?
     private let profileService: (any MusicAccountsProfileServing)?
     private let onSessionChanged: @MainActor (MusicAccountPlatform) -> Void
-    private var active = false, available = false
+    private var active = false
     private var foreground = true
     private var smsAttempt: UUID?
     private var retryDates: [MusicAccountPlatform: Date] = [:]
     private var countdown: Task<Void, Never>?, cleanup: Task<Void, Never>?
-    private var externalGeneration: UUID?, epoch = UUID(), refreshID = UUID()
+    private var epoch = UUID(), refreshID = UUID()
     private var operation: Task<Void, Never>?, polling: Task<Void, Never>?
     private var statusReloadRequested = false
 
@@ -47,22 +47,17 @@ import MeowDebug
     public var supportsProfileRefresh: Bool { profileService != nil }
     public var supportsSessionRefresh: Bool { sessionRefreshing != nil }
     public func showsSessionRefresh(_ platform: MusicAccountPlatform) -> Bool {
-        guard supportsSessionRefresh, active, available,
+        guard supportsSessionRefresh, active,
               let row = rows.first(where: { $0.platform == platform }) else { return false }
         return row.phase == .signedIn || row.phase == .requiresValidation
     }
     public func canRefreshSession(_ platform: MusicAccountPlatform) -> Bool {
         showsSessionRefresh(platform) && !isBusy && loginPlatform == nil && challenge == nil
     }
-    public func activate(isAvailable: Bool = true, accessGeneration: UUID? = nil) {
+    public func activate() {
+        guard !active else { return }
         active = true
-        setAccess(isAvailable: isAvailable, accessGeneration: accessGeneration)
-        if available { reload() }
-    }
-    public func setAccess(isAvailable: Bool, accessGeneration: UUID? = nil) {
-        guard available != isAvailable || externalGeneration != accessGeneration else { return }
-        available = isAvailable; externalGeneration = accessGeneration; invalidate()
-        if active && available { reload() }
+        reload()
     }
     public func deactivate() { active = false; invalidate() }
     private func invalidate(keepingRows: Bool = false, keepingPhone: Bool = false) {
@@ -81,7 +76,7 @@ import MeowDebug
             if let sms { await smsService?.cancelSMSLogin(attemptID: sms) }
         }
     }
-    private func current(_ own: UUID) -> Bool { active && available && own == epoch && !Task.isCancelled }
+    private func current(_ own: UUID) -> Bool { active && own == epoch && !Task.isCancelled }
     private func refresh(_ own: UUID, enrich: Bool = true) async throws {
         let request = UUID(); refreshID = request
         let values = try await service.statuses()
@@ -146,7 +141,7 @@ import MeowDebug
         sessionChangedPlatform: MusicAccountPlatform? = nil,
         _ body: @escaping @MainActor (UUID) async throws -> Void
     ) {
-        guard active, available, !isBusy, !Task.isCancelled else { return }
+        guard active, !isBusy, !Task.isCancelled else { return }
         let own = epoch
         let selected = target ?? platform ?? loginPlatform
         let trace = MusicRequestTrace(.accountAPI, platform: selected.map { .init(accountPlatform: $0) })
@@ -214,7 +209,7 @@ import MeowDebug
     }
     public func reload() { perform { _ in } }
     public func reloadStatuses() {
-        guard active, available, !Task.isCancelled else { return }
+        guard active, !Task.isCancelled else { return }
         if isBusy { statusReloadRequested = true; return }
         perform(enrich: false, clearError: false) { _ in }
     }
@@ -242,7 +237,7 @@ import MeowDebug
         }
     }
     public func beginLogin(_ platform: MusicAccountPlatform) {
-        guard active, available, foreground, !isBusy else { return }
+        guard active, foreground, !isBusy else { return }
         if challenge != nil || smsAttempt != nil { invalidate(keepingRows: true, keepingPhone: true) }
         loginPlatform = platform; loginMethod = .qr; code = ""
         perform(name: "获取登录二维码", platform: platform) { [weak self, service] own in
@@ -254,13 +249,13 @@ import MeowDebug
         }
     }
     public func selectLogin(_ platform: MusicAccountPlatform) {
-        guard active, available, foreground else { return }
+        guard active, foreground else { return }
         invalidate(keepingRows: true)
         loginPlatform = platform; loginMethod = .qr
         beginLogin(platform)
     }
     public func selectMethod(_ method: MusicAccountLoginMethod) {
-        guard active, available, foreground, let platform = loginPlatform, method != loginMethod,
+        guard active, foreground, let platform = loginPlatform, method != loginMethod,
               method != .sms || supportsSMS(platform) else { return }
         invalidate(keepingRows: true, keepingPhone: true)
         loginPlatform = platform; loginMethod = method
@@ -276,11 +271,11 @@ import MeowDebug
         count.contains(value.utf8.count) && value.utf8.allSatisfy { (48...57).contains($0) }
     }
     public var canSendSMS: Bool {
-        active && available && foreground && loginMethod == .sms && validPhone && !isBusy &&
+        active && foreground && loginMethod == .sms && validPhone && !isBusy &&
         (loginPlatform.flatMap { retryDates[$0] } ?? .distantPast) <= Date()
     }
     public var canSubmitSMS: Bool {
-        active && available && foreground && loginMethod == .sms && validPhone && !isBusy &&
+        active && foreground && loginMethod == .sms && validPhone && !isBusy &&
         digits(code, count: 4...8)
     }
     public func sendSMS() {
@@ -312,7 +307,7 @@ import MeowDebug
     }
     func updateCountdown() {
         countdown?.cancel(); countdown = nil
-        guard active, available, let platform = loginPlatform else { resendSeconds = 0; return }
+        guard active, let platform = loginPlatform else { resendSeconds = 0; return }
         resendSeconds = max(0, Int(ceil((retryDates[platform] ?? .distantPast).timeIntervalSinceNow)))
         guard foreground, resendSeconds > 0 else { return }
         let own = epoch
@@ -322,7 +317,7 @@ import MeowDebug
             updateCountdown()
         }
     }
-    public func cancelLogin() { invalidate(); if active && available { reload() } }
+    public func cancelLogin() { invalidate(); if active { reload() } }
     public func logout(_ platform: MusicAccountPlatform) {
         // Explicit logout invalidates any prior validation/reload immediately,
         // rather than letting that callback refill the old account row.

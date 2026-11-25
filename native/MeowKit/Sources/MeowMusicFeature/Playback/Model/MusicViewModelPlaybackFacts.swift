@@ -41,7 +41,7 @@ extension MusicViewModel {
             if !pausePlaybackRecovery() {
                 if sourcePlayback.pendingSourceSelection != nil, nativeAttempt == nil {
                     invalidateSelection(stopMedia: true)
-                } else if let nativeAttempt { player.pause(nativeAttempt) }
+                } else if let nativeAttempt { playback.pause(attempt: nativeAttempt) }
             }
             playbackState.phase = .paused
             await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
@@ -62,14 +62,14 @@ extension MusicViewModel {
         }
         if recommendations.fmAdvanceIntent != nil || (isPreparingRemoteQueue && recommendations.remoteQueueIsFM) {
             recommendations.fmShouldPlay.toggle()
-            if !recommendations.fmShouldPlay, let nativeAttempt { player.pause(nativeAttempt) }
+            if !recommendations.fmShouldPlay, let nativeAttempt { playback.pause(attempt: nativeAttempt) }
             return
         }
         if let nativeAttempt, let candidate, terminalAttempt == nil {
             guard candidate.fileAuthorization?.isActive != false, candidate.playbackAuthorization?.isActive != false else {
                 invalidateSelection(stopMedia: true); error = MusicServiceError.staleAccess.localizedDescription; return
             }
-            if phase == .playing || phase == .buffering { player.pause(nativeAttempt) }
+            if phase == .playing || phase == .buffering { playback.pause(attempt: nativeAttempt) }
             else {
                 let task = schedulePlayCommand(nativeAttempt, occurrenceID: candidate.occurrenceId, replay: false)
                 await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
@@ -94,14 +94,14 @@ extension MusicViewModel {
         if command == .pause {
             recommendations.fmShouldPlay = false
             recommendations.recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
-            if !pausePlaybackRecovery() { player.pause(nativeAttempt) }
+            if !pausePlaybackRecovery() { playback.pause(attempt: nativeAttempt) }
             return true
         }
         _ = schedulePlayCommand(nativeAttempt, occurrenceID: current.id, replay: terminalAttempt != nil)
         return true
     }
 
-    private func schedulePlayCommand(_ nativeAttempt: MusicPlayerAttempt, occurrenceID: String,
+    private func schedulePlayCommand(_ nativeAttempt: PlayAttempt, occurrenceID: String,
                                      replay: Bool) -> Task<Void, Never> {
         let own = lifecycle, token = selectionID, control = playbackControlRevision
         let previous = playPauseCommandTask?.task
@@ -131,7 +131,7 @@ extension MusicViewModel {
         playPauseCommandTask?.task.cancel()
     }
 
-    private func resumePlayback(_ native: MusicPlayerAttempt, epoch: UUID, token: UUID, control: UUID) async {
+    private func resumePlayback(_ native: PlayAttempt, epoch: UUID, token: UUID, control: UUID) async {
         guard let current else { return }
         do {
             try checkSelection(epoch, token: token, occurrenceID: current.id, admission: nil)
@@ -162,7 +162,7 @@ extension MusicViewModel {
                     return
                 }
             }
-            player.resume(native)
+            playback.resume(attempt: native)
             capturePrimaryPlayback()
         } catch {
             if selectionID == token, playbackControlRevision == control { report(error, epoch: epoch) }
@@ -175,7 +175,7 @@ extension MusicViewModel {
         guard candidate?.fileAuthorization?.isActive != false, candidate?.playbackAuthorization?.isActive != false else {
             invalidateSelection(stopMedia: true); error = MusicServiceError.staleAccess.localizedDescription; return false
         }
-        guard player.seek(seconds, attempt: nativeAttempt) else { return false }
+        guard playback.seek(to: seconds, attempt: nativeAttempt) else { return false }
         feedbackConsumer.discontinuity()
         return true
     }
@@ -190,7 +190,7 @@ extension MusicViewModel {
             // Only adopt an attempt while this exact resource is entering the
             // injected native play call, including synchronous preflight failure.
             guard pendingNativeResourceID == event.attempt.resourceID else { return }
-            nativeAttempt = MusicPlayerAttempt(id: event.attempt.id, resourceID: event.attempt.resourceID)
+            nativeAttempt = event.attempt
         }
         if terminalAttempt == candidate.attemptId {
             // Ended persistence may still be awaiting acknowledgement. A

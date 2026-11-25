@@ -1,6 +1,6 @@
 import { fault } from './errors.js';
 
-const ignoreError = () => {};
+export const ignoreError = () => {};
 const closeDispatches = new WeakMap();
 
 /** Retire native event owners only after every completion listener has run.

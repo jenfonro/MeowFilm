@@ -27,6 +27,48 @@ internal enum QualitySettingsSurface
     Player = 2
 }
 
+/// <summary>A user-confirmed wrong source of one song, until restored.</summary>
+public sealed class MusicSourceExclusionRow : INotifyPropertyChanged
+{
+    private bool canRestore;
+
+    public MusicSourceExclusionRow(string songId, string provider, string platform, string title, string artist,
+        string providerName, MusicSourceExclusionTier tier = MusicSourceExclusionTier.ProviderPlatform, bool canRestore = true)
+    {
+        SongId = songId; Provider = provider; Platform = platform;
+        Title = title; Artist = artist; ProviderName = providerName;
+        Tier = tier;
+        this.canRestore = canRestore;
+    }
+
+    public string SongId { get; }
+    public string Provider { get; }
+    public string Platform { get; }
+    public string Title { get; }
+    public string Artist { get; }
+    public string ProviderName { get; }
+    public MusicSourceExclusionTier Tier { get; }
+    public bool IsRecordingExclusion => Tier == MusicSourceExclusionTier.Recording;
+    public string? RecordingSourceKey => MusicSourceExclusionsOwner.TryExtractRecordingSourceKey(Provider);
+    public string DisplayScope => IsRecordingExclusion ? $"{ProviderName}（单录音）" : ProviderName;
+    public string PlatformName => MusicSourceRow.PlatformName(Platform);
+    public string SongText => Artist.Length == 0 ? Title : $"{Title} - {Artist}";
+    public bool CanRestore
+    {
+        get => canRestore;
+        internal set
+        {
+            if (canRestore == value) return;
+            canRestore = value;
+            PropertyChanged?.Invoke(this, new(nameof(CanRestore)));
+        }
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
+/// <summary>A pickable value of the manual exclusion form.</summary>
+public sealed record MusicExclusionOption(string Key, string Name, string Detail = "");
+
 public sealed partial class MusicSettingsController
 {
     private MusicQualityPolicyRecord? savedQualityPolicy;
@@ -36,6 +78,7 @@ public sealed partial class MusicSettingsController
     private QualitySettingsSurface qualitySurfaces;
     private CancellationTokenSource? qualityCancellation;
     private Task qualityWork = Task.CompletedTask;
+    private readonly Dictionary<string, SongRow> exclusionSongs = new(StringComparer.Ordinal);
 
     public ObservableCollection<MusicQualityRow> QualityCategories { get; } = [];
     public ObservableCollection<MusicQualityRow> SpatialQualities { get; } = [];
@@ -46,7 +89,14 @@ public sealed partial class MusicSettingsController
     internal MusicQualityPolicyRecord? SavedQualityPolicy => savedQualityPolicy;
     internal string SavedQualitySignature => savedQualitySignature;
 
-    internal void QualityBindings()
+    public ObservableCollection<MusicSourceExclusionRow> SourceExclusions { get; } = [];
+    public ObservableCollection<MusicExclusionOption> ExclusionSongs { get; } = [];
+    public ObservableCollection<MusicExclusionOption> ExclusionProviders { get; } = [];
+    public IReadOnlyList<MusicExclusionOption> ExclusionPlatforms { get; } =
+        MusicSourceRow.AllPlatforms.Select(platform => new MusicExclusionOption(platform, MusicSourceRow.PlatformName(platform))).ToArray();
+    public bool HasSourceExclusions => SourceExclusions.Count > 0;
+
+    private void NotifyQualityBindings()
     {
         Changed(nameof(CanEditQuality));
         Changed(nameof(QualityStatus));
@@ -58,15 +108,11 @@ public sealed partial class MusicSettingsController
         var priorSignature = savedQualitySignature;
         savedQualityPolicy = result.Settings;
         savedQualitySignature = result.Signature;
-        MusicDto.Require(IsQualityHash(savedQualitySignature));
-        if (priorSignature.Length > 0 && priorSignature != savedQualitySignature)
-            playbackPort.QualityPolicyChanged(savedQualitySignature);
-        else if (playbackPort.PreparedAudioReceiptSignature is { } preparedSig &&
-            preparedSig != savedQualitySignature)
-            playbackPort.CancelMusicPreload();
+        bool signatureChanged = priorSignature.Length > 0 && priorSignature != savedQualitySignature;
+        QualityPolicyAccepted?.Invoke(savedQualitySignature, signatureChanged);
         PublishQualitySettings();
         qualityLoaded = true;
-        QualityBindings();
+        NotifyQualityBindings();
     }
 
     private void PublishQualitySettings()
@@ -85,11 +131,8 @@ public sealed partial class MusicSettingsController
         Rows(SpatialQualities, policy.SpatialOrder, policy.SpatialEnabled, MusicQualityPolicy.Spatial);
     }
 
-    private MusicQualityPolicyRecord DesiredQuality(string? request = null)
-    {
-        MusicDto.Require(savedQualityPolicy is not null);
-        return savedQualityPolicy! with { Request = request ?? PlaybackQualityRequest };
-    }
+    private MusicQualityPolicyRecord DesiredQuality(string? request = null) =>
+        savedQualityPolicy! with { Request = request ?? PlaybackQualityRequest };
 
     public Task SetPlaybackQualityRequestAsync(string request)
     {
@@ -142,6 +185,7 @@ public sealed partial class MusicSettingsController
         return SaveQualitySettings(desired);
     }
 
+    public Task ActivateQualitySettingsAsync() => ActivateQualitySettingsAsync(QualitySettingsSurface.Player);
     public Task DeactivateQualityAsync() => DeactivateQualityAsync(QualitySettingsSurface.Player);
 
     internal Task DeactivateQualityAsync(QualitySettingsSurface surface) =>
@@ -152,21 +196,14 @@ public sealed partial class MusicSettingsController
         if ((qualitySurfaces & surface) == 0) return false;
         qualitySurfaces &= ~surface;
         if (qualitySurfaces != QualitySettingsSurface.None) return false;
-        RetireQualitySettings();
-        return true;
-    }
-
-    private void RetireQualitySettings()
-    {
         qualityGeneration++;
         qualityLoaded = false;
         if (!qualitySaving) qualityCancellation?.Cancel();
-        QualityBindings();
+        NotifyQualityBindings();
+        return true;
     }
 
     private bool QualityCurrent(long generation) => generation == qualityGeneration && !stopping && !disposed;
-
-    public Task ActivateQualitySettingsAsync() => ActivateQualitySettingsAsync(QualitySettingsSurface.Player);
 
     internal async Task ActivateQualitySettingsAsync(QualitySettingsSurface surface)
     {
@@ -175,18 +212,16 @@ public sealed partial class MusicSettingsController
         long generation = qualityGeneration;
         if (qualityBusy) await qualityWork;
         if (!QualityCurrent(generation) || qualityLoaded || qualitySurfaces == QualitySettingsSurface.None) return;
-        await EnsureQualitySettingsAsync();
+        await BeginQuality(async (token, currentGen) =>
+        {
+            var result = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+                ct => application.GetQualityPolicyAsync(ct), token);
+            token.ThrowIfCancellationRequested();
+            if (!QualityCurrent(currentGen)) return;
+            AcceptQuality(result);
+            qualityStatus = "";
+        });
     }
-
-    private Task EnsureQualitySettingsAsync() => BeginQuality(async (token, generation) =>
-    {
-        var result = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-            ct => application.GetQualityPolicyAsync(ct), token);
-        token.ThrowIfCancellationRequested();
-        if (!QualityCurrent(generation)) return;
-        AcceptQuality(result);
-        qualityStatus = "";
-    });
 
     private bool QualitySettingsMatch(MusicQualityPolicyRecord desired) =>
         savedQualityPolicy is { } current &&
@@ -196,58 +231,48 @@ public sealed partial class MusicSettingsController
         current.SpatialOrder.SequenceEqual(desired.SpatialOrder) &&
         current.SpatialEnabled.SequenceEqual(desired.SpatialEnabled);
 
-    private Task SaveQualitySettings(MusicQualityPolicyRecord desired)
+    private Task SaveQualitySettings(MusicQualityPolicyRecord desired) => BeginQuality(async (token, generation) =>
     {
-        // Seal the complete desired policy before scheduling; the settings surface
-        // never owns an unsaved draft distinct from the native owner.
-        return BeginQuality(async (token, generation) =>
+        try
         {
+            token.ThrowIfCancellationRequested();
+            ctx.CancelOnlinePlayback();
+            var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+                ct => application.SaveQualityPolicyAsync(desired.Revision, desired.Request,
+                    desired.QualityOrder, desired.QualityEnabled, desired.SpatialOrder, desired.SpatialEnabled, ct),
+                token);
+            if (!QualityCurrent(generation)) return;
+            AcceptQuality(saved); qualityStatus = "";
+            var online = await application.GetOnlineSettingsAsync(token);
+            if (!QualityCurrent(generation)) return;
+            OnlineLyricsEnabledChanged?.Invoke(online.LyricsEnabled);
+        }
+        catch (MusicOperationException error) when (error.Code is
+            "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
+        {
+            if (!QualityCurrent(generation)) return;
+            bool matches;
             try
             {
-                token.ThrowIfCancellationRequested();
-                // The accepted policy change retires future refresh authority in
-                // AcceptQuality. The already opened media keeps its playback token.
-                ctx.CancelOnlinePlayback();
-                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-                    ct => application.SaveQualityPolicyAsync(desired.Revision, desired.Request,
-                        desired.QualityOrder, desired.QualityEnabled, desired.SpatialOrder, desired.SpatialEnabled, ct),
-                    token);
+                var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+                    ct => application.GetQualityPolicyAsync(ct), lifetime.Token);
                 if (!QualityCurrent(generation)) return;
-                AcceptQuality(saved); qualityStatus = "";
-                var online = await application.GetOnlineSettingsAsync(token);
+                AcceptQuality(current);
+                var online = await application.GetOnlineSettingsAsync(lifetime.Token);
                 if (!QualityCurrent(generation)) return;
-                lyricsPort.PublishOnlineSettings(online.LyricsEnabled);
+                OnlineLyricsEnabledChanged?.Invoke(online.LyricsEnabled);
+                matches = QualitySettingsMatch(desired);
             }
-            catch (MusicOperationException error) when (error.Code is
-                "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
+            catch
             {
-                if (!QualityCurrent(generation)) return;
-                bool matches;
-                try
-                {
-                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-                        ct => application.GetQualityPolicyAsync(ct), lifetime.Token);
-                    if (!QualityCurrent(generation)) return;
-                    AcceptQuality(current);
-                    var online = await application.GetOnlineSettingsAsync(lifetime.Token);
-                    if (!QualityCurrent(generation)) return;
-                    lyricsPort.PublishOnlineSettings(online.LyricsEnabled);
-                    matches = QualitySettingsMatch(desired);
-                }
-                catch
-                {
-                    qualityLoaded = false;
-                    throw;
-                }
-                if (matches)
-                    qualityStatus = "";
-                else if (error.Code == "REVISION_CONFLICT")
-                    qualityStatus = "音质设置已更新";
-                else
-                    throw;
+                qualityLoaded = false;
+                throw;
             }
-        }, saving: true);
-    }
+            if (matches) qualityStatus = "";
+            else if (error.Code == "REVISION_CONFLICT") qualityStatus = "音质设置已更新";
+            else throw;
+        }
+    }, saving: true);
 
     private Task BeginQuality(Func<CancellationToken, long, Task> action, bool saving = false)
     {
@@ -255,7 +280,7 @@ public sealed partial class MusicSettingsController
         var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         long generation = qualityGeneration;
         qualitySaving = saving;
-        qualityCancellation = request; qualityBusy = true; qualityStatus = ""; QualityBindings();
+        qualityCancellation = request; qualityBusy = true; qualityStatus = ""; NotifyQualityBindings();
         return qualityWork = RunAsync(async () =>
         {
             try { await action(request.Token, generation); }
@@ -277,11 +302,132 @@ public sealed partial class MusicSettingsController
             {
                 if (ReferenceEquals(qualityCancellation, request)) qualityCancellation = null;
                 request.Dispose(); qualityBusy = false; qualitySaving = false;
-                if (QualityCurrent(generation)) QualityBindings();
+                if (QualityCurrent(generation)) NotifyQualityBindings();
             }
         });
     }
 
-    internal static bool IsQualityHash(string value) => value.Length == 64 &&
-        value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+    private void RefreshExclusionRestoreAvailability()
+    {
+        bool editable = CanEdit;
+        foreach (var row in SourceExclusions) row.CanRestore = editable;
+    }
+
+    private async Task ReloadExclusionsAsync(CancellationToken token)
+    {
+        var list = await application.ListSourceExclusionsAsync(ct: token);
+        bool editable = CanEdit;
+        var incoming = list.Items.Reverse()
+            .Select(item => new MusicSourceExclusionRow(
+                item.SongId, item.Provider, item.Platform, item.Title, item.Artist, item.ProviderName,
+                MusicSourceExclusionsOwner.TierOf(item), editable))
+            .ToArray();
+        var existing = SourceExclusions.ToDictionary(row => (row.SongId, row.Provider, row.Platform));
+        var nextRows = new MusicSourceExclusionRow[incoming.Length];
+        for (int index = 0; index < incoming.Length; index++)
+        {
+            var candidate = incoming[index];
+            if (existing.TryGetValue((candidate.SongId, candidate.Provider, candidate.Platform), out var retained) &&
+                retained.Title == candidate.Title && retained.Artist == candidate.Artist &&
+                retained.ProviderName == candidate.ProviderName)
+            {
+                retained.CanRestore = editable;
+                nextRows[index] = retained;
+            }
+            else nextRows[index] = candidate;
+        }
+        var keep = nextRows.ToHashSet(ReferenceEqualityComparer.Instance);
+        for (int index = SourceExclusions.Count - 1; index >= 0; index--)
+            if (!keep.Contains(SourceExclusions[index])) SourceExclusions.RemoveAt(index);
+        for (int index = 0; index < nextRows.Length; index++)
+        {
+            var row = nextRows[index];
+            if (index < SourceExclusions.Count && ReferenceEquals(SourceExclusions[index], row)) continue;
+            int currentIndex = SourceExclusions.IndexOf(row);
+            if (currentIndex >= 0) SourceExclusions.Move(currentIndex, index);
+            else SourceExclusions.Insert(index, row);
+        }
+        Changed(nameof(HasSourceExclusions));
+    }
+
+    public Task RestoreSourceExclusionAsync(MusicSourceExclusionRow? row)
+    {
+        if (row is null || !SourceExclusions.Contains(row) || !CanEdit) return Task.CompletedTask;
+        return RunAsync(async () =>
+        {
+            try
+            {
+                if (row.RecordingSourceKey is { } sourceKey)
+                    await application.RemoveRecordingExclusionAsync(row.SongId, sourceKey, row.Platform, lifetime.Token);
+                else
+                    await application.RemoveSourceExclusionAsync(row.SongId, row.Provider, row.Platform, lifetime.Token);
+                if (SourceExclusionRemoved is { } removed)
+                    await removed(row.SongId, lifetime.Token);
+            }
+            finally { await ReloadExclusionsAsync(lifetime.Token); }
+        });
+    }
+
+    public async Task<bool> PrepareSourceExclusionFormAsync()
+    {
+        bool prepared = false;
+        await RunAsync(async () =>
+        {
+            var songs = new Dictionary<string, SongRow>(StringComparer.Ordinal);
+            long? queueVersion = null;
+            int offset = 0, total;
+            do
+            {
+                var page = await application.GetQueueAsync(offset, 100, lifetime.Token);
+                if (queueVersion is not null && queueVersion != page.Version)
+                    throw new MusicOperationException("REVISION_CONFLICT");
+                queueVersion = page.Version;
+                foreach (var entry in page.Entries)
+                {
+                    var song = SongRow.FromRecord(entry.Song, entry.EntryId);
+                    if (song.IsOnline) songs.TryAdd(song.Id, song);
+                }
+                offset += page.Entries.Length;
+                total = page.Total;
+            } while (offset < total);
+
+            var providers = new List<MusicExclusionOption> { new(MusicLibraryOwner.OfficialProvider, "官方音源") };
+            try
+            {
+                var list = await application.ListSourcesAsync(lifetime.Token);
+                foreach (var item in list.Items) providers.Add(new(item.InstallationId, item.Name));
+            }
+            catch (MusicOperationException error) when (error.Code == "SCRIPT_RUNTIME_UNAVAILABLE") { }
+
+            exclusionSongs.Clear();
+            ExclusionSongs.Clear();
+            foreach (var song in songs.Values)
+            {
+                exclusionSongs.Add(song.Id, song);
+                ExclusionSongs.Add(new(song.Id, song.Title, song.Artist));
+            }
+            ExclusionProviders.Clear();
+            foreach (var provider in providers) ExclusionProviders.Add(provider);
+            prepared = true;
+        });
+        return prepared;
+    }
+
+    public Task AddSourceExclusionAsync(MusicExclusionOption? song, MusicExclusionOption? provider, MusicExclusionOption? platform)
+    {
+        if (song is null || provider is null || platform is null || stopping ||
+            !exclusionSongs.TryGetValue(song.Key, out var row) || !ExclusionProviders.Contains(provider) ||
+            !ExclusionPlatforms.Contains(platform)) return Task.CompletedTask;
+        SourceExclusionAdmitted?.Invoke(row.Id, provider.Key, platform.Key);
+        string name = provider.Key == MusicLibraryOwner.OfficialProvider ? MusicSourceRow.OfficialName(platform.Key) : provider.Name;
+        return RunAsync(async () =>
+        {
+            try
+            {
+                await application.AddSourceExclusionAsync(row.Id, provider.Key, platform.Key, name, row.Title, row.Artist, lifetime.Token);
+                SourceExclusionAdded?.Invoke(row.Id, provider.Key, platform.Key);
+            }
+            finally { await ReloadExclusionsAsync(lifetime.Token); }
+        });
+    }
 }

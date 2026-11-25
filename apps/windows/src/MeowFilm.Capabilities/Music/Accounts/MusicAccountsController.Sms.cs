@@ -61,12 +61,7 @@ public sealed partial class MusicAccountsController
                 token => application.SendAccountSmsAsync("wy", phone, countryCode, token),
                 sent =>
                 {
-                    MusicDto.Require(sent.Platform == "wy" && sent.Sent);
-                    if (sent.RetryAfterSeconds > 0)
-                    {
-                        MusicDto.Require(sent.RetryAfterSeconds is >= 1 and <= 600);
-                        SmsCooldown(sent.RetryAfterSeconds);
-                    }
+                    if (sent.RetryAfterSeconds > 0) SmsCooldown(sent.RetryAfterSeconds);
                     accountStatus = "验证码已发送";
                     AccountBindings();
                     return null;

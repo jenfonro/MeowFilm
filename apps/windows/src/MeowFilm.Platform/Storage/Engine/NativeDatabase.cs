@@ -31,8 +31,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     public const int FormatVersion = 1;
     public const string DataFileName = "meowfilm-data.sqlite3";
     public const string CacheFileName = "meowfilm-cache.sqlite3";
-    public const string RelativePath = "storage-v1/" + DataFileName;
-    public const string CacheRelativePath = "storage-v1/" + CacheFileName;
     private const int MaximumPendingOperations = 128;
     private const int MaximumPendingBytes = 32 * 1024 * 1024;
     private const int PreparedStatementCacheCapacity = 256;
@@ -75,8 +73,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private string MaintenanceLockName => role == DatabaseRole.Cache ? "cache-maintenance.lock" : "data-maintenance.lock";
     public string DatabasePath => Path.Combine(productRoot, "storage-v1", FileName);
     public string SQLiteVersion { get; private set; } = "";
-    public string SQLiteSourceId { get; private set; } = "";
-    public IReadOnlyList<string> SQLiteCompileOptions { get; private set; } = [];
 
     public NativeDatabase(string productRoot, DatabaseRole role = DatabaseRole.Data)
     {
@@ -316,9 +312,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         JsonValueKind.Number => value.GetDouble(),
         _ => value.GetRawText()
     };
-
-    public Task<StorageRevision> RevisionAsync(string owner, CancellationToken token = default) =>
-        ReadAsync(session => session.Revision(owner), token);
 
     // Used only by the music owner's off-UI command lane for identity lookups.
     public T Read<T>(Func<DatabaseSession, T> read)
@@ -590,8 +583,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 throw new StorageException(StorageError.Storage);
             var session = new DatabaseSession(writeConnection);
             SQLiteVersion = session.Scalar<string>("SELECT sqlite_version()")!;
-            SQLiteSourceId = session.Scalar<string>("SELECT sqlite_source_id()")!;
-            SQLiteCompileOptions = session.Query("PRAGMA compile_options", row => row.GetString(0));
             if (!SafeWalVersion(SQLiteVersion))
                 throw new StorageException(StorageError.UnsupportedVersion);
             session.ExecuteScript(

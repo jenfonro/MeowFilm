@@ -8,8 +8,8 @@ public sealed partial class MusicLyricsController
 
     // Positive adjustment delays the lyrics, never the audio.
     public double LyricOffsetSeconds => lyricOffsetSeconds;
-    public double LyricPositionSeconds => playbackPort.PositionSeconds - lyricOffsetSeconds;
-    public bool CanAdjustLyricOffset => !stopping && playbackPort.OwnsCurrent && playback.HasMedia && Lyrics.Count > 0;
+    public double LyricPositionSeconds => playbackController.PositionSeconds - lyricOffsetSeconds;
+    public bool CanAdjustLyricOffset => !stopping && playbackController.OwnsCurrent && playback.HasMedia && Lyrics.Count > 0;
 
     public void AdjustLyricOffset(double delta)
     {

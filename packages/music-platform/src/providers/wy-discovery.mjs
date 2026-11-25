@@ -718,7 +718,7 @@ export async function wyCharts(c, { kind, period = 'daily', year }) {
     if (!route) fail('UNSUPPORTED');
     let resolvedYear;
     if (period === 'yearly') {
-      resolvedYear = year == null ? new Date(c.clock()).getUTCFullYear() : number(year, undefined, 'INVALID_REQUEST');
+      resolvedYear = year == null ? new Date(Date.now()).getUTCFullYear() : number(year, undefined, 'INVALID_REQUEST');
       if (!Number.isInteger(resolvedYear) || resolvedYear < 1900 || resolvedYear > 2200) fail('INVALID_REQUEST');
     }
     const raw = await c.wy('/api/feealbum/songsaleboard/' + route + '/type' + (period === 'yearly' ? '/' : ''),

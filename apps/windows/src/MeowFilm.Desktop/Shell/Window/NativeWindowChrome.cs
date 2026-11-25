@@ -138,7 +138,7 @@ public sealed class NativeBorderlessChildHost : IDisposable
         nint exStyle = NativeWin32.GetWindowLongPtr(child, GwlExStyle);
         nint nextExStyle = exStyle | WsExTransparent | WsExNoActivate;
         if (nextExStyle != exStyle) NativeWin32.SetWindowLongPtr(child, GwlExStyle, nextExStyle);
-        EnableWindow(child, false);
+        NativeWin32.EnableWindow(child, false);
         NativeWin32.SetWindowPos(child, 0, 0, 0, 0, 0, SwpHideWindow | SwpNoActivate | SwpNoZOrder);
     }
 
@@ -222,7 +222,6 @@ public sealed class NativeBorderlessChildHost : IDisposable
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EnumChildWindows(nint hWndParent, EnumWindowsProc lpEnumFunc, nint lParam);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint hWnd, [Out] char[] lpClassName, int nMaxCount);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint hWnd);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EnableWindow(nint hWnd, [MarshalAs(UnmanagedType.Bool)] bool bEnable);
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(nint hwnd, int attr, ref int attrValue, int attrSize);
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(nint hwnd, int attr, ref uint attrValue, int attrSize);
 }

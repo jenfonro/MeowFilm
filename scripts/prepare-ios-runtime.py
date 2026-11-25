@@ -12,8 +12,13 @@ import stat
 import subprocess
 import sys
 import tempfile
-import urllib.request
 import zipfile
+
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from ios_prepare_common import download_with_proxy, sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "scripts/ios-node-mobile.json"
@@ -21,14 +26,6 @@ NATIVE_POLICY = ROOT / "scripts/script-host-native.json"
 NODE_MOBILE = ROOT / ".cache/nodejs-mobile"
 SHARED_DOWNLOADS = (Path("E:/Developer") if os.name == "nt" else Path.home() / "Developer") / "cache/downloads"
 FRAMEWORK = "NodeMobile.xcframework"
-
-
-def sha256(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def native_policy():
@@ -111,8 +108,7 @@ def shared_node_archive(pinned):
     if not archive.exists():
         with tempfile.TemporaryDirectory(prefix="node-mobile-", dir=SHARED_DOWNLOADS) as temporary:
             partial = Path(temporary) / "archive"
-            with urllib.request.urlopen(pinned["archive"]["url"], timeout=120) as source, partial.open("wb") as sink:
-                shutil.copyfileobj(source, sink)
+            download_with_proxy(pinned["archive"]["url"], partial, proxy_timeout=10, direct_timeout=120)
             if sha256(partial) != expected:
                 raise ValueError("Unexpected Node Mobile archive SHA-256")
             try:

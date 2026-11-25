@@ -6,8 +6,6 @@ internal sealed record MusicSettingReceiptDescriptor(string Label, string[] Keys
 
 internal static class MusicSettingReceiptKeys
 {
-    internal static readonly MusicSettingReceiptDescriptor OnlineSettings =
-        new("在线播放", ["online-settings:lyrics"]);
     internal static readonly MusicSettingReceiptDescriptor OfficialSources =
         new("官方音源", ["native-official-sources:enabled"]);
     internal static readonly MusicSettingReceiptDescriptor MetadataPolicy =

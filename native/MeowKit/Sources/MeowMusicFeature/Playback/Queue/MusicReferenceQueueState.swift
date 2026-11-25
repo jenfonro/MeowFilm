@@ -3,12 +3,11 @@
 import Foundation
 
 struct MusicReferenceQueueIntent: Hashable, Sendable {
-    let access: UUID
     let revision: Int
     let ids: [String]
 
-    func admits(access: UUID, revision: Int, ids: [String], permitted: Bool) -> Bool {
-        permitted && self.access == access && self.revision == revision && self.ids == ids
+    func admits(revision: Int, ids: [String], permitted: Bool) -> Bool {
+        permitted && self.revision == revision && self.ids == ids
     }
     func moving(_ offsets: IndexSet, to destination: Int) -> [String]? {
         guard !offsets.isEmpty, Set(ids).count == ids.count, (0...ids.count).contains(destination),
@@ -24,11 +23,10 @@ struct MusicReferenceQueueIntent: Hashable, Sendable {
 /// A confirmation/read action may not survive a replaced detail, even when the
 /// history ID is unchanged. The service still verifies the opaque token itself.
 struct MusicReferenceHistoryIntent: Equatable, Sendable {
-    let access: UUID
     let request: UUID
     let token: MusicHistoryActionToken
-    func admits(access: UUID, request: UUID, token: MusicHistoryActionToken?, permitted: Bool) -> Bool {
-        permitted && self.access == access && self.request == request && self.token == token
+    func admits(request: UUID, token: MusicHistoryActionToken?, permitted: Bool) -> Bool {
+        permitted && self.request == request && self.token == token
     }
 }
 

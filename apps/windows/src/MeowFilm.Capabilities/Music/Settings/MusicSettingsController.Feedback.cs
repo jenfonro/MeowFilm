@@ -22,18 +22,18 @@ public sealed class MusicFeedbackPlatformRow(string platform) : INotifyPropertyC
 public sealed partial class MusicSettingsController
 {
     private MusicFeedbackController PlaybackFeedback => application.Feedback;
-    private long feedbackRevision, feedbackSettingsGeneration;
-    private Task feedbackSettingsWork = Task.CompletedTask;
-    private bool feedbackSettingsLoaded, feedbackSettingsBusy;
+    private long feedbackRevision, feedbackGeneration;
+    private Task feedbackWork = Task.CompletedTask;
+    private bool feedbackLoaded, feedbackBusy;
     private string feedbackStatus = "";
     private string publishedFeedbackStatus = "";
 
     public ObservableCollection<MusicFeedbackPlatformRow> FeedbackPlatforms { get; } =
         [new("wy"), new("tx"), new("kg")];
-    public bool CanEditFeedback => CanEdit && feedbackSettingsLoaded && !feedbackSettingsBusy;
+    public bool CanEditFeedback => CanEdit && feedbackLoaded && !feedbackBusy;
     public string FeedbackStatus => feedbackStatus.Length > 0 ? feedbackStatus :
         PlaybackFeedback.LastError is { } ? "播放记录上报失败" : "";
-    internal bool FeedbackSettingsLoaded => feedbackSettingsLoaded;
+    internal bool FeedbackSettingsLoaded => feedbackLoaded;
 
     internal void PublishFeedbackStatus()
     {
@@ -43,33 +43,33 @@ public sealed partial class MusicSettingsController
         Changed(nameof(FeedbackStatus));
     }
 
-    private bool FeedbackSettingsCurrent(long generation) =>
-        generation == feedbackSettingsGeneration && !stopping && !disposed;
+    private bool FeedbackCurrent(long currentGeneration) =>
+        currentGeneration == feedbackGeneration && !stopping && !disposed;
 
-    internal void RetireFeedbackSettings()
+    private void RetireFeedbackSettings()
     {
-        feedbackSettingsGeneration++;
-        feedbackSettingsLoaded = false;
-        feedbackSettingsBusy = false;
+        feedbackGeneration++;
+        feedbackLoaded = false;
+        feedbackBusy = false;
     }
 
     internal async Task ReadFeedbackSettings(CancellationToken token)
     {
-        long generation = feedbackSettingsGeneration;
-        await feedbackSettingsWork;
-        if (!FeedbackSettingsCurrent(generation)) return;
+        long currentGeneration = feedbackGeneration;
+        await feedbackWork;
+        if (!FeedbackCurrent(currentGeneration)) return;
         try
         {
             var value = await PlaybackFeedback.ReadSettingsAsync(refresh: true, token);
             token.ThrowIfCancellationRequested();
-            if (FeedbackSettingsCurrent(generation)) PublishFeedbackSettings(value);
+            if (FeedbackCurrent(currentGeneration)) PublishFeedbackSettings(value);
         }
         catch (OperationCanceledException) { throw; }
         catch
         {
-            if (FeedbackSettingsCurrent(generation))
+            if (FeedbackCurrent(currentGeneration))
             {
-                feedbackSettingsLoaded = false; feedbackStatus = "上报设置读取失败";
+                feedbackLoaded = false; feedbackStatus = "上报设置读取失败";
                 Changed(nameof(CanEditFeedback)); PublishFeedbackStatus();
             }
             throw;
@@ -82,9 +82,9 @@ public sealed partial class MusicSettingsController
         foreach (var row in FeedbackPlatforms)
         {
             row.Apply(settings.Enabled.Contains(row.Platform));
-            accountsPort.RefreshPlatformSetting(row.Platform);
+            FeedbackPlatformChanged?.Invoke(row.Platform);
         }
-        feedbackSettingsLoaded = true; feedbackStatus = "";
+        feedbackLoaded = true; feedbackStatus = "";
         Changed(nameof(CanEditFeedback)); PublishFeedbackStatus();
     }
 
@@ -99,58 +99,56 @@ public sealed partial class MusicSettingsController
         var targets = FeedbackPlatforms.Where(value => value.Enabled || ReferenceEquals(value, row) && enabled)
             .Where(value => !ReferenceEquals(value, row) || enabled)
             .Select(value => value.Platform).ToArray();
-        long revision = feedbackRevision, generation = feedbackSettingsGeneration;
-        feedbackSettingsBusy = true;
+        long expectedRevision = feedbackRevision, currentGeneration = feedbackGeneration;
+        feedbackBusy = true;
         Changed(nameof(CanEditFeedback));
-        accountsPort.RefreshPlatformSetting(row.Platform);
-        var work = RunAsync(async () =>
+        FeedbackPlatformChanged?.Invoke(row.Platform);
+        var nextWork = RunAsync(async () =>
         {
-            long receipt = Receipts.NextSubmission();
+            long receipt = ctx.Receipts.NextSubmission();
             try
             {
-                var value = await PlaybackFeedback.SaveSettingsAsync(revision, targets, lifetime.Token);
-                Receipts.Record("music.feedback.settings.save", "播放上报", receipt, confirmed: true);
-                if (FeedbackSettingsCurrent(generation)) PublishFeedbackSettings(value);
+                var value = await PlaybackFeedback.SaveSettingsAsync(expectedRevision, targets, lifetime.Token);
+                ctx.Receipts.Record("music.feedback.settings.save", "播放上报", receipt, confirmed: true);
+                if (FeedbackCurrent(currentGeneration)) PublishFeedbackSettings(value);
             }
             catch (Exception error)
             {
                 bool uncertain = error is MusicFeedbackException { Code: "COMMIT_UNKNOWN" };
                 if (uncertain)
-                    Receipts.Record("music.feedback.settings.save", "播放上报", receipt, confirmed: false);
-                if (!FeedbackSettingsCurrent(generation)) return;
+                    ctx.Receipts.Record("music.feedback.settings.save", "播放上报", receipt, confirmed: false);
+                if (!FeedbackCurrent(currentGeneration)) return;
                 try
                 {
-                    // This is the save's own reconciliation, not a page read:
-                    // ReadFeedbackSettings waits for this physical work to finish.
                     var value = await PlaybackFeedback.ReadSettingsAsync(refresh: true, lifetime.Token);
-                    if (!FeedbackSettingsCurrent(generation)) return;
+                    if (!FeedbackCurrent(currentGeneration)) return;
                     PublishFeedbackSettings(value);
                     bool matched = FeedbackPlatforms.First(v => v.Platform == row.Platform).Enabled == enabled;
                     if (uncertain && matched)
-                        Receipts.Record("music.feedback.settings.save", "播放上报", receipt, confirmed: true);
+                        ctx.Receipts.Record("music.feedback.settings.save", "播放上报", receipt, confirmed: true);
                     feedbackStatus = matched ? "" : (uncertain ? "保存结果未确认，请重新读取" : "播放上报设置未生效");
                 }
                 catch
                 {
-                    if (FeedbackSettingsCurrent(generation))
+                    if (FeedbackCurrent(currentGeneration))
                     {
-                        feedbackSettingsLoaded = false;
+                        feedbackLoaded = false;
                         feedbackStatus = uncertain ? "保存结果未确认，请重新读取" : "播放上报设置保存失败";
                     }
                 }
             }
             finally
             {
-                if (FeedbackSettingsCurrent(generation))
+                if (FeedbackCurrent(currentGeneration))
                 {
-                    feedbackSettingsBusy = false;
+                    feedbackBusy = false;
                     Changed(nameof(CanEditFeedback));
                     PublishFeedbackStatus();
-                    accountsPort.RefreshPlatformSetting(row.Platform);
+                    FeedbackPlatformChanged?.Invoke(row.Platform);
                 }
             }
         }, publishStatus: false);
-        feedbackSettingsWork = work;
-        await work;
+        feedbackWork = nextWork;
+        await nextWork;
     }
 }

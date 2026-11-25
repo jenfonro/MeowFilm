@@ -45,6 +45,6 @@ export async function wySearchDiscovery(c, { components = ['hot', 'charts', 'sug
     return { hot: hot.value?.items ?? [], hotCanPlay: hot.value?.canPlay ?? false,
       suggestions: [...new Set([suggested.value ?? '', ...(hot.value?.items ?? []).map(row => row.keyword)].filter(Boolean))],
       charts: top.value ?? [], failures: [hot.failure, top.failure, suggested.failure].filter(Boolean),
-      fetchedAt: fc.clock(), expiresAt: fc.clock() + 600000 };
+      fetchedAt: Date.now(), expiresAt: Date.now() + 600000 };
   }, 600000, { shouldCache: result => !result.failures.length });
 }

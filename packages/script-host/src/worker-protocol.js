@@ -1,7 +1,7 @@
 import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { fault, safeError } from './errors.js';
 
-export const WORKER_PROTOCOL_VERSION = 1;
+const WORKER_PROTOCOL_VERSION = 1;
 const RPC_DEPTH_OFFSET = -2;
 
 export function encodeWorkerPayload(value) {
@@ -18,12 +18,12 @@ const requestMethods = new Set(['start', 'activate', 'invoke', 'stop',
 const eventNames = new Set(['activated', 'endpoints', 'capabilities',
   'failure', 'diagnostic', 'scriptError', 'network', 'stopped', 'stats', 'settings']);
 
-export function assertMethod(value) {
+function assertMethod(value) {
   if (!requestMethods.has(value)) throw fault('UNSUPPORTED_OPTION');
   return value;
 }
 
-export function assertEvent(value) {
+function assertEvent(value) {
   if (!eventNames.has(value)) throw fault('UNSUPPORTED_OPTION');
   return value;
 }

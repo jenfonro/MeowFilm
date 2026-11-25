@@ -81,7 +81,7 @@ async function listPage(c, id, batch, previousTotal) {
 export const mgProvider = {
   async search(c, { keyword, kind = 'songs', page: current = 1, limit = 30 }) {
     keyword = input(keyword); current = pageNumber(current); limit = pageNumber(limit, 30);
-    const songs = kind === 'songs', timestamp = String(c.clock());
+    const songs = kind === 'songs', timestamp = String(Date.now());
     const recipe = request('https://jadeite.migu.cn/music_search/v3/search/searchAll', {
       isCorrect: songs ? 0 : 1, isCopyright: 1,
       searchSwitch: JSON.stringify({ song: songs ? 1 : 0, album: 0, singer: 0, tagSong: songs ? 1 : 0,

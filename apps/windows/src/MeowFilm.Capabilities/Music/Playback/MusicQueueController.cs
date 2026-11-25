@@ -29,12 +29,12 @@ public sealed record MusicQueueSurfaceRow(SongRow Song, bool IsCurrent) : System
     public string Duration => Song.Duration;
 }
 
-/// <summary>Standalone owner for the music play-queue surface and recommendation sessions.</summary>
-public sealed partial class MusicQueueController : MusicController,
-    IMusicQueueCoordinator
+/// <summary>Standalone Layer-3 owner for the music play-queue surface and recommendation sessions.</summary>
+public sealed partial class MusicQueueController : MusicController
 {
     private readonly MusicPlaybackController playbackController;
     private readonly MusicAccountsController accounts;
+    private readonly MusicCatalogActionState catalogActions;
     private readonly ObservableCollection<MusicQueueSurfaceRow> queueSurfaceRows = [];
     private CancellationTokenSource? queueSurfaceCancellation;
     private Task? queueSurfacePending;
@@ -50,35 +50,18 @@ public sealed partial class MusicQueueController : MusicController,
     private string queueSurfaceStatus = "";
     private bool queueSurfaceOpen;
 
-    internal MusicQueueController(MusicRuntimeContext ctx, MusicPlaybackController playbackController, MusicAccountsController accounts) : base(ctx)
+    internal MusicQueueController(MusicRuntimeContext ctx, MusicPlaybackController playbackController,
+        MusicAccountsController accounts, MusicCatalogActionState catalogActions) : base(ctx)
     {
         this.playbackController = playbackController;
         this.accounts = accounts;
+        this.catalogActions = catalogActions;
         QueueSurfaceRows = new(queueSurfaceRows);
         InitializeRecommendations();
     }
 
-    private IMusicCatalogCoordinator catalogPort = null!;
-    private IMusicLibraryCoordinator libraryPort = null!;
-
-    internal void AttachPorts(IMusicCatalogCoordinator catalog, IMusicLibraryCoordinator library)
-    {
-        catalogPort = catalog;
-        libraryPort = library;
-    }
-
-    void IMusicQueueCoordinator.RecommendationBindings() => RecommendationBindings();
-    void IMusicQueueCoordinator.NotifyPlaybackModeAvailability() => NotifyPlaybackModeAvailability();
-    Task<bool> IMusicQueueCoordinator.AdvanceRecommendationAsync(bool naturalEnd) => AdvanceRecommendation(naturalEnd);
-    void IMusicQueueCoordinator.ClearSearchRecommendationStart() => ClearSearchRecommendationStart();
-    void IMusicQueueCoordinator.InvalidateQueueSurface() => InvalidateQueueSurface();
-    void IMusicQueueCoordinator.NotifyModeChanged() => NotifyModeChanged();
-    void IMusicQueueCoordinator.NotifyRecommendationPlaybackChanged() => NotifyRecommendationPlaybackChanged();
-    void IMusicQueueCoordinator.ObserveExplicitRecommendationPause() => ObserveExplicitRecommendationPause();
-    void IMusicQueueCoordinator.ObserveRecommendationPlayback() => ObserveRecommendationPlayback();
-    void IMusicQueueCoordinator.RefreshQueueSurfaceCurrent() => RefreshQueueSurfaceCurrent();
-    Task IMusicQueueCoordinator.RefreshRecommendationQueueAsync(CancellationToken token) => RefreshRecommendationQueue(token);
-    void IMusicQueueCoordinator.StartPendingSearchRecommendationPreview() => StartPendingSearchRecommendationPreview();
+    internal event Func<CancellationToken, Task>? PlaylistsChanged;
+    internal event Action<Exception>? RecommendationActionError;
 
     public ReadOnlyObservableCollection<MusicQueueSurfaceRow> QueueSurfaceRows { get; }
     public string QueueSurfaceCountText => queueSurfaceTotal.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -358,7 +341,7 @@ public sealed partial class MusicQueueController : MusicController,
     {
         if (!queueSurfaceRows.Contains(row) || string.IsNullOrEmpty(row.EntryId)) return Task.CompletedTask;
         playbackController.TrackMusicRecovery(playbackController.RetireMusicRecovery());
-        catalogPort.InvalidateCatalogAction();
+        catalogActions.Invalidate();
         playbackController.CancelOnline();
         return RunPlaybackActionAsync(async generation =>
         {
@@ -425,7 +408,7 @@ public sealed partial class MusicQueueController : MusicController,
                 var reply = await application.AddSongsToCollectionAsync("favorites", revision, chunk, lifetime.Token);
                 revision = reply.Revision;
             }
-            await libraryPort.RefreshPlaylistsAsync(lifetime.Token);
+            if (PlaylistsChanged is { } changed) await changed(lifetime.Token);
         });
     }
 

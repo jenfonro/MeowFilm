@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Prepare locked sources and an isolated dynamic Apple audio decoder framework."""
 import argparse
-from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import os
@@ -15,7 +13,21 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
+
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from ios_prepare_common import (
+    digest,
+    download_with_proxy,
+    file_lock,
+    identity,
+    inventory,
+    run,
+    verify_inventory,
+    write_json,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / '.cache/ios-audio-kernel'
@@ -24,42 +36,6 @@ PACKAGE = ROOT / 'native/AudioKernel/.cache'
 LOCK_PATH = ROOT / 'scripts/ios-audio-kernel.json'
 ADAPTER = ROOT / 'native/AudioKernel/Sources/CMeowAudioKernel'
 FRAMEWORK = 'CMeowAudioKernel'
-
-
-def digest(path):
-    value = hashlib.sha256()
-    with path.open('rb') as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b''):
-            value.update(block)
-    return value.hexdigest()
-
-
-def identity(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
-
-
-def write_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
-    temporary.replace(path)
-
-
-def inventory(directory):
-    if directory.is_symlink() or not directory.is_dir():
-        raise ValueError('missing or linked artifact directory')
-    result = {}
-    for path in directory.rglob('*'):
-        if path.is_symlink() or not (path.is_file() or path.is_dir()):
-            raise ValueError('non-regular artifact entry')
-        if path.is_file():
-            result[path.relative_to(directory).as_posix()] = digest(path)
-    return result
-
-
-def verify_inventory(directory, expected):
-    if not expected or inventory(directory) != expected:
-        raise ValueError('artifact file inventory/hash mismatch')
 
 
 def source_tree_hash(directory):
@@ -84,24 +60,8 @@ def source_tree_hash(directory):
     return value.hexdigest()
 
 
-def run(command, cwd=None, log=None):
-    if log:
-        log.parent.mkdir(parents=True, exist_ok=True)
-        with log.open('a') as stream:
-            stream.write('\n' + ' '.join(map(str, command)) + '\n')
-            stream.flush()
-            subprocess.run(command, cwd=cwd, stdout=stream, stderr=stream, check=True)
-    else:
-        return subprocess.check_output(command, cwd=cwd, text=True).strip()
-
-
-@contextmanager
 def shared_lock(name):
-    path = SHARED / 'locks' / (name + '.lock')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as guard:
-        fcntl.flock(guard, fcntl.LOCK_EX)
-        yield
+    return file_lock(SHARED / 'locks' / (name + '.lock'))
 
 
 def read_lock():
@@ -118,22 +78,14 @@ def archive_for(source):
     with shared_lock('download-' + source['sha256']):
         if not path.exists():
             partial = path.with_suffix('.partial')
-            # Only this download uses a proxy. No global proxy/environment edits.
-            proxies = [{'http': 'http://10.0.0.1:7890', 'https': 'http://10.0.0.1:7890'}, {}]
-            if platform.system() != 'Darwin':
-                proxies = [{}]
             try:
-                for index, proxy in enumerate(proxies):
-                    try:
-                        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxy))
-                        request = urllib.request.Request(source['url'], headers={'User-Agent': 'Meowfilm-source-prepare'})
-                        with opener.open(request, timeout=60) as response, partial.open('wb') as stream:
-                            for block in iter(lambda: response.read(1024 * 1024), b''):
-                                stream.write(block)
-                        break
-                    except OSError:
-                        if index == len(proxies) - 1:
-                            raise
+                download_with_proxy(
+                    source['url'],
+                    partial,
+                    proxy_timeout=60,
+                    direct_timeout=60,
+                    use_proxy_only_on_darwin=True,
+                )
                 if digest(partial) != source['sha256']:
                     raise ValueError('audio source archive hash mismatch')
                 partial.replace(path)
@@ -501,8 +453,7 @@ def main():
     if not args.sources_only and not args.verify and not args.target:
         parser.error('building requires explicit --target')
     CACHE.mkdir(parents=True, exist_ok=True)
-    with (CACHE / 'prepare.lock').open('a') as guard:
-        fcntl.flock(guard, fcntl.LOCK_EX)
+    with file_lock(CACHE / 'prepare.lock'):
         if args.verify:
             receipt = json.loads((PACKAGE / 'prepare-receipt.json').read_text())
             verify_packaged(receipt, lock, args.target)

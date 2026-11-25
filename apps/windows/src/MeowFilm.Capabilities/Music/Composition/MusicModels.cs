@@ -11,13 +11,8 @@ public sealed record PlaylistRow(string Id, string Name, string Kind, long Revis
     public string Route => Kind == "network" ? "catalog-playlist/" + Platform + "/" + Uri.EscapeDataString(RemoteId)
         : Kind == "favorites" ? "favorites" : "playlist/" + Id;
 
-    internal static PlaylistRow FromSummary(MusicCollectionSummaryRecord value)
-    {
-        MusicDto.Require(value.Kind is "favorites" or "playlist" or "network");
-        if (value.Kind == "network")
-            MusicDto.Require(value.Id == MusicLibraryOwner.NetworkPlaylistId(value.Platform, value.RemoteId));
-        return new(value.Id, value.Name, value.Kind, value.Revision, value.Count, value.Platform, value.RemoteId, value.Cover);
-    }
+    internal static PlaylistRow FromSummary(MusicCollectionSummaryRecord value) =>
+        new(value.Id, value.Name, value.Kind, value.Revision, value.Count, value.Platform, value.RemoteId, value.Cover);
 }
 
 public sealed record SongRow(MusicSongRecord Record, string? EntryId = null) : System.ComponentModel.INotifyPropertyChanged

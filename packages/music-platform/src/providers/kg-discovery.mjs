@@ -42,7 +42,7 @@ async function ranks(c) {
 }
 
 async function playlists(c, page, tag, size) {
-  const { mid, uid } = kgIdentity(c), time = String(Math.floor(c.clock() / 1000));
+  const { mid, uid } = kgIdentity(c), time = String(Math.floor(Date.now() / 1000));
   const raw = await c.kg('/v2/special_recommend', {}, 'specialrec.service.kugou.com', {
     appid: 1005, mid, clientver: 20489, platform: 'android', clienttime: time, userid: uid, module_id: 1, page, pagesize: size,
     key: md5('1005' + kgSalt + '20489' + time), special_recommend: { withtag: 1, withsong: 1, sort: 1, ugc: 1,

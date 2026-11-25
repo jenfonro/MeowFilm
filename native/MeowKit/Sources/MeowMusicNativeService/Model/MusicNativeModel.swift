@@ -211,7 +211,7 @@ enum MusicModel {
         var seen = Set<String>()
         return try song.sources.map { row in
             let key = try sourceKey(row)
-            try musicRequire(musicSame(key, row.sourceKey) && seen.insert(key).inserted, .nativeIDConflict)
+            try musicRequire(key == row.sourceKey && seen.insert(key).inserted, .nativeIDConflict)
             return .init(
                 sourceKey: row.sourceKey,
                 platform: row.infoSource.isEmpty ? row.platform : row.infoSource,

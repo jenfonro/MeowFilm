@@ -8,7 +8,7 @@
   <TabView x:Name="Tabs" IsAddTabButtonVisible="False" CanDragTabs="False" CanReorderTabs="False">
    <TabView.TabItemTemplate>
     <DataTemplate x:DataType="local:NovelSourceTabItem">
-     <TabViewItem Header="{x:Bind Title}" IsClosable="False" FontWeight="Normal">
+     <TabViewItem Header="{x:Bind Title}" IsClosable="False">
       <ScrollViewer Style="{StaticResource MeowFilm.OverlayScrollViewer}"
                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
        <Border Style="{StaticResource MeowFilm.FloatingSurface}" CornerRadius="18" BorderThickness="1">

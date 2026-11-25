@@ -17,7 +17,7 @@ public sealed partial class NovelSettingsView
         var validIds = allRules.Select(r => r.Id).ToHashSet(StringComparer.Ordinal);
         foreach (string stale in ruleRowMenus.Keys.Where(id => !validIds.Contains(id)).ToArray())
             ruleRowMenus.Remove(stale);
-        ruleList.SetRows(VisibleRules().Select(rule => new ManagementRow(rule.Id, rule.Name.Length == 0 ? rule.Pattern : rule.Name, rule.Group, rule.Enabled,
+        RuleList.SetRows(VisibleRules().Select(rule => new ManagementRow(rule.Id, rule.Name.Length == 0 ? rule.Pattern : rule.Name, rule.Group, rule.Enabled,
             () => Run(ct => EditRuleAsync(rule, ct)), enabled => Run(ct => SaveRuleAsync(rule with { Enabled = enabled }, ct)),
             GetRuleRowMenu(rule.Id))).ToArray(),
             allRules.Count, validIds, allRules.Count == 0 ? "暂无替换规则，请先新建" : "没有匹配的替换规则");
@@ -36,8 +36,8 @@ public sealed partial class NovelSettingsView
             Item("二维码导入", () => Run(ImportRuleQrAsync)),
             Item("导出替换规则", () => Run(ct => ExportRulesAsync(module.Library.Rules, ct))));
 
-        ruleList.More.ContextFlyout = Menu(
-            Item("导出选中规则", () => Run(ct => ExportRulesAsync(module.Library.Rules.Where(r => ruleList.Selected.Contains(r.Id)).ToArray(), ct))));
+        RuleList.More.ContextFlyout = Menu(
+            Item("导出选中规则", () => Run(ct => ExportRulesAsync(module.Library.Rules.Where(r => RuleList.Selected.Contains(r.Id)).ToArray(), ct))));
     }
 
     private void PopulateRuleGroupsMenu(MenuFlyout menu)
@@ -250,7 +250,7 @@ public sealed partial class NovelSettingsView
 
     private Task ManageGroupsAsync(bool sources, CancellationToken token)
     {
-        string[] ids = (sources ? sourceList.Selected : ruleList.Selected).ToArray();
+        string[] ids = (sources ? SourceList.Selected : RuleList.Selected).ToArray();
         string[] ReadGroups() => (sources ? module.Sources.Sources.Select(s => s.Group) : module.Library.Rules.Select(r => r.Group))
             .SelectMany(NovelGroups.Split)
             .Distinct()

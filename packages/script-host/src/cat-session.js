@@ -52,9 +52,9 @@ export class CatSession {
   constructor({ dataRoot, settings, aggregate, onNetwork, onActivate, onStop,
     onEndpointsChanged, ...input }) {
     // Timeout values come from ScriptHost's single per-protocol definition.
-    const { installationId, generation, revision, network, onDiagnostic, onScriptError,
+    const { installationId, generation, revision, onDiagnostic, onScriptError,
       onFailure, limits } = input;
-    Object.assign(this, { installationId, generation, revision, network, onDiagnostic,
+    Object.assign(this, { installationId, generation, revision, onDiagnostic,
       onScriptError, onFailure, limits });
     this.live = true;
     this.activated = false;
@@ -202,11 +202,6 @@ export class CatSession {
       await new Promise(resolve => setImmediate(resolve));
     } while (this.adapterTasks.size);
   }
-  adapterRetirement() {
-    return { installationId: this.installationId, generation: this.generation,
-      idle: this.waitForAdapters(), pendingAdapterTasks: () => this.adapterTasks.size };
-  }
-  whenAdaptersIdle() { return this.waitForAdapters(); }
   async drainAdapters() {
     let timer;
     try {
@@ -673,7 +668,7 @@ export class CatSession {
       aggregatePort: this.aggregatePort };
   }
 
-  async invokeTurn({ siteId, operation, payload }, { signal, timeoutMs, associationId } = {}) {
+  async invokeTurn({ siteId, operation, payload }, { signal, timeoutMs } = {}) {
     this.assertLive();
     const site = this.sites.get(siteId);
     requireValue(site && this.capabilities[siteId].actions.includes(operation),
@@ -682,7 +677,6 @@ export class CatSession {
     const settings = cloneJSONValue(this.settings.value);
     const scope = new ResourceScope(this.root.signal, timeoutMs ?? this.limits.requestTimeoutMs);
     scope.siteId = siteId; scope.requestId = ++this.nextId;
-    scope.associationId = associationId;
     scope.settings = settings;
     scope.panShares = new Map();
     const abort = () => scope.close(fault('CANCELLED'));

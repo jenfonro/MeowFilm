@@ -116,13 +116,6 @@ public struct MusicReference: Codable, Hashable, Sendable {
     public let id: String
     public let occurrence: String?
     public init(kind: Kind, id: String, occurrence: String? = nil) { self.kind = kind; self.id = id; self.occurrence = occurrence }
-    public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.kind == rhs.kind && lhs.id.utf8.elementsEqual(rhs.id.utf8) && lhs.occurrence == rhs.occurrence
-    }
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(kind); hasher.combine(occurrence); hasher.combine(id.utf8.count)
-        for byte in id.utf8 { hasher.combine(byte) }
-    }
 }
 
 public struct MusicNativeSource: Codable, Equatable, Sendable, Identifiable {
@@ -132,10 +125,6 @@ public struct MusicNativeSource: Codable, Equatable, Sendable, Identifiable {
     public var id: String { sourceKey }
     public init(sourceKey: String, platform: String, nativeId: String) {
         self.sourceKey = sourceKey; self.platform = platform; self.nativeId = nativeId
-    }
-    public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.sourceKey.utf8.elementsEqual(rhs.sourceKey.utf8) && lhs.platform == rhs.platform &&
-        lhs.nativeId.utf8.elementsEqual(rhs.nativeId.utf8)
     }
 }
 

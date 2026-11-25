@@ -40,7 +40,7 @@
     <Setter Property="BorderThickness" Value="0"/><Setter Property="CornerRadius" Value="6"/>
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="Foreground" Value="{ThemeResource Fm.Brush.FgNormal}"/>
-    <Setter Property="FontFamily" Value="Segoe Fluent Icons"/>
+    <Setter Property="FontFamily" Value="{StaticResource MeowFilm.Font.Icons}"/>
     <Setter Property="UseSystemFocusVisuals" Value="True"/>
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
      <Grid>
@@ -51,7 +51,7 @@
        <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
       </VisualStateGroup></VisualStateManager.VisualStateGroups>
       <Border x:Name="Surface" Background="{TemplateBinding Background}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
-       <ContentPresenter x:Name="Content" Content="{TemplateBinding Content}" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+       <ContentPresenter x:Name="Content" Content="{TemplateBinding Content}" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"/>
       </Border>
      </Grid>
     </ControlTemplate></Setter.Value></Setter>
@@ -65,8 +65,6 @@
     <Setter Property="BorderBrush" Value="{ThemeResource Fm.Brush.BorderDefault}"/>
     <Setter Property="Foreground" Value="{ThemeResource Fm.Brush.FgNormal}"/>
     <Setter Property="Background" Value="{ThemeResource Fm.Brush.ModeBg}"/>
-    <Setter Property="FontWeight" Value="Normal"/>
-    <Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
     <Setter Property="UseSystemFocusVisuals" Value="True"/>
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
      <Grid>
@@ -81,7 +79,7 @@
        <VisualState x:Name="CheckedDisabled"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource Fm.Brush.SelectedBg}"/><Setter Target="Surface.BorderBrush" Value="{ThemeResource Fm.Brush.BorderSelected}"/><Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
       </VisualStateGroup></VisualStateManager.VisualStateGroups>
       <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
-       <ContentPresenter x:Name="Content" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+       <ContentPresenter x:Name="Content" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"/>
       </Border>
      </Grid>
     </ControlTemplate></Setter.Value></Setter>

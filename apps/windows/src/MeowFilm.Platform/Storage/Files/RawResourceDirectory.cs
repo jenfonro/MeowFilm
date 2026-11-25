@@ -25,7 +25,7 @@ public sealed class RawResourceDirectory
         return Path.Combine(directory, id + ".resource");
     }
 
-    /// <summary>Reads a verified resource file. Missing or corrupted files self-heal and return null.</summary>
+    /// <summary>Reads a committed resource file. Missing, empty, or size-mismatched files self-heal and return null.</summary>
     public byte[]? Read(string id, int expectedBytes)
     {
         if (expectedBytes <= 0) return null;
@@ -34,7 +34,7 @@ public sealed class RawResourceDirectory
         try
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            if (stream.Length != expectedBytes)
+            if (stream.Length <= 0 || stream.Length != expectedBytes)
             {
                 stream.Dispose();
                 TryDeletePath(path);
@@ -42,12 +42,6 @@ public sealed class RawResourceDirectory
             }
             var data = new byte[expectedBytes];
             stream.ReadExactly(data);
-            if (Convert.ToHexStringLower(SHA256.HashData(data)) != id)
-            {
-                stream.Dispose();
-                TryDeletePath(path);
-                return null;
-            }
             return data;
         }
         catch (FileNotFoundException) { return null; }
@@ -67,12 +61,8 @@ public sealed class RawResourceDirectory
         var id = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var target = PathFor(id);
 
-        if (File.Exists(target))
-        {
-            if (TryVerifyExisting(target, id, bytes.Length))
-                return (id, false);
-            // Existing file is truncated or corrupted; fall through to atomic overwrite.
-        }
+        if (TryVerifyExisting(target, bytes.Length))
+            return (id, false);
 
         var stage = Path.Combine(directory, $".{id}.{Guid.NewGuid():N}.stage");
         try
@@ -117,23 +107,30 @@ public sealed class RawResourceDirectory
         }
     }
 
-    public (int FileCount, long TotalBytes) GetDiskStats()
+    public (int FileCount, long TotalBytes) GetDiskStats() => GetDiskStats(directory);
+
+    public static (int Entries, long Bytes) GetDiskStats(string directory)
     {
-        if (!Directory.Exists(directory)) return (0, 0);
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory)) return (0, 0);
         int count = 0;
         long total = 0;
-        foreach (var entry in Directory.EnumerateFiles(directory))
+        try
         {
-            var name = Path.GetFileName(entry);
-            if (!IsValidResourceName(name)) continue;
-            try
+            foreach (var entry in Directory.EnumerateFiles(directory))
             {
-                total += new FileInfo(entry).Length;
-                count++;
+                var name = Path.GetFileName(entry);
+                if (!IsValidResourceName(name)) continue;
+                try
+                {
+                    total += new FileInfo(entry).Length;
+                    count++;
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
         }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
         return (count, total);
     }
 
@@ -142,15 +139,12 @@ public sealed class RawResourceDirectory
         name.EndsWith(".resource", StringComparison.Ordinal) &&
         name.AsSpan(0, 64).IndexOfAnyExcept("0123456789abcdef") < 0;
 
-    private static bool TryVerifyExisting(string path, string id, int expectedLength)
+    private static bool TryVerifyExisting(string path, int expectedLength)
     {
         try
         {
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            if (stream.Length != expectedLength) return false;
-            var data = new byte[expectedLength];
-            stream.ReadExactly(data);
-            return Convert.ToHexStringLower(SHA256.HashData(data)) == id;
+            var info = new FileInfo(path);
+            return info.Exists && info.Length > 0 && info.Length == expectedLength;
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }

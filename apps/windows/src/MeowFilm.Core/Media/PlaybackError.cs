@@ -40,7 +40,6 @@ public static class PlaybackError
     public const string TrackMetadataInvalid = "MEDIA_TRACK_METADATA_INVALID";
     public const string TrackSelectionFailed = "MEDIA_TRACK_SELECTION_FAILED";
     public const string InvalidRate = "MEDIA_INVALID_RATE";
-    public const string RateUnsupported = "MEDIA_RATE_UNSUPPORTED";
     public const string NativeUnavailable = "MEDIA_NATIVE_UNAVAILABLE";
     public const string AudioDeviceUnavailable = "MEDIA_AUDIO_DEVICE_UNAVAILABLE";
     public const string OpenFailed = "MEDIA_OPEN_FAILED";

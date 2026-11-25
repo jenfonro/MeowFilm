@@ -14,52 +14,6 @@ import MeowUI
     @Published public internal(set) var duration: Double?
 }
 
-public struct MusicPlayerAttempt: Equatable, Sendable {
-    public let id: UUID
-    public let resourceID: String
-    public init(id: UUID, resourceID: String) { self.id = id; self.resourceID = resourceID }
-}
-
-@MainActor final class MusicPlaybackDriver {
-    let playback: PlaybackController
-    init(_ playback: PlaybackController) { self.playback = playback }
-    func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
-        let attempt = playback.playAttempt(resource: resource, owner: "music")
-        return MusicPlayerAttempt(id: attempt.id, resourceID: attempt.resourceID)
-    }
-    func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
-        guard let current = target(replacing) else { throw MusicServiceError.staleResult }
-        let prepared = try await playback.prepareReplacement(resource: resource, replacing: current)
-        return MusicPreparedPlayback(duration: prepared.duration, synchronize: { [playback] in
-            try await playback.synchronizeReplacement(prepared)
-        }, commit: { [playback] in
-            let attempt = try playback.commitReplacement(prepared)
-            return .init(id: attempt.id, resourceID: attempt.resourceID)
-        }, cancel: { prepared.cancel() })
-    }
-    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
-        let prepared = try await playback.preparePlayback(resource: resource, owner: "music", autoplay: autoplay)
-        return MusicPreparedPlayback(duration: prepared.duration, synchronize: { [playback] in
-            try await playback.synchronizeReplacement(prepared)
-        }, commit: { [playback] in
-            let attempt = try playback.commitReplacement(prepared)
-            return .init(id: attempt.id, resourceID: attempt.resourceID)
-        }, cancel: { prepared.cancel() })
-    }
-    func target(_ attempt: MusicPlayerAttempt) -> PlayAttempt? {
-        guard let current = playback.currentAttempt, current.owner == "music",
-              current.id == attempt.id, current.resourceID == attempt.resourceID else { return nil }
-        return current
-    }
-    func pause(_ attempt: MusicPlayerAttempt) { if let current = target(attempt) { playback.pause(attempt: current) } }
-    func resume(_ attempt: MusicPlayerAttempt) { if let current = target(attempt) { playback.resume(attempt: current) } }
-    @discardableResult func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool {
-        guard let current = target(attempt) else { return false }
-        return playback.seek(to: position, attempt: current)
-    }
-    func stop(_ attempt: MusicPlayerAttempt) { if let current = target(attempt) { playback.stop(attempt: current) } }
-}
-
 /// Product lifetime, not page lifetime. Products bind PlaybackEvent and system
 /// navigation once and retain this model while another domain is visible.
 @MainActor public final class MusicViewModel {
@@ -199,20 +153,13 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     let recommendations = MusicRecommendationCoordinator()
     var isClosing = false
     nonisolated(unsafe) private var closingTask: Task<Void, Never>?
-    let player: MusicPlaybackDriver
+    let playback: PlaybackController
     var primaryPlayback: (intent: UUID, presentation: MusicMiniPlayerPresentation,
                                   receipt: MusicMiniPlayerPlaybackIdentity?)?
-    var lifecycle: UUID {
-        get { accessState.generation }
-        set {
-            searchAccessGeneration = UUID()
-            accessState.generation = newValue
-        }
-    }
+    var lifecycle = UUID()
     var selectionID = UUID(), loadID = UUID()
     var collectionConsumers: [UUID: WeakMusicCollectionConsumer] = [:]
     var collectionCatalogueID = UUID()
-    public var accountAccessGeneration: UUID { lifecycle }
     public private(set) var searchAccessGeneration = UUID() {
         didSet {
             let previous = searchResultsCache
@@ -229,7 +176,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
 
     var feedbackAutomatic = false
     var playbackControlRevision = UUID()
-    nonisolated(unsafe) var playPauseCommandTask: (id: UUID, attempt: MusicPlayerAttempt, task: Task<Void, Never>)?
+    nonisolated(unsafe) var playPauseCommandTask: (id: UUID, attempt: PlayAttempt, task: Task<Void, Never>)?
     nonisolated(unsafe) var eventTail: Task<Void, Never>?
     nonisolated(unsafe) var navigationTask: Task<Void, Never>?
     var navigationID = UUID()
@@ -237,7 +184,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     nonisolated(unsafe) var navigationPlaybackIntent: MusicQueueAuthorization?
     var pendingNativeResourceID: String?
     var candidate: MusicPlaybackCandidate?
-    var nativeAttempt: MusicPlayerAttempt?
+    var nativeAttempt: PlayAttempt?
     var resolvingAttempt: String?
     var terminalAttempt: String?
     var lastProgressWrite: Double?
@@ -270,7 +217,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                 scriptSources: (any MusicScriptSourceManaging)? = nil,
                 artworkImages: MusicArtworkImages? = nil) {
         self.artworkImages = artworkImages ?? MusicArtworkImages()
-        self.service = service; self.player = MusicPlaybackDriver(playback); self.accounts = accounts
+        self.service = service; self.playback = playback; self.accounts = accounts
         self.scriptSources = scriptSources
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()
@@ -281,7 +228,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public init(service: any MusicServing, playback: PlaybackController,
                 accounts: (any MusicAccountsServing)? = nil,
                 scriptSources: (any MusicScriptSourceManaging)? = nil) {
-        self.service = service; self.player = MusicPlaybackDriver(playback); self.accounts = accounts
+        self.service = service; self.playback = playback; self.accounts = accounts
         self.scriptSources = scriptSources
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()
@@ -330,9 +277,9 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         try Task.checkCancellation()
         guard !isClosed, lifecycle == epoch else { throw MusicServiceError.cancelled }
     }
-    func report(_ error: Error, epoch: UUID, operation: String? = nil,
+    func report(_ error: Error, epoch: UUID? = nil, operation: String? = nil,
                         kind: MusicRequestTrace.Operation = .playback, trace explicitTrace: MusicRequestTrace? = nil) {
-        guard lifecycle == epoch, !isClosed else { return }
+        guard !isClosed, epoch == nil || lifecycle == epoch else { return }
         let failure = MusicServiceError.sanitized(error)
         let trace = explicitTrace ?? MusicRequestTrace.current ?? MusicRequestTrace(kind,
             platform: kind == .playback || kind == .audio
@@ -359,7 +306,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         playbackState.phase = .idle
         // Stop can synchronously publish the old exit; it no longer owns the
         // model when that callback re-enters.
-        if let old { player.stop(old) }
+        if let old { playback.stop(attempt: old) }
     }
     func invalidateSelection(stopMedia: Bool, reason: MusicPlaybackFeedbackReport.Reason = .interrupt,
                              preservingQueueIntent intent: MusicQueueAuthorization? = nil) {
@@ -446,7 +393,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         }
         do {
             _ = try await submitted.value
-            try await reconcilePlaybackFeedbackSettings(accessGeneration: epoch)
+            try await reconcilePlaybackFeedbackSettings()
             try check(epoch)
             if change.mode != nil { await loadRecommendationState() }
             if !state.lyricsEnabled {
@@ -458,7 +405,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         } catch {
             let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
             if [.commitUnconfirmed, .staleRevision, .storageConflict].contains(failure) {
-                do { try await reconcilePlaybackFeedbackSettings(accessGeneration: epoch) }
+                do { try await reconcilePlaybackFeedbackSettings() }
                 catch {
                     if !Task.isCancelled { report(error, epoch: epoch, operation: "读取播放设置", kind: .settings) }
                     return
@@ -484,7 +431,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         let attempt = resolvingAttempt ?? candidate?.attemptId
         // Stop while the immutable native exit still has its owner/candidate.
         // Freeze that actual final observation before retiring FM/source grants.
-        if let nativeAttempt { player.stop(nativeAttempt) }
+        if let nativeAttempt { playback.stop(attempt: nativeAttempt) }
         nativeAttempt = nil; pendingNativeResourceID = nil
         closingTask = Task { await completeClose(attemptID: attempt) }
     }
@@ -526,7 +473,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         notifyCollectionPages(.revoking)
         cancelRemoteQueuePreparation(); cancelFMNavigation(); await stopFMAndDrain()
         stopSimilarObservation()
-        accessState.isClosed = true; lifecycle = UUID(); navigationTask?.cancel(); eventTail?.cancel()
+        accessState.isClosed = true; lifecycle = UUID(); searchAccessGeneration = UUID(); navigationTask?.cancel(); eventTail?.cancel()
         metadataPreferencesRefreshRequested = false
         metadataPreferencesRefreshTask?.cancel()
         await playbackMetadata.close()

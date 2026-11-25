@@ -292,26 +292,6 @@ internal static partial class NativeMusicSong
         return updated with { SourceKey = InfoKey(updated) };
     }
 
-    internal static MusicSongRecord CreateOnline(string platform, MusicSongSourceRecord rawInfo,
-        string title, string artist, string album, double duration, string cover)
-    {
-        var source = CreateSource(platform, rawInfo, title, artist, album, duration, cover);
-        double? validDuration = duration > 0 ? duration : null;
-        return Normalize(new MusicSongRecord(
-            "",
-            title,
-            artist,
-            album,
-            validDuration,
-            validDuration,
-            PublicUrl(cover),
-            null,
-            null,
-            null,
-            rawInfo.ArtistNames,
-            [source]));
-    }
-
     internal static MusicSongRecord CreateLocal(string fileId, string title, string artist = "", string album = "",
         double duration = 0, string cover = "") => Normalize(new MusicSongRecord(
             "",

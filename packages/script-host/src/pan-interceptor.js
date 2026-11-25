@@ -56,7 +56,6 @@ export class PanInterceptor {
         const bytes = Buffer.from(chunk);
         this.bodyBytes += bytes.length;
         if (this.bodyBytes > 4 * 1024 * 1024) {
-          bytes.fill(0);
           done(fault('RESOURCE_LIMIT'));
           return;
         }

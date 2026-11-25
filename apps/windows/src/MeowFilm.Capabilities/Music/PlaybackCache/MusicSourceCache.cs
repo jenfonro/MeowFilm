@@ -35,9 +35,11 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
                     if (pendingInvalidations.ContainsKey((scope, song)))
                         return null;
                 }
-                var expires = ValidateCandidate(entry, scope, song, signature);
-                if (expires is { } expiry && expiry <= now + 10000) return null;
-                return entry.Signature == signature && entry.Until > now ? entry : null;
+                if (entry.Signature != signature ||
+                    !Uri.TryCreate(entry.Url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") ||
+                    entry.ExpiresAt is { } expiry && expiry <= now + 10000)
+                    return null;
+                return entry.Until > now ? entry : null;
             }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
@@ -60,9 +62,11 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
                     return null;
                 if (entry.QualityPolicySignature != policy ||
                     entry.RequestedQuality != request ||
-                    entry.Generation != generation)
+                    entry.Generation != generation ||
+                    entry.Recording is null ||
+                    string.IsNullOrEmpty(entry.Platform) ||
+                    string.IsNullOrEmpty(entry.SourceKey))
                     return null;
-                ValidateHistory(entry, scope, song);
                 return entry;
             }, token).ConfigureAwait(false);
         }
@@ -248,97 +252,6 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
                 if (total <= MaximumBytes) break;
                 if (db.Execute("DELETE FROM windows_music_playback_sources WHERE rowid=$id", ("$id", rowId)) > 0)
                     total -= bytes;
-            }
-        }
-    }
-
-    internal static long? ValidateCandidate(PlaybackSourceEntry info, string scope, string song, string signature)
-    {
-        if (info.Ok != true || info.Kind != "official")
-            throw MusicPlaybackCacheDataException.Corrupt();
-        string platform = RequireNonEmptyText(info.Platform);
-        if (platform is not ("wy" or "tx" or "kg") || info.Scope != scope)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        _ = RequireNonEmptyText(info.SourceKey);
-        if (info.Generation is not > 0) throw MusicPlaybackCacheDataException.Corrupt();
-        _ = RequireNonEmptyText(info.Quality);
-        _ = RequireNonEmptyText(info.RequestedQuality);
-        if (info.ActualQuality is not { } actual)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.QualityVerified is not { } verified || info.PlaybackVerified is not { } playbackVerified)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (verified && actual.Length == 0 || playbackVerified)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        string policy = RequireNonEmptyText(info.QualityPolicySignature);
-        string cache = RequireNonEmptyText(info.QualityCacheSignature);
-        RequireHash(policy);
-        RequireHash(cache);
-        if (cache != signature) throw MusicPlaybackCacheDataException.Corrupt();
-        ValidateMediaUrl(RequireNonEmptyText(info.Url));
-        if (info.ExpiresAt is <= 0) throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Duration is not { } dur || !double.IsFinite(dur) || dur < 0)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Size is not >= 0 || info.Full is null)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Delivery != platform + "-official")
-            throw MusicPlaybackCacheDataException.Corrupt();
-        ValidateIdentity(scope, song);
-        return info.ExpiresAt;
-    }
-
-    private static void ValidateHistory(PlaybackSourceEntry info, string scope, string song)
-    {
-        string platform = RequireNonEmptyText(info.Platform);
-        if (platform is not ("wy" or "tx" or "kg") || info.Scope != scope)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        string sourceKey = RequireNonEmptyText(info.SourceKey);
-        if (info.Generation is not > 0) throw MusicPlaybackCacheDataException.Corrupt();
-        _ = RequireNonEmptyText(info.Quality);
-        if (info.QualityVerified is not { } verified) throw MusicPlaybackCacheDataException.Corrupt();
-        if (verified && string.IsNullOrEmpty(info.ActualQuality)) throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Duration is { } dur && (!double.IsFinite(dur) || dur < 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Delivery is not null && info.Delivery != platform + "-official")
-            throw MusicPlaybackCacheDataException.Corrupt();
-        _ = RequireNonEmptyText(info.RequestedQuality);
-        RequireHash(RequireNonEmptyText(info.QualityPolicySignature));
-        ValidateIdentity(scope, song);
-
-        if (info.Recording is not { } rawRec)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        var record = NativeMusicSong.DurableSource(ToSongSourceRecord(rawRec));
-        if (record.Platform != platform || record.SourceKey != sourceKey)
-            throw MusicPlaybackCacheDataException.Corrupt();
-    }
-
-    private static string RequireNonEmptyText(string? value) =>
-        string.IsNullOrEmpty(value) ? throw MusicPlaybackCacheDataException.Corrupt() : value;
-
-    private static readonly HashSet<string> ForbiddenMediaQueryParams = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "cookie", "authorization", "music_u", "music_a", "musickey",
-        "p_skey", "skey", "p_uin", "access_token", "refresh_token"
-    };
-
-    internal static void ValidateMediaUrl(string value, bool allowUserInfo = false)
-    {
-        if (value.Any(c => char.IsWhiteSpace(c) || char.IsControl(c)) || value.Contains('\\') ||
-            !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
-            uri.Scheme is not ("http" or "https") || string.IsNullOrEmpty(uri.Host) ||
-            (!allowUserInfo && uri.UserInfo.Length != 0) || uri.Fragment.Length != 0)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (!string.IsNullOrEmpty(uri.Query))
-        {
-            foreach (string part in uri.Query[1..].Split('&'))
-            {
-                if (part.Length == 0) continue;
-                int eq = part.IndexOf('=');
-                string rawKey = eq >= 0 ? part[..eq] : part;
-                string key;
-                try { key = Uri.UnescapeDataString(rawKey.Replace('+', ' ')); }
-                catch (UriFormatException) { key = rawKey; }
-                if (ForbiddenMediaQueryParams.Contains(key))
-                    throw MusicPlaybackCacheDataException.Corrupt();
             }
         }
     }

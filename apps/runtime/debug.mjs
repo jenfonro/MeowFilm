@@ -7,7 +7,7 @@ import { performance } from 'node:perf_hooks';
 import v8 from 'node:v8';
 import { BridgeError } from '@meowfilm/runtime-bridge';
 
-export const DEBUG_CATEGORIES = Object.freeze([
+const DEBUG_CATEGORIES = Object.freeze([
   'lifecycle',
   'ui-nav',
   'ui-action',

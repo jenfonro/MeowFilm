@@ -1,6 +1,4 @@
 using MeowFilm.Threading;
-using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
 using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 
 namespace MeowFilm.Desktop;
@@ -12,7 +10,6 @@ internal sealed class ShellCloseCoordinator(
 {
     private readonly TaskCompletionSource _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DesktopTrayIcon? _trayIcon;
-    private DependencyObject? _closeChoiceFocus;
     private DesktopWindowState _trayRestoreState = DesktopWindowState.Normal;
     private bool _hiddenToTray;
     private bool _closeChoiceQueued;
@@ -120,10 +117,9 @@ internal sealed class ShellCloseCoordinator(
                     shell.BeginShutdown();
                     break;
                 case WindowCloseBehavior.Ask:
-                    _closeChoiceFocus = DesktopVisual.Focused(shell.Root);
-                    shell.SetModalGatesEnabled(false);
-                    shell.CloseDialogElement.Open();
-                    shell.NativeCaption?.RefreshImmediate();
+                    shell.CloseDialogElement.PrepareOpen();
+                    shell.ShowSystemModal(shell.CloseDialogElement, zIndex: 90, onCloseRequested: CancelCloseChoice);
+                    shell.CloseDialogElement.FocusInitial();
                     break;
             }
         }
@@ -174,14 +170,8 @@ internal sealed class ShellCloseCoordinator(
     {
         if (!shell.CloseDialogElement.IsOpen) return;
         _closeChoiceGeneration++;
-        shell.CloseDialogElement.Visibility = Visibility.Collapsed;
-        shell.SetModalGatesEnabled(true);
-        shell.NativeCaption?.RefreshImmediate();
+        shell.DismissSystemModal(shell.CloseDialogElement, restoreFocus);
         shell.NoticesElement.Show(shell.CloseDialogElement, "");
-        var focus = _closeChoiceFocus;
-        _closeChoiceFocus = null;
-        if (restoreFocus && focus is Control { IsEnabled: true, Visibility: Visibility.Visible } target)
-            target.Focus(FocusState.Programmatic);
     }
 
     public void RestoreFromTray()

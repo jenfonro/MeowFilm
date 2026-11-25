@@ -48,12 +48,10 @@ struct MusicMiniPlayerLifecycle: Equatable, Sendable {
 public struct MusicMiniPlayerPlaybackIdentity: Equatable, Sendable {
     public let occurrenceID: String
     public let nativeAttemptID: UUID
-    public let accessGeneration: UUID
 
-    public init(occurrenceID: String, nativeAttemptID: UUID, accessGeneration: UUID) {
+    public init(occurrenceID: String, nativeAttemptID: UUID) {
         self.occurrenceID = occurrenceID
         self.nativeAttemptID = nativeAttemptID
-        self.accessGeneration = accessGeneration
     }
 }
 

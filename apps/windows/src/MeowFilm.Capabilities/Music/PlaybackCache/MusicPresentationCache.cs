@@ -273,8 +273,11 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
                 return FilterUnreferenced(db, candidates);
             }, token, owned.Length, commit: commit =>
             {
-                lock (gate) if (closed || imageEpoch != epoch) throw new StorageException(StorageError.Conflict);
-                commit();
+                lock (gate)
+                {
+                    if (closed || imageEpoch != epoch) throw new StorageException(StorageError.Conflict);
+                    commit();
+                }
             }).ConfigureAwait(false);
 
             newlyCreated = null;
@@ -325,8 +328,11 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
                 return FilterUnreferenced(db, candidates);
             }, token, bytes, commit: commit =>
             {
-                lock (gate) if (closed || lyricEpoch != epoch) throw new StorageException(StorageError.Conflict);
-                commit();
+                lock (gate)
+                {
+                    if (closed || lyricEpoch != epoch) throw new StorageException(StorageError.Conflict);
+                    commit();
+                }
             }).ConfigureAwait(false);
             lock (gate)
             {
@@ -519,17 +525,23 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
 
     internal async Task TouchPlayedAsync(string songId, string image, CancellationToken token)
     {
-        await database.WriteAsync(db =>
+        EnterWrite();
+        try
         {
-            long now = Now;
-            long expired = now - Ttl;
-            db.Execute("UPDATE cached_music_lyrics SET updated_at_ms=$now WHERE song_id=$id AND updated_at_ms>$expired AND updated_at_ms<$now",
-                ("$now", now), ("$id", songId), ("$expired", expired));
-            if (image.Length > 0)
-                db.Execute("UPDATE cached_images SET updated_at_ms=$now WHERE resource_key=$address AND updated_at_ms>$expired AND updated_at_ms<$now",
-                    ("$now", now), ("$address", image), ("$expired", expired));
-            return true;
-        }, token).ConfigureAwait(false);
+            await database.WriteAsync(db =>
+            {
+                lock (gate) if (closed) throw new StorageException(StorageError.Closed);
+                long now = Now;
+                long expired = now - Ttl;
+                db.Execute("UPDATE cached_music_lyrics SET updated_at_ms=$now WHERE song_id=$id AND updated_at_ms>$expired AND updated_at_ms<$now",
+                    ("$now", now), ("$id", songId), ("$expired", expired));
+                if (image.Length > 0)
+                    db.Execute("UPDATE cached_images SET updated_at_ms=$now WHERE resource_key=$address AND updated_at_ms>$expired AND updated_at_ms<$now",
+                        ("$now", now), ("$address", image), ("$expired", expired));
+                return true;
+            }, token).ConfigureAwait(false);
+        }
+        finally { LeaveWrite(); }
     }
 
     internal async Task<MusicPresentationCacheStats> GetStatsAsync(CancellationToken token = default)
@@ -562,9 +574,11 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
                 return new MusicPresentationCacheStats(0, 0, 0, 0, 0, MaximumBytes, 0, 0, true);
             existingFiles = files;
         }
-        var disk = existingFiles is not null
+        var (diskFileCount, diskBytes) = existingFiles is not null
             ? existingFiles.GetDiskStats()
-            : database.ProductRoot is { } root ? GetDiskStatsWithoutCreating(root) : (0, 0L);
+            : database.ProductRoot is { } root
+                ? RawResourceDirectory.GetDiskStats(Path.Combine(Path.GetFullPath(root), "resources-v1", "music-images"))
+                : (0, 0L);
         return new MusicPresentationCacheStats(
             ImageCount: dbStats.ImageCount,
             ImageBytes: dbStats.ImageBytes,
@@ -572,33 +586,9 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
             LyricBytes: dbStats.LyricBytes,
             TotalBytes: dbStats.ImageBytes + dbStats.LyricBytes,
             CapacityBytes: MaximumBytes,
-            DiskFileCount: disk.Item1,
-            DiskBytes: disk.Item2,
+            DiskFileCount: diskFileCount,
+            DiskBytes: diskBytes,
             Closed: false);
-    }
-
-    private static (int FileCount, long TotalBytes) GetDiskStatsWithoutCreating(string productRoot)
-    {
-        string dirPath = Path.Combine(Path.GetFullPath(productRoot), "resources-v1", "music-images");
-        if (!Directory.Exists(dirPath)) return (0, 0L);
-        int count = 0;
-        long total = 0;
-        try
-        {
-            foreach (var entry in Directory.EnumerateFiles(dirPath))
-            {
-                var name = Path.GetFileName(entry);
-                if (name.Length != 73 || !name.EndsWith(".resource", StringComparison.Ordinal) ||
-                    name.AsSpan(0, 64).IndexOfAnyExcept("0123456789abcdef") >= 0)
-                    continue;
-                try { total += new FileInfo(entry).Length; count++; }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
-            }
-        }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-        return (count, total);
     }
 
     public ValueTask DisposeAsync()

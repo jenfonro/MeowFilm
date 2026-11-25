@@ -4,14 +4,13 @@ import { cloneJSONValue, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime
 import { PanError, requireValue } from './errors.js';
 import { createTransport } from './http.js';
 import { PanStore } from './store.js';
+import { object } from './values.js';
 import { baidu } from './providers/baidu.js';
 import { tianyi } from './providers/tianyi.js';
 import { yidong } from './providers/yidong.js';
 import { quark, uc } from './providers/quark-uc.js';
 
 const providers = new Map([baidu, quark, uc, tianyi, yidong].map(value => [value.id, value]));
-const object = value => value !== null && typeof value === 'object' && !Array.isArray(value) &&
-  [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const clone = value => value === undefined ? undefined : cloneJSONValue(value);
 const integer = value => Number.isSafeInteger(value) && value >= 0;
 function stable(value) {
@@ -180,8 +179,6 @@ export function createPanService({ dataRoot, store: suppliedStore, debug } = {})
     }
     const receipt = accountValue(saved, id);
     accountRevision(receipt);
-    requireValue(receipt.revision === next.revision && receipt.rowRevision === old.rowRevision + 1 &&
-      stable(receipt.credentials) === stable(next.credentials), 'STORAGE_ERROR');
     next.rowRevision = receipt.rowRevision;
     document = saved;
     for (const other of providers.keys()) {

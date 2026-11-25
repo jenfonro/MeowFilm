@@ -66,7 +66,6 @@ public sealed partial class MusicLibraryController
                     title = "最近播放";
                     var history = await ReadHistoryDaysAsync(token);
                     dates = history.Select(item => item.Id).ToArray();
-                    MusicDto.Require(dates.Distinct().Count() == dates.Length);
                     target = target with { Date = dates.Contains(target.Date) ? target.Date : dates.FirstOrDefault() };
                     if (target.Date is not null)
                     {
@@ -89,7 +88,6 @@ public sealed partial class MusicLibraryController
                     var id = target.Route == "favorites" ? "favorites" : target.Route[9..];
                     var reply = await application.GetCollectionDetailAsync(id, 0, 100, token);
                     detail = PlaylistRow.FromSummary(reply.Collection);
-                    MusicDto.Require(detail.Id == id);
                     title = detail.Name; count = reply.Total;
                     rows = reply.Songs.Select(item => SongRow.FromRecord(item)).ToArray();
                     break;
@@ -138,11 +136,9 @@ public sealed partial class MusicLibraryController
     private async Task<MusicHistoryDaySummary[]> ReadHistoryDaysAsync(CancellationToken token)
     {
         var rows = new List<MusicHistoryDaySummary>();
-        var ids = new HashSet<string>(StringComparer.Ordinal);
         while (true)
         {
             var reply = await application.ListHistoryDaysAsync(rows.Count, 100, token);
-            MusicDto.Require(reply.Items.All(row => ids.Add(row.Id)));
             rows.AddRange(reply.Items);
             if (rows.Count >= reply.Total || reply.Items.Length == 0) return rows.ToArray();
         }
@@ -151,11 +147,9 @@ public sealed partial class MusicLibraryController
     private async Task<MusicHistoryPlaylistSummary[]> ReadHistoryPlaylistsAsync(CancellationToken token)
     {
         var rows = new List<MusicHistoryPlaylistSummary>();
-        var ids = new HashSet<string>(StringComparer.Ordinal);
         while (true)
         {
             var reply = await application.ListHistoryPlaylistsAsync(rows.Count, 100, token);
-            MusicDto.Require(reply.Items.All(row => ids.Add(row.Id)));
             rows.AddRange(reply.Items);
             if (rows.Count >= reply.Total || reply.Items.Length == 0) return rows.ToArray();
         }

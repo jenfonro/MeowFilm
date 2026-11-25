@@ -172,23 +172,6 @@ public actor AccountSessionCoordinator {
         }
     }
 
-    /// Explicit validation access, not a normal authenticated-business credential read.
-    public func credentialForValidation(_ token: AccountSessionToken) throws -> AccountCredential {
-        try require(token, phases: [.requiresValidation])
-        return try checkedRecord(token).credential
-    }
-
-    /// Called only after the platform adapter actually validates the restored session.
-    @discardableResult
-    public func completeValidation(_ token: AccountSessionToken) throws -> AccountSnapshot {
-        try require(token, phases: [.requiresValidation])
-        _ = try checkedRecord(token)
-        entries[token.identity]?.phase = .signedIn
-        entries[token.identity]?.failure = nil
-        publish(token.identity)
-        return snapshot(for: token.identity)
-    }
-
     public func credential(for token: AccountSessionToken) throws -> AccountCredential {
         try require(token, phases: [.signedIn])
         return try checkedRecord(token).credential

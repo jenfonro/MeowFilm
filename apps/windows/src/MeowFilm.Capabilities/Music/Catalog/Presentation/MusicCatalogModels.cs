@@ -218,6 +218,9 @@ public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalo
             PropertyChanged?.Invoke(this, new(name));
     }
     public double HorizontalOffset { get; set; }
+    internal static IEnumerable<MusicCatalogCard> RepositoryCards(IEnumerable<MusicCatalogSection> sections) =>
+        sections.SelectMany(section => section.Items.Concat(section.Action is { } action ? [action] : [])
+            .Concat(section.Tabs?.SelectMany(tab => tab.Items) ?? []));
     public MusicCatalogSectionPresentation Presentation => Layout switch
     {
         "feature-rail" => MusicCatalogSectionPresentation.Entries,

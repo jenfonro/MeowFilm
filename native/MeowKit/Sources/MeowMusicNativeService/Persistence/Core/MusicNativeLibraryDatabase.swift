@@ -51,25 +51,10 @@ protocol MusicNativeLibraryWriting: MusicNativeLibraryReading {
     func saveCatalogSource(_ value: MusicCatalogSourceState) throws
 }
 
-public protocol MusicNativeLibraryStoring: Sendable {
-    func close() throws
-}
-
-protocol MusicNativeLibraryEngine: MusicNativeLibraryStoring, MusicNativeLibraryReading {
-    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void,
-                            _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T
-}
-
-extension MusicNativeLibraryEngine {
-    func withTransaction<T>(_ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
-        try withTransaction(commit: { try $0() }, body)
-    }
-}
-
 /// The music owner borrows the App permanent data database's off-main lane. It never
 /// opens a second SQLite file or closes the shared connection. Songs, relationships,
 /// and domain changes settle in the same transaction as `owner_revisions`.
-public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchecked Sendable {
+public final class MusicNativeLibraryDatabase: MusicNativeLibraryReading, @unchecked Sendable {
     private let database: SQLiteDatabase
     private let scope: String
     private let ownerKey: String

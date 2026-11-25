@@ -153,8 +153,8 @@ final class MusicAccountsSettingsState: ObservableObject {
             }
         }
         feedback = owner.playbackFeedbackSettings.map {
-            MusicPlaybackFeedbackSettingsModel(service: $0, receipts: owner.settingsReceipts) { [weak owner] generation in
-                try await owner?.reconcilePlaybackFeedbackSettings(accessGeneration: generation)
+            MusicPlaybackFeedbackSettingsModel(service: $0, receipts: owner.settingsReceipts) { [weak owner] in
+                try await owner?.reconcilePlaybackFeedbackSettings()
             }
         }
         let statuses = accounts?.$rows.dropFirst().eraseToAnyPublisher() ?? Empty<[MusicAccountStatus], Never>().eraseToAnyPublisher()
@@ -204,17 +204,16 @@ final class MusicAccountsSettingsState: ObservableObject {
             reloadRequested = false
             lastNeedsDestructiveConfirmation = false
             sessionRevisions = [:]; pendingAccounts = []
-            accounts?.setAccess(isAvailable: false, accessGeneration: owner.accountAccessGeneration)
-            sync?.activate(available: false, generation: owner.accountAccessGeneration)
-            feedback?.setAccess(available: false, generation: owner.accountAccessGeneration)
+            accounts?.deactivate()
+            sync?.deactivate()
+            feedback?.deactivate()
             return
         }
         guard !activatedOnce else { return }
         activatedOnce = true
-        let access = owner.accountAccessGeneration
-        accounts?.activate(isAvailable: true, accessGeneration: access)
-        sync?.activate(available: true, generation: access)
-        feedback?.setAccess(available: true, generation: access)
+        accounts?.activate()
+        sync?.activate()
+        feedback?.activate()
         loadSettings()
     }
 
@@ -299,7 +298,7 @@ final class MusicAccountsSettingsState: ObservableObject {
         syncTask?.cancel(); syncTask = nil
         sessionRevisions = [:]; pendingAccounts = []
         accounts?.deactivate(); sync?.deactivate()
-        feedback?.setAccess(available: false, generation: owner.accountAccessGeneration)
+        feedback?.deactivate()
     }
 
     private func loadSettings() {

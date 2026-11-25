@@ -28,7 +28,7 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         try musicRequire(candidate.occurrenceId == current.occurrence &&
             candidate.resourceId == "music:" + current.id &&
             candidate.requestedQuality == selection.quality &&
-            musicSame(current.sourceKey, selection.sourceKey), .targetChanged)
+            current.sourceKey == selection.sourceKey, .targetChanged)
         let (source, _) = try target(song, selection.sourceKey)
         try musicRequire(source.platform == selection.siteId &&
             MusicAccountPlatform(rawValue: source.platform) != nil, .targetChanged)
@@ -104,7 +104,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
             let final = try await recoveryOption(authorizing, platform: platform, source: source,
                 pin: pin, activeAttemptID: attemptID, reservedAttemptID: attemptID, ready: false)
             try musicRequire(final.version == live.version && final.contentHash == live.contentHash, .targetChanged)
-            _ = try media(valid)
             let song = try repositorySong(pin.songID, read())
             try validateDelivery(valid, song: song, playback: try read().playback, automaticQuality: false)
             let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: pin.occurrenceID,
@@ -113,7 +112,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
                 resolvedSelection: selection,
                 expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
                 delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
-            _ = try candidate.resource()
             let publish = { [self] in try access.perform {
                 replaceFeedbackAttempt(attemptID: attemptID, occurrenceID: pin.occurrenceID,
                                        song: song, sourceKey: selection.sourceKey,
@@ -146,8 +144,8 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         let song = try self.song(.init(kind: .queue, id: pin.occurrenceID), d)
         try musicRequire(song.songID == pin.songID, .targetChanged)
         let (source, info) = try target(song, pin.selection.sourceKey)
-        try musicRequire(source.platform == pin.selection.siteId &&
-            musicSame(try MusicModel.sourceKey(info), pin.selection.sourceKey), .targetChanged)
+        let infoKey = try MusicModel.sourceKey(info)
+        try musicRequire(source.platform == pin.selection.siteId && infoKey == pin.selection.sourceKey, .targetChanged)
         try requirePlatform(source.platform)
         try musicRequire(Self.officialEnabled(source.platform, d.playback), .sourceUnavailable)
     }
@@ -157,7 +155,7 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         try checkPlaybackRecoveryState(pin)
         guard let current = attempt, current.id == activeAttemptID,
               current.occurrence == pin.occurrenceID, current.selection == pin.selection,
-              musicSame(current.sourceKey, pin.selection.sourceKey),
+              current.sourceKey == pin.selection.sourceKey,
               current.ready == ready, !current.ended, !current.endedConsumed,
               current.recovery?.id == pin.id,
               current.recovery?.refreshAttemptID == reservedAttemptID else { throw MusicServiceError.staleResult }

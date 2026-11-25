@@ -39,7 +39,7 @@ export function parseShare(value, password = '') {
     uc: 'https://drive.uc.cn/s/', tianyi: 'https://cloud.189.cn/t/', yidong: 'https://caiyun.139.com/m/i?' };
   return { provider, shareId: id, url: bases[provider] + id, password };
 }
-export function encodePanResource(share) {
+function encodePanResource(share) {
   return 'meow.pan.v1.' + Buffer.from(JSON.stringify(share)).toString('base64url');
 }
 export function decodePanResource(value) {
@@ -57,7 +57,7 @@ export function providerEnabled(settings, provider) {
   requireValue(value === undefined || typeof value === 'boolean', 'INVALID_ARGUMENT');
   return value === true;
 }
-export function panProvider(flag, settings) {
+function panProvider(flag, settings) {
   const label = String(flag).trim().toLowerCase();
   requireValue(Array.isArray(settings.mappings), 'INVALID_ARGUMENT');
   const matches = alias => alias.trim().length > 0 && label.includes(alias.trim().toLowerCase());

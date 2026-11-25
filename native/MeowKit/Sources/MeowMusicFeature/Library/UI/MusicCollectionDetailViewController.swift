@@ -376,9 +376,8 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
 
     func activateRemotePage() {
         guard isPageActive, let page = remotePage else { return }
-        let open = !model.isClosed
-        page.setAccess(available: open, generation: model.accountAccessGeneration)
-        guard open else {
+        if model.isClosed {
+            page.close()
             render()
             return
         }

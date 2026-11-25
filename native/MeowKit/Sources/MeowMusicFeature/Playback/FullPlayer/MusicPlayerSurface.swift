@@ -229,7 +229,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
 
     private func reconcileTitleSwipe() {
         guard titleTransition.phase != .idle else { return }
-        if !content.isAvailable || !titleTransition.accepts(content.fence) ||
+        if content.model.isClosed || !titleTransition.accepts(content.fence) ||
             (titleTransition.phase == .dragging && !content.model.canNavigate) ||
             titleRecommendation != content.model.recommendations.recommendationCommandID ||
             (titleNavigation != nil && titleNavigation != content.model.navigationID) ||

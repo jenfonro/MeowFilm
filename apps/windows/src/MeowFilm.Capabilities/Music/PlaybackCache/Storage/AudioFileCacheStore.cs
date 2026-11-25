@@ -48,7 +48,6 @@ internal sealed record AudioFileCacheRecord(
     string ResourceKey,
     string FileName,
     long FileSize,
-    string Sha256,
     string Signature,
     long ConfirmedAt,
     double? Duration,
@@ -56,13 +55,13 @@ internal sealed record AudioFileCacheRecord(
 {
     internal int EstimateBytes() =>
         160 + Encoding.UTF8.GetByteCount(ResourceKey) + Encoding.UTF8.GetByteCount(FileName) +
-        Encoding.UTF8.GetByteCount(Sha256) + Encoding.UTF8.GetByteCount(Signature) + Info.EstimateBytes();
+        Encoding.UTF8.GetByteCount(Signature) + Info.EstimateBytes();
 }
 
 internal static class AudioFileCacheStore
 {
     private const string SelectColumns = """
-        resource_key,file_name,file_size,sha256,signature,confirmed_at_ms,duration,
+        resource_key,file_name,file_size,signature,confirmed_at_ms,duration,
         info_kind,info_platform,info_song_id,info_source_key,info_scope,info_generation,
         info_installation_id,info_provider_name,info_quality,info_requested_quality,info_actual_quality,
         info_quality_verified,info_playback_verified,info_quality_policy_signature,
@@ -108,14 +107,14 @@ internal static class AudioFileCacheStore
         var info = value.Info;
         db.Execute("""
             INSERT INTO windows_music_audio_files(
-                resource_key,file_name,file_size,sha256,signature,confirmed_at_ms,duration,
+                resource_key,file_name,file_size,signature,confirmed_at_ms,duration,
                 info_kind,info_platform,info_song_id,info_source_key,info_scope,info_generation,
                 info_installation_id,info_provider_name,info_quality,info_requested_quality,info_actual_quality,
                 info_quality_verified,info_playback_verified,info_quality_policy_signature,
                 info_full,info_delivery,info_quality_evidence,
                 info_codec,info_sample_rate,info_bit_depth,info_channels,info_bitrate)
             VALUES(
-                $key,$file,$size,$sha,$sig,$conf,$dur,
+                $key,$file,$size,$sig,$conf,$dur,
                 $ikind,$iplat,$isong,$isrc,$iscope,$igen,
                 $iinst,$iprov,$iqual,$ireq,$iact,
                 $iqv,$ipv,$iqps,
@@ -124,7 +123,6 @@ internal static class AudioFileCacheStore
             ON CONFLICT(resource_key) DO UPDATE SET
                 file_name=excluded.file_name,
                 file_size=excluded.file_size,
-                sha256=excluded.sha256,
                 signature=excluded.signature,
                 confirmed_at_ms=excluded.confirmed_at_ms,
                 duration=excluded.duration,
@@ -154,7 +152,6 @@ internal static class AudioFileCacheStore
             ("$key", resourceKey),
             ("$file", value.FileName),
             ("$size", value.FileSize),
-            ("$sha", value.Sha256),
             ("$sig", value.Signature),
             ("$conf", value.ConfirmedAt),
             ("$dur", value.Duration),
@@ -185,41 +182,40 @@ internal static class AudioFileCacheStore
     private static AudioFileCacheRecord ReadRow(SqliteDataReader row)
     {
         long fileSize = row.GetInt64(2);
-        string signature = row.GetString(4);
-        double? duration = row.GetNullableDouble(6);
+        string signature = row.GetString(3);
+        double? duration = row.GetNullableDouble(5);
         return new AudioFileCacheRecord(
             row.GetString(0),
             row.GetString(1),
             fileSize,
-            row.GetString(3),
             signature,
-            row.GetInt64(5),
+            row.GetInt64(4),
             duration,
             new AudioFileInfoRecord(
+                row.GetNullableString(6),
                 row.GetNullableString(7),
                 row.GetNullableString(8),
                 row.GetNullableString(9),
                 row.GetNullableString(10),
-                row.GetNullableString(11),
-                row.GetNullableInt64(12),
+                row.GetNullableInt64(11),
+                row.GetNullableString(12),
                 row.GetNullableString(13),
                 row.GetNullableString(14),
                 row.GetNullableString(15),
                 row.GetNullableString(16),
-                row.GetNullableString(17),
+                row.GetNullableBool(17),
                 row.GetNullableBool(18),
-                row.GetNullableBool(19),
-                row.GetNullableString(20),
+                row.GetNullableString(19),
                 signature,
                 duration,
                 fileSize,
-                row.GetNullableBool(21),
+                row.GetNullableBool(20),
+                row.GetNullableString(21),
                 row.GetNullableString(22),
                 row.GetNullableString(23),
-                row.GetNullableString(24),
+                row.GetNullableInt64(24),
                 row.GetNullableInt64(25),
                 row.GetNullableInt64(26),
-                row.GetNullableInt64(27),
-                row.GetNullableInt64(28)));
+                row.GetNullableInt64(27)));
     }
 }

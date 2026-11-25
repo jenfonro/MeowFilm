@@ -51,17 +51,16 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
 
     public void OnPreviewKeyDown(KeyRoutedEventArgs e)
     {
-        if (e.Handled) return;
-        if (shell.IsSystemModalOpen || shell.MediaControls?.IsRecording == true) return;
-        if (shell.IsClosing) return;
-        if (shell.ChannelDialogHostElement.IsOpen)
+        if (e.Handled || shell.MediaControls?.IsRecording == true) return;
+        if (shell.ActiveModalHost is { } activeModal)
         {
-            if (!shell.ChannelDialogHostElement.HandleEscape(e)) ProtectChannelKeyboard(e);
+            if (!activeModal.HandleEscape(e)) ProtectModalKeyboard(activeModal, e);
             if (e.Key is VirtualKey.F or VirtualKey.K && DesktopVisual.Modifiers == VirtualKeyModifiers.Control ||
                 e.Key is VirtualKey.Left or VirtualKey.Right && DesktopVisual.Modifiers == VirtualKeyModifiers.Menu)
                 e.Handled = true;
             return;
         }
+        if (shell.IsClosing) return;
         e.Handled = TryExecuteShortcut(e.Key, DesktopVisual.Modifiers);
     }
 
@@ -103,8 +102,8 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
 
     public void OnPreviewKeyUp(KeyRoutedEventArgs e)
     {
-        if (!shell.IsSystemModalOpen && shell.ChannelDialogHostElement.IsOpen)
-            ProtectChannelKeyboard(e);
+        if (shell.ActiveModalHost is { } activeModal)
+            ProtectModalKeyboard(activeModal, e);
     }
 
     public void OnChannelHeaderPointerPressed(PointerRoutedEventArgs e) => OnChannelHeaderPointer(e, pressed: true);
@@ -113,15 +112,15 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
     private bool HasOpenPopup() => shell.Root.XamlRoot is { } xamlRoot &&
         VisualTreeHelper.GetOpenPopupsForXamlRoot(xamlRoot).Any(popup => popup.IsOpen && popup.Child is not ToolTip);
 
-    private void ProtectChannelKeyboard(KeyRoutedEventArgs e)
+    private static void ProtectModalKeyboard(DesktopModalHost modal, KeyRoutedEventArgs e)
     {
         if (e.OriginalSource is not DependencyObject target ||
-            !DesktopVisual.Contains(shell.ChannelDialogHostElement, target)) e.Handled = true;
+            !DesktopVisual.Contains(modal, target)) e.Handled = true;
     }
 
     private void OnChannelHeaderPointer(PointerRoutedEventArgs e, bool pressed)
     {
-        if (shell.IsSystemModalOpen || !shell.ChannelDialogHostElement.IsOpen) return;
+        if (!ReferenceEquals(shell.ActiveModalHost, shell.ChannelDialogHostElement)) return;
         bool In(FrameworkElement control) => e.OriginalSource is DependencyObject target && DesktopVisual.Contains(control, target);
         if (shell.ChannelDialogHostElement.HasOutsidePress || In(shell.SearchChromeElement) || In(shell.SearchInputElement) ||
             In(shell.SettingsButtonElement) || In(shell.PlayerDetailBackButtonElement) || In(shell.PageHeaderHostElement))

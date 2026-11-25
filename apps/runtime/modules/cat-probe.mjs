@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { ScriptHostError } from '@meowfilm/script-host';
-import { isRawJSON, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
+import { isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { canonicalJSON } from './json-canonical.mjs';
 
 const MAX_NAVIGATION_PAGES = 64;
 const FATAL_CODES = new Set(['CANCELLED', 'STALE_SESSION', 'HOST_CLOSED', 'CLOSED', 'DISABLED', 'STARTING']);
@@ -29,18 +30,6 @@ function pageNumber(value, key) {
   if (!/^[1-9][0-9]*$/.test(raw)) return 0;
   const parsed = Number(raw);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0;
-}
-
-function canonicalJSON(value) {
-  const ordered = item => {
-    if (isRawJSON(item)) return item;
-    if (Array.isArray(item)) return item.map(ordered);
-    if (!isObject(item)) return item;
-    return Object.fromEntries(Object.entries(item)
-      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-      .map(([key, child]) => [key, ordered(child)]));
-  };
-  return stringifyJSONValue(ordered(value));
 }
 
 function listOf(value) {

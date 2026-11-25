@@ -80,7 +80,7 @@ public final class PlaybackOwnerLease {
     private weak var router: PlaybackOwnerRouter?
     private let owner: String
     private let id: UUID
-    private var removal: (@MainActor @Sendable () -> Void)?
+    private nonisolated(unsafe) var removal: (@MainActor @Sendable () -> Void)?
 
     fileprivate init(router: PlaybackOwnerRouter, owner: String, id: UUID) {
         self.router = router

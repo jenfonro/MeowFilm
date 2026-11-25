@@ -3,8 +3,8 @@ import { createClientContexts } from './clients.mjs';
 import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { createMusicTransport } from './transport.mjs';
 import { fail, errorCode, MusicPlatformError, musicPlatformCodes } from './errors.mjs';
-import { input, object, protocolInteger, publicText, required, rows, scalar } from './model.mjs';
-import { cookieFields, credentialSecrets, encryptedWyResponse, kgRequest, kgSalt, kgSuccess, md5, wyRequest, wySuccess, txRequest, txSuccess } from './protocols.mjs';
+import { input, object, protocolInteger, required, rows, scalar } from './model.mjs';
+import { cookieFields, encryptedWyResponse, kgRequest, kgSalt, kgSuccess, md5, wyRequest, wySuccess, txRequest, txSuccess } from './protocols.mjs';
 import { waitForFlight } from './flight.mjs';
 import { xeapiRequest } from './xeapi.mjs';
 import { wyProvider } from './providers/wy.mjs';
@@ -28,8 +28,7 @@ const isAccountOperation = operation => typeof operation === 'string' &&
  * The native account owner publishes an authorized session after its durable save. */
 export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
   const transport = createMusicTransport({ debug });
-  const clock = Date.now;
-  const clients = createClientContexts({ dataRoot, transport, clock });
+  const clients = createClientContexts({ dataRoot, transport });
   const accounts = createAccountOperations(), mutations = createMutations();
   const sessions = new Map(), active = new Set(), flightEntries = new Set(), cache = new Map(), flights = new Map(), activeRefreshes = new Map();
   let cacheBytes = 0, cacheHits = 0, cacheMisses = 0, cacheEvictions = 0, cacheExpiredPurges = 0, refreshSeq = 0, memoryEpoch = 0;
@@ -96,7 +95,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
       if (!entry.candidate && (!entry.committed || entry.readback) && session !== sessions.get(platform)) fail('STALE_SESSION');
     };
     const c = {
-      platform, account: entry.account, signal, clock, transport,
+      platform, account: entry.account, signal, transport,
       client: () => { assertCurrent(); return clients.get(platform); }, errorCode,
       observe(path, value) {
         const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
@@ -131,7 +130,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
       async wy(path, data, weapi = false, options = {}) {
         assertCurrent();
         const client = clients.get('wy');
-        const recipe = wyRequest(path, data, client, c.account, clock, weapi, options.token, options.vip);
+        const recipe = wyRequest(path, data, client, c.account, weapi, options.token, options.vip);
         assertCurrent();
         const reply = await transport({ ...recipe,
           signal, dispatched: options.dispatched, json: !options.vip });
@@ -146,7 +145,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
         assertCurrent();
         const client = prepare ? await clients.prepare('tx', signal) : clients.get('tx');
         assertCurrent();
-        const recipe = txRequest(module, method, data, client, c.account, clock, options);
+        const recipe = txRequest(module, method, data, client, c.account, options);
         const reply = await transport({ ...recipe, signal, dispatched: options.dispatched });
         assertCurrent();
         try { return txSuccess(reply.value); }
@@ -154,7 +153,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
       },
       async kg(path, data = {}, router, body, origin, salt, options = {}) {
         assertCurrent();
-        const request = kgRequest(path, data, clients.get('kg'), c.account, clock, router, body, origin, salt);
+        const request = kgRequest(path, data, clients.get('kg'), c.account, router, body, origin, salt);
         if (options.headers) Object.assign(request.headers, options.headers);
         const reply = await transport({ ...request, signal, dispatched: options.dispatched });
         assertCurrent();
@@ -164,7 +163,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
       },
       async kgRank(body) {
         assertCurrent();
-        const recipe = kgRequest('/openapi/kmr/v2/rank/audio', {}, clients.get('kg'), c.account, clock, null, body);
+        const recipe = kgRequest('/openapi/kmr/v2/rank/audio', {}, clients.get('kg'), c.account, null, body);
         recipe.headers['kg-tid'] = '369';
         const reply = await c.response(recipe);
         if (reply.headers.get('ssa-code')) fail('VERIFICATION_REQUIRED');
@@ -176,7 +175,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
         let mapped;
         if (!mix || mix === '0') {
           const client = clients.get('kg'), cookies = cookieFields(c.accountRequired().cookie),
-            time = Math.floor(clock() / 1000);
+            time = Math.floor(Date.now() / 1000);
           const raw = kgSuccess(await c.read({ url: 'https://gateway.kugou.com/v2/album_audio/audio',
             method: 'POST', headers: { 'Content-Type': 'application/json;charset=utf-8',
               'x-router': 'kmr.service.kugou.com', 'Cache-Control': 'no-store',
@@ -204,7 +203,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
       },
       async xeapi(path, data, options = {}) {
         assertCurrent();
-        const value = await xeapiRequest(path, data, { transport, client: clients.get('wy'), account: c.account, clock, signal,
+        const value = await xeapiRequest(path, data, { transport, client: clients.get('wy'), account: c.account, signal,
           ...options, keyState: entry.candidate ? {} : keyState,
           dispatched: options.dispatched ? () => { c.dispatched(); options.dispatched(); } : undefined });
         assertCurrent();
@@ -231,7 +230,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
           entry.account?.generation ?? 0, parts]);
         assertCurrent();
         const isRefresh = Boolean(params.refresh);
-        const now = clock();
+        const now = Date.now();
         const old = cache.get(key);
         if (!isRefresh && old?.expires > now) {
           // True LRU: promote hit entry to most-recently-used position.
@@ -292,7 +291,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
               if (canStore && (!flightEntry.account || ['daily', 'channels', 'channel-directory'].includes(parts[0])) &&
                   (!shouldCache || shouldCache(result))) {
                 const bytes = Buffer.byteLength(stringifyJSONValue(result));
-                const nowMs = clock();
+                const nowMs = Date.now();
                 const explicitExpiry = typeof result?.expiresAt === 'number' ? result.expiresAt : Infinity;
                 const expires = Math.min(nowMs + ttl, explicitExpiry);
                 if (bytes <= cacheMaxBytes && expires > nowMs) {
@@ -387,19 +386,6 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
       if (Object.hasOwn(providers[platform], operation) && !writes.has(operation) &&
           entry.observations.size && value && typeof value === 'object' && !Array.isArray(value))
         value = { ...value, diagnostics: [...entry.observations.values()] };
-      // Only the already projected public result is inspected for credential
-      // reflection. Unconsumed upstream branches are never walked or validated.
-      if (c.account && !['account.verify', 'account.profile', 'account.refresh', 'sms.login', 'qr.poll'].includes(operation)) {
-        const secrets = credentialSecrets(c.account.cookie);
-        if (secrets.length) {
-          const pending = [value];
-          while (pending.length) {
-            const field = pending.pop();
-            if (typeof field === 'string') publicText(field, secrets);
-            else if (field && typeof field === 'object') for (const child of Object.values(field)) pending.push(child);
-          }
-        }
-      }
       return value;
     })
       .then(value => {

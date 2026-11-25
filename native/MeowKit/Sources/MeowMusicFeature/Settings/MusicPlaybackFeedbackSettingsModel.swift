@@ -6,7 +6,6 @@ import Combine
 struct MusicPlaybackFeedbackConfirmation: Equatable {
     let id: UUID
     let epoch: UUID
-    let accessGeneration: UUID?
     let settings: MusicPlaybackFeedbackSettings
 }
 
@@ -18,9 +17,8 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     @Published private(set) var confirmation: MusicPlaybackFeedbackConfirmation?
     private let service: any MusicPlaybackFeedbackSettingsServing
     private let receipts: MusicSettingsReceiptOwner
-    private let onChanged: @MainActor (UUID?) async throws -> Void
-    private var available = false
-    private var accessGeneration: UUID?
+    private let onChanged: @MainActor () async throws -> Void
+    private var active = false
     private var epoch = UUID()
     private var work: Task<Void, Never>?
     private var reread = false
@@ -29,14 +27,20 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
 
     init(service: any MusicPlaybackFeedbackSettingsServing,
          receipts: MusicSettingsReceiptOwner,
-         onChanged: @escaping @MainActor (UUID?) async throws -> Void = { _ in }) {
+         onChanged: @escaping @MainActor () async throws -> Void = {}) {
         self.service = service; self.receipts = receipts; self.onChanged = onChanged
     }
 
-    func setAccess(available: Bool, generation: UUID?) {
-        guard self.available != available || accessGeneration != generation else { return }
-        cancel(); value = nil; error = nil
-        self.available = available; accessGeneration = generation
+    func activate() {
+        guard !active else { return }
+        cancel()
+        active = true
+    }
+
+    func deactivate() {
+        guard active else { return }
+        active = false
+        cancel()
     }
 
     func cancel() {
@@ -49,14 +53,14 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
         let revision = requestedRevision
         cancel()
         requestedRevision = revision
-        guard available else { value = nil; return }
+        guard active else { value = nil; return }
         if work != nil { reread = true; busy = true; return }
         startRead()
         await work?.value
     }
 
     func settingsChanged(revision: Int) {
-        guard available else { return }
+        guard active else { return }
         confirmation = nil
         if let value, value.revision >= revision { return }
         // A pending read version, not inferred platform settings.
@@ -67,14 +71,14 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     }
 
     private func startRead() {
-        guard work == nil, available else { return }
+        guard work == nil, active else { return }
         let own = epoch, readError = error, revision = requestedRevision
         busy = true
         work = Task { [weak self, service] in
             do {
                 let result = try await service.playbackFeedbackSettings()
-                if let self, own == self.epoch, self.available, !Task.isCancelled {
-                    try await self.onChanged(self.accessGeneration)
+                if let self, own == self.epoch, self.active, !Task.isCancelled {
+                    try await self.onChanged()
                 }
                 self?.finish(result, error: readError, epoch: own, requestedAtStart: revision)
             } catch {
@@ -85,10 +89,10 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     }
 
     func update(_ platform: MusicAccountPlatform, _ enabled: Bool) {
-        guard let value, !busy, work == nil, available else { return }
+        guard let value, !busy, work == nil, active else { return }
         confirmation = nil
         if platform == .kugou, enabled, value.platforms[.kugou]?.enabled != true {
-            confirmation = .init(id: UUID(), epoch: epoch, accessGeneration: accessGeneration, settings: value)
+            confirmation = .init(id: UUID(), epoch: epoch, settings: value)
             return
         }
         save(platform, enabled, expected: value)
@@ -97,18 +101,18 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     func dismissConfirmation() { confirmation = nil }
 
     func confirm(_ ticket: MusicPlaybackFeedbackConfirmation) {
-        guard available, !busy, work == nil, confirmation == ticket, epoch == ticket.epoch,
-              accessGeneration == ticket.accessGeneration, value == ticket.settings else { return }
+        guard active, !busy, work == nil, confirmation == ticket, epoch == ticket.epoch,
+              value == ticket.settings else { return }
         confirmation = nil
         save(.kugou, true, expected: ticket.settings)
     }
 
     private func save(_ platform: MusicAccountPlatform, _ enabled: Bool, expected: MusicPlaybackFeedbackSettings) {
-        guard !busy, work == nil, available else { return }
+        guard !busy, work == nil, active else { return }
         // Consumes any dialog before suspension. CAS/unknown results are never
         // automatically replayed, even if the next read has the same revision.
         confirmation = nil; busy = true; error = nil
-        let own = epoch, generation = accessGeneration, revision = requestedRevision
+        let own = epoch, revision = requestedRevision
         writing = true
         let submitted = receipts.submit(settings: ["playback/feedback/" + platform.rawValue],
                                         operation: "保存播放反馈设置") { [service] in
@@ -125,21 +129,19 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
                 let problem = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
                 failure = problem
                 if [MusicServiceError.staleRevision, .storageConflict, .commitUnconfirmed].contains(problem) {
-                    if accessGeneration == generation {
-                        do {
-                            result = try await Task { [service] in
-                                try await service.playbackFeedbackSettings()
-                            }.value
-                        } catch { failure = MusicServiceError.sanitized(error) }
-                    }
+                    do {
+                        result = try await Task { [service] in
+                            try await service.playbackFeedbackSettings()
+                        }.value
+                    } catch { failure = MusicServiceError.sanitized(error) }
                 } else {
                     finish(expected, error: problem.localizedDescription,
                            epoch: own, requestedAtStart: revision)
                     return
                 }
             }
-            if result != nil, accessGeneration == generation {
-                do { try await onChanged(generation) }
+            if result != nil {
+                do { try await onChanged() }
                 catch { result = nil; failure = MusicServiceError.sanitized(error) }
             }
             finish(result, error: failure == .commitUnconfirmed ? nil : failure?.localizedDescription,
@@ -150,8 +152,8 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     private func finish(_ value: MusicPlaybackFeedbackSettings?, error: String?,
                         epoch own: UUID, requestedAtStart revision: Int?) {
         work = nil; writing = false
-        guard own == epoch, available, !Task.isCancelled else {
-            if available, reread || requestedRevision != nil { reread = false; startRead() }
+        guard own == epoch, active, !Task.isCancelled else {
+            if active, reread || requestedRevision != nil { reread = false; startRead() }
             return
         }
         if let requestedRevision, value.map({ $0.revision >= requestedRevision }) != true {
@@ -169,7 +171,7 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
             requestedRevision = nil
             self.value = value; self.error = error; busy = false
         }
-        if reread, available { reread = false; startRead() }
+        if reread, active { reread = false; startRead() }
     }
 
     deinit { if !writing { work?.cancel() } }

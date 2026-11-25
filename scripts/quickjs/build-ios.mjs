@@ -242,8 +242,10 @@ export async function buildIOSNative(target) {
     await mkdir(objectDirectory, { recursive: true });
     // C/C++ source membership comes from the same gyp file as the desktop build.
     for (const targetSpec of gyp.targets) {
-      for (const input of [...targetSpec.sources,
-        ...(targetSpec.target_name === 'script_host_native' ? ['native/sqlite-storage.cc'] : [])]) {
+      const targetSources = targetSpec.target_name === 'script_host_native'
+        ? [...targetSpec.sources.filter(item => item !== 'native/storage-lock.cc'), 'native/sqlite-storage.cc']
+        : targetSpec.sources;
+      for (const input of targetSources) {
         const source = input.startsWith('<(runtime_native)/')
           ? resolve(root, policy.build.cache, input.slice('<(runtime_native)/'.length))
           : input.startsWith('<(quickjs_source)/')

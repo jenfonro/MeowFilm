@@ -1,9 +1,4 @@
 import Foundation
-#if canImport(Darwin)
-import Darwin
-#else
-import Glibc
-#endif
 import MeowDebug
 import MeowUI
 import MeowMusicFeature
@@ -122,27 +117,6 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         return evictedFiles
     }
 
-    private static func isMissingFileError(_ error: Error) -> Bool {
-        if let cocoa = error as? CocoaError,
-           cocoa.code == .fileReadNoSuchFile || cocoa.code == .fileNoSuchFile {
-            return true
-        }
-        if let posix = error as? POSIXError, posix.code == .ENOENT {
-            return true
-        }
-        let ns = error as NSError
-        if ns.domain == NSCocoaErrorDomain && (ns.code == NSFileReadNoSuchFileError || ns.code == NSFileNoSuchFileError) {
-            return true
-        }
-        if ns.domain == NSPOSIXErrorDomain && ns.code == Int(ENOENT) {
-            return true
-        }
-        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? Error {
-            return isMissingFileError(underlying)
-        }
-        return false
-    }
-
     private func removeStaleImageEntry(filename: String, dir: RawResourceDirectory, reason: String) {
         do {
             try dir.remove(filename)
@@ -185,27 +159,23 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
             DebugRuntime.logError(.storage, sub: "music.presentationCache", event: "readImage.dirError", error: error)
             return nil
         }
-        let fileURL = dir.directoryURL.appendingPathComponent(row.filename, isDirectory: false)
+        guard row.bytes > 0, row.bytes <= Self.maximumImageBytes else {
+            removeStaleImageEntry(filename: row.filename, dir: dir, reason: "sizeMismatch")
+            return nil
+        }
         let data: Data
         do {
-            let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-            if let size = (attrs[.size] as? NSNumber)?.intValue,
-               size != row.bytes || size <= 0 || size > Self.maximumImageBytes {
-                removeStaleImageEntry(filename: row.filename, dir: dir, reason: "sizeMismatch")
+            guard let loaded = try dir.read(row.filename, maximumBytes: Self.maximumImageBytes) else {
+                removeStaleImageEntry(filename: row.filename, dir: dir, reason: "missingOrInvalidFile")
                 return nil
             }
-            let loaded = try Data(contentsOf: fileURL)
-            guard loaded.count == row.bytes, !loaded.isEmpty, loaded.count <= Self.maximumImageBytes else {
+            guard loaded.count == row.bytes else {
                 removeStaleImageEntry(filename: row.filename, dir: dir, reason: "payloadMismatch")
                 return nil
             }
             data = loaded
         } catch {
-            if Self.isMissingFileError(error) {
-                removeStaleImageEntry(filename: row.filename, dir: dir, reason: "missingFile")
-            } else {
-                DebugRuntime.logError(.storage, sub: "music.presentationCache", event: "readImage.ioError", error: error)
-            }
+            DebugRuntime.logError(.storage, sub: "music.presentationCache", event: "readImage.ioError", error: error)
             return nil
         }
         guard !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }

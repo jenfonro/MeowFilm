@@ -7,7 +7,7 @@ import Combine
     @Published public private(set) var state = MusicLibrarySyncState()
     @Published public private(set) var accounts: [MusicAccountStatus] = []
     @Published public private(set) var busy = false
-    @Published public private(set) var isAvailable = false
+    @Published public private(set) var isActive = false
     @Published public private(set) var error: String?
     private let service: any MusicLibrarySyncing
     private let accountService: (any MusicAccountsServing)?
@@ -19,8 +19,6 @@ import Combine
     private var writeAuthorization: MusicQueueAuthorization?
     private var completionTask: Task<Void, Never>?
     private var epoch = UUID()
-    private var accessGeneration = UUID()
-    private var active = false
     private var syncID: UUID?
     private var syncTask: Task<MusicLibrarySyncState, Error>?
     private var settingsTask: Task<MusicAutomaticLibrarySyncSaveResult, Error>?
@@ -33,14 +31,14 @@ import Combine
         self.onLibraryChanged = onLibraryChanged
     }
     public var canSync: Bool {
-        active && isAvailable && !busy && settingsTask == nil && completionTask == nil &&
+        isActive && !busy && settingsTask == nil && completionTask == nil &&
             selections.contains { !$0.kinds.isEmpty }
     }
     public func selection(_ platform: MusicAccountPlatform) -> MusicLibrarySyncSelection {
         selections.first { $0.platform == platform } ?? .init(platform: platform)
     }
     public func select(_ platform: MusicAccountPlatform, favorites: Bool? = nil, playlists: Bool? = nil) {
-        guard active, isAvailable, !busy, settingsTask == nil,
+        guard isActive, !busy, settingsTask == nil,
               !supportsAutomatic || automaticRevision != nil else { return }
         loadID = UUID() // A late status load must not undo this explicit choice.
         var value = selection(platform)
@@ -48,7 +46,7 @@ import Combine
         if let playlists { value.playlists = playlists }
         selections.removeAll { $0.platform == platform }; selections.append(value)
         if let automatic, let revision = automaticRevision {
-            let own = epoch, access = accessGeneration, id = UUID(), permission = MusicQueueAuthorization()
+            let own = epoch, id = UUID(), permission = MusicQueueAuthorization()
             let preferences = MusicAutomaticLibrarySyncPreferences(revision: revision, selections: selections)
             completionTask?.cancel(); completionTask = nil
             busy = true; error = nil
@@ -66,9 +64,9 @@ import Combine
                 guard let self else { return }
                 settingsTask = nil
                 guard current(own) else {
-                    if active, isAvailable {
+                    if isActive {
                         await load()
-                        if accessGeneration == access, case .success(let receipt) = result,
+                        if case .success(let receipt) = result,
                            automaticRevision == receipt.preferences.revision {
                             observeSettingsSynchronization(receipt, own: epoch)
                         }
@@ -105,15 +103,14 @@ import Combine
             await onLibraryChanged()
         }
     }
-    public func activate(available: Bool, generation: UUID) {
-        if !active || accessGeneration != generation || isAvailable != available {
-            cancel(); epoch = UUID(); loadID = UUID()
-            accounts = []; state = .init(); selections = []; error = nil; automaticRevision = nil
-        }
-        active = true; accessGeneration = generation; isAvailable = available
+    public func activate() {
+        guard !isActive else { return }
+        cancel(); epoch = UUID(); loadID = UUID()
+        accounts = []; state = .init(); selections = []; error = nil; automaticRevision = nil
+        isActive = true
     }
     public func deactivate() {
-        active = false; isAvailable = false; epoch = UUID(); loadID = UUID()
+        isActive = false; epoch = UUID(); loadID = UUID()
         cancel(); accounts = []; state = .init(); selections = []; error = nil; automaticRevision = nil
     }
     public func cancel() {
@@ -127,9 +124,9 @@ import Combine
         }
         syncID = nil
     }
-    private func current(_ expected: UUID) -> Bool { active && isAvailable && epoch == expected && !Task.isCancelled }
+    private func current(_ expected: UUID) -> Bool { isActive && epoch == expected && !Task.isCancelled }
     public func load() async {
-        guard active, isAvailable, !busy else { return }
+        guard isActive, !busy else { return }
         let own = epoch, request = UUID(); loadID = request
         do {
             let status = try await service.librarySyncState()
@@ -149,7 +146,7 @@ import Combine
         state.phase == .blocked && state.issues.contains { $0.code == "emptyRemote" || $0.code == "bulkRemoteDelete" }
     }
     public func resetAccount(_ platform: MusicAccountPlatform) async {
-        guard active, isAvailable, !busy, settingsTask == nil else { return }
+        guard isActive, !busy, settingsTask == nil else { return }
         let own = epoch
         loadID = UUID(); busy = true; error = nil
         defer { if current(own) { busy = false } }

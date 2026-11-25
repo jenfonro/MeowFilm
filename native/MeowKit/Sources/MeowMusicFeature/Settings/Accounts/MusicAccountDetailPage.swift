@@ -310,7 +310,7 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
                 sync.$state.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 sync.$selections.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 sync.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-                sync.$isAvailable.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                sync.$isActive.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 sync.$automaticRevision.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             ])
         }
