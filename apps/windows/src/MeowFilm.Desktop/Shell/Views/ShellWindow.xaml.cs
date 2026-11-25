@@ -71,7 +71,7 @@ public sealed partial class ShellWindow : DesktopWindow
         PlayerSurfaceInput.AddDismissRequestedHandler(Root, OnQueueDismissClick);
         ShellWindowStartupSize.ApplyToPrimaryScreen(this, Handle);
         _nativeCaption = new(
-            this, CaptionDragRegion, WindowCaptionButtons,
+            this, CaptionDragRegion,
             () => _playerDetailOpen || IsAnyModalOpen,
             [BackButton, ForwardButton, SearchInput, PageHeaderHost, CaptionBar],
             [WindowCaptionButtons, PlayerDetailBackButton, ChannelDialogHost, SystemDialogHost, NotificationOverlay]);
