@@ -22,6 +22,9 @@ internal static class NativeWin32
     [DllImport("comctl32.dll", ExactSpelling = true)]
     internal static extern nint DefSubclassProc(nint hwnd, uint message, nuint wParam, nint lParam);
 
+    [DllImport("user32.dll", EntryPoint = "FindWindowExW", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    internal static extern nint FindWindowEx(nint hWndParent, nint hWndChildAfter, string? lpszClass, string? lpszWindow);
+
     [DllImport("user32.dll", ExactSpelling = true)]
     internal static extern uint GetDpiForWindow(nint hwnd);
 

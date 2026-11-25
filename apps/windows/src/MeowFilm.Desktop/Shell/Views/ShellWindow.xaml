@@ -123,7 +123,7 @@
      <Grid.RenderTransform><TranslateTransform x:Name="PlayerDetailTransform"/></Grid.RenderTransform>
      <ContentControl x:Name="PlayerDetailHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
      <Grid x:Name="PlayerDetailChrome">
-      <Button x:Name="PlayerDetailBackButton" HorizontalAlignment="Left" VerticalAlignment="Top" Style="{StaticResource MeowFilm.IconButton}" Width="40" Height="40" Margin="20,16,0,0" Foreground="#ECECEE" Click="OnBackClick" Content="&#xE70D;" AutomationProperties.Name="收起播放器"/>
+      <Button x:Name="PlayerDetailBackButton" HorizontalAlignment="Left" VerticalAlignment="Top" Style="{StaticResource MeowFilm.IconButton}" Width="40" Height="40" Margin="20,12,0,0" Foreground="#ECECEE" Click="OnBackClick" Content="&#xE70D;" AutomationProperties.Name="收起播放器"/>
      </Grid>
     </Grid>
     <Button x:Name="QueueDismissSurface" Grid.RowSpan="2" Grid.ColumnSpan="2" Canvas.ZIndex="28" Visibility="Collapsed" Background="Transparent" BorderThickness="0" Padding="0" IsTabStop="False" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Click="OnQueueDismissClick" AutomationProperties.Name="收起播放列表">
@@ -134,7 +134,7 @@
      <Border.Shadow><ThemeShadow/></Border.Shadow>
      <ContentControl x:Name="QueueHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
     </Border>
-    <StackPanel x:Name="WindowCaptionButtons" Grid.ColumnSpan="2" Canvas.ZIndex="45" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Height="48" RequestedTheme="Light">
+    <StackPanel x:Name="WindowCaptionButtons" Grid.ColumnSpan="2" Canvas.ZIndex="45" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Height="64" RequestedTheme="Light">
      <Button x:Name="MinimizeCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionButton}" Content="&#xE921;" Click="OnMinimizeCaptionClick" AutomationProperties.Name="最小化"/>
      <Button x:Name="MaximizeCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionButton}" Content="&#xE922;" Click="OnMaximizeCaptionClick" AutomationProperties.Name="最大化"/>
      <Button x:Name="CloseCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionCloseButton}" Content="&#xE8BB;" Click="OnCloseCaptionClick" AutomationProperties.Name="关闭"/>

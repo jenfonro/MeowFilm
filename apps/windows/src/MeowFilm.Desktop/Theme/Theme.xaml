@@ -291,7 +291,7 @@
  <Style x:Key="MeowFilm.ManagementSearch" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}"><Setter Property="Height" Value="38"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Surface}"/></Style>
  <Style x:Key="MeowFilm.ManagementCheck" TargetType="CheckBox"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="MinHeight" Value="32"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
  <Style x:Key="MeowFilm.WindowCaptionButton" TargetType="Button">
-  <Setter Property="Width" Value="46"/><Setter Property="Height" Value="48"/>
+  <Setter Property="Width" Value="46"/><Setter Property="Height" Value="64"/>
   <Setter Property="MinWidth" Value="46"/><Setter Property="MinHeight" Value="32"/>
   <Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0"/>
   <Setter Property="CornerRadius" Value="0"/><Setter Property="BorderThickness" Value="0"/>
