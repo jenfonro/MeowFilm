@@ -3,9 +3,8 @@ using System.Runtime.InteropServices;
 namespace MeowFilm.Desktop;
 
 /// <summary>
-/// Shared Win32 borderless child-HWND host used by custom-chrome WinUI windows:
-/// neutralizes Windows App SDK's hidden titlebar overlay HWNDs (so screenshot/window-snap tools
-/// never detect a phantom 32px top strip) and routes client hit-testing on content bridges.
+/// Shared Win32 borderless child-HWND host used by transparent floating overlays (desktop lyrics):
+/// collapses unused system titlebar overlay HWNDs and routes client hit-testing on content bridges.
 /// </summary>
 public sealed class NativeBorderlessChildHost : IDisposable
 {
@@ -33,7 +32,6 @@ public sealed class NativeBorderlessChildHost : IDisposable
 
     private readonly nint parentHwnd;
     private readonly Func<int, int, bool>? isClientTransparent;
-    private readonly bool collapseNonClientInput;
     private readonly HashSet<nint> bridgeChildren = [];
     private readonly HashSet<nint> overlayChildren = [];
     private readonly char[] classNameBuffer = new char[256];
@@ -52,14 +50,10 @@ public sealed class NativeBorderlessChildHost : IDisposable
         int Width,
         int Height);
 
-    public NativeBorderlessChildHost(
-        nint parentHwnd,
-        Func<int, int, bool>? isClientTransparent = null,
-        bool collapseNonClientInput = true)
+    public NativeBorderlessChildHost(nint parentHwnd, Func<int, int, bool>? isClientTransparent = null)
     {
         this.parentHwnd = parentHwnd;
         this.isClientTransparent = isClientTransparent;
-        this.collapseNonClientInput = collapseNonClientInput;
         bridgeCallback = ProcessBridgeMessage;
         overlayCallback = ProcessOverlayMessage;
         enumCallback = InspectChildWindow;
@@ -71,7 +65,10 @@ public sealed class NativeBorderlessChildHost : IDisposable
         EnumChildWindows(parentHwnd, enumCallback, 0);
     }
 
-    public ChildHwndSnapshot[] EnumerateChildHwnds()
+    public ChildHwndSnapshot[] EnumerateChildHwnds() =>
+        EnumerateChildHwnds(parentHwnd, child => bridgeChildren.Contains(child) || overlayChildren.Contains(child));
+
+    internal static ChildHwndSnapshot[] EnumerateChildHwnds(nint parentHwnd, Func<nint, bool>? isSubclassed = null)
     {
         if (parentHwnd == 0) return [];
         var list = new List<ChildHwndSnapshot>();
@@ -94,7 +91,7 @@ public sealed class NativeBorderlessChildHost : IDisposable
                 $"0x{child.ToInt64():X}",
                 className,
                 IsWindowVisible(child),
-                bridgeChildren.Contains(child) || overlayChildren.Contains(child),
+                isSubclassed?.Invoke(child) == true,
                 x, y, w, h));
             return true;
         }, 0);
@@ -199,9 +196,9 @@ public sealed class NativeBorderlessChildHost : IDisposable
         return pt;
     }
 
-    private bool IsUnusedTitleBarOverlayClass(string className) =>
-        className.Contains("ReunionWindowingCaptionControls", StringComparison.OrdinalIgnoreCase) ||
-        (collapseNonClientInput && className.Contains("InputNonClientPointerSource", StringComparison.OrdinalIgnoreCase));
+    private static bool IsUnusedTitleBarOverlayClass(string className) =>
+        className.Contains("InputNonClientPointerSource", StringComparison.OrdinalIgnoreCase) ||
+        className.Contains("ReunionWindowingCaptionControls", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsContentBridgeClass(string className) =>
         className.Contains("DesktopChildSiteBridge", StringComparison.OrdinalIgnoreCase) ||
