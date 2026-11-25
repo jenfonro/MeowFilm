@@ -37,4 +37,4 @@ Windows 将影视浏览作为独立的 `FilmCapability` 装配在音乐能力之
 
 构造和初始化只准备页壳，首次导航才读取业务数据。`CaptureNavigationLocation()` 捕获当前路由，播放页位置为 `film-playback:<NavigationIdentity>`；`RestoreNavigationAsync(string location, CancellationToken token)` 按保留实例恢复，不从序列化卡片重建播放页，具体见[播放页保留](film-playback.md#页面保留与读取恢复)。首页／数据页由领域状态判断是否需要补齐未完成读取；Ready 分区不重新请求或清空集合，原有筛选、卡片和滚动宿主继续复用。Shell 保留的隐藏模块使用 Collapsed：FilmView 撤销未完成请求并收尾取消状态，共享 Shelf 停止滚动动画、暂停 ScrollChanged 挂接，显示后按当前尺寸恢复同一完整卡片锚点；没有隐藏定时翻页。共享卡片悬浮生命周期由 CardMotion 负责。
 
-首次 Pending/Loading 且无结果时，首页栏目（`FilmShelf.xaml`）与数据页（`FilmView.xaml`）按 `ShowSkeleton` 显示 WinUI `ProgressRing` 加载指示。真实结果到达后停止加载指示并呈现内容，空、失败、取消停止加载并保留原状态／重试；已有内容的补齐、分页及失败不遮盖卡片。
+首次 Pending/Loading 且无结果时，首页栏目（`FilmShelf.xaml`）与数据页（`FilmView.xaml`）按 `ShowLoading` 复用全局共享 `MeowFilm.LoadingRing`（`ProgressRing`）加载指示；首页栏目单行高度按同一 `Shelf.MeasureCards` 与 `FilmCard` 海报比例／标题行计算，在加载、空／失败状态与卡片就绪之间保持固定不变。真实结果到达后停止加载指示并呈现内容，空、失败、取消停止加载并保留原状态／重试；已有内容的补齐、分页及失败不遮盖卡片。

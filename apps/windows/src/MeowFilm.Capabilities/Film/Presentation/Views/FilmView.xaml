@@ -153,7 +153,7 @@
      </ItemsControl>
     </Border>
     <Grid MinHeight="260">
-     <ProgressRing x:Name="DataLoadingRing" x:Load="{x:Bind Module.ActiveData.ShowSkeleton, Mode=OneWay, FallbackValue=False}" Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False" IsActive="True" />
+     <ProgressRing x:Name="DataLoadingRing" x:Load="{x:Bind Module.ActiveData.ShowLoading, Mode=OneWay, FallbackValue=False}" IsActive="True" />
      <ItemsControl x:Name="DataItems" ItemsSource="{x:Bind Module.ActiveData.Items, Mode=OneWay}" AutomationProperties.Name="影片列表" Visibility="{x:Bind Module.ActiveData.HasItems, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
       <ItemsControl.ItemsPanel>
        <ItemsPanelTemplate>
