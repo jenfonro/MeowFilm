@@ -78,7 +78,6 @@ struct MusicDomainState: Sendable {
 
     func song(_ id: String) throws -> MusicSongRecord {
         guard let record = try songRows.song(id: id) else { throw MusicServiceError.notFound }
-        try MusicLibraryValidation.validateSong(record, id: id)
         return record
     }
 
@@ -90,7 +89,6 @@ struct MusicDomainState: Sendable {
         result.reserveCapacity(unique.count)
         for id in unique {
             guard let record = rows[id] else { throw MusicServiceError.notFound }
-            try MusicLibraryValidation.validateSong(record, id: id)
             result[id] = record
         }
         return result
@@ -179,19 +177,19 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     /// Omission preserves the existing five-platform behavior. Disabling a
     /// platform does not rewrite or hide previously stored songs and sources.
     public nonisolated let enabledPlatforms: Set<MusicPublicBrowsePlatform>
-    let database: any MusicNativeLibraryEngine
+    let database: MusicNativeLibraryDatabase
     var repositoryReader: any MusicNativeLibraryReading { database }
     var activeSongWriter: (any MusicNativeLibraryWriting)?
     let scripts: (any MusicScriptResolving)?
     let accounts: (any MusicNativeAccountProviding)?
     let publicPlatforms: MusicNativePlatforms
     let sourceSessionStore = MusicNativeSourceSessionStore()
-    let sourceDiscovery: any MusicSourceDiscoveryCaching
+    let sourceDiscovery: MusicNativePersistentSourceDiscoveryCache
     var sourceDiscoveryPersistTask: Task<Void, Never>?
     var sourceDiscoveryPersistPending = false
     var sourceDiscoveryObservationOrder: UInt64 = 0
     var sourceDiscoveryLatest: [String: [String: MusicSearchObservation]] = [:]
-    let homeSnapshot: (any MusicHomeSnapshotStoring)?
+    let homeSnapshot: MusicNativeHomeSnapshotStorage?
     let audioFileCache: (any MusicAudioFileCaching)?
     let presentationCache: (any MusicPresentationCaching)?
     var audioCacheAttempt: MusicNativeAudioCacheAttempt?
@@ -266,21 +264,18 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
 
     nonisolated func now() -> Date { Date() }
 
-    public init(database: any MusicNativeLibraryStoring, scripts: (any MusicScriptResolving)? = nil,
+    public init(database: MusicNativeLibraryDatabase, scripts: (any MusicScriptResolving)? = nil,
                 accounts: (any MusicNativeAccountProviding)? = nil, platformClient: MusicPlatformClient,
-                sourceDiscovery: (any MusicSourceDiscoveryCaching)? = nil,
+                sourceDiscovery: MusicNativePersistentSourceDiscoveryCache,
                 enabledPlatforms: Set<MusicPublicBrowsePlatform> = Set(MusicPublicBrowsePlatform.allCases),
-                homeSnapshot: (any MusicHomeSnapshotStoring)? = nil,
+                homeSnapshot: MusicNativeHomeSnapshotStorage? = nil,
                 audioFileCache: (any MusicAudioFileCaching)? = nil,
                 presentationCache: (any MusicPresentationCaching)? = nil) {
-        guard let engine = database as? any MusicNativeLibraryEngine else {
-            preconditionFailure("Unsupported MusicNativeLibraryStoring implementation")
-        }
-        self.database = engine
+        self.database = database
         self.scripts = scripts; self.accounts = accounts; self.homeSnapshot = homeSnapshot
         self.audioFileCache = audioFileCache
         self.presentationCache = presentationCache
-        self.sourceDiscovery = sourceDiscovery ?? MusicNativeMemorySourceDiscoveryCache()
+        self.sourceDiscovery = sourceDiscovery
         playbackFeedback = MusicNativeFeedbackController()
         self.enabledPlatforms = enabledPlatforms
         publicPlatforms = MusicNativePlatforms(client: platformClient)

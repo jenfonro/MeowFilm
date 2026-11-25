@@ -318,8 +318,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   function readSource(version) {
     const bytes = sourceFiles.read(`sources/${version.contentHash}.js`);
-    requireValue(bytes, 'CORRUPT_STORAGE');
-    requireValue(bytes.length === version.bytes && digest(bytes) === version.contentHash, 'CORRUPT_STORAGE');
+    requireValue(bytes && bytes.length === version.bytes, 'CORRUPT_STORAGE');
     return decode(bytes);
   }
   async function fetchSource(url, signal, id) {
@@ -646,10 +645,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     });
     return { item: view(find(item.id)) };
   }
-  function success(value) {
-    validateJSONValue(value);
-    return { ok: true, contract: musicScriptContract, value };
-  }
+  const success = value => ({ ok: true, contract: musicScriptContract, value });
   const failure = error => ({ ok: false, contract: musicScriptContract, code: errorCode(error) });
   function business(allowed, required, body) {
     return async (parameters = {}, context = {}, debugHook) => {
@@ -659,8 +655,8 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         requireValue(signal === undefined || signal instanceof AbortSignal);
         await ready;
         guard(signal); fields(parameters, required ?? allowed);
-        const captured = snapshot(Object.fromEntries(allowed
-          .filter(key => Object.hasOwn(parameters, key)).map(key => [key, parameters[key]])));
+        const captured = Object.fromEntries(allowed
+          .filter(key => Object.hasOwn(parameters, key)).map(key => [key, parameters[key]]));
         const scoped = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
         const result = await body(captured, scoped);
         guard(scoped);

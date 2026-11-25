@@ -20,7 +20,7 @@ internal sealed class MusicLibrarySession
     private bool playbackModeLoaded, playbackModeDirty;
     private MusicPlaybackModeRecord? playbackModeCurrent;
 
-    private bool onlineSettingsLoaded, onlineSettingsDirty;
+    private bool onlineSettingsLoaded;
     private MusicOnlineSettingsRecord? onlineSettingsCurrent;
 
     private bool deviceSettingsLoaded, deviceSettingsDirty;
@@ -191,14 +191,6 @@ internal sealed class MusicLibrarySession
             onlineSettingsLoaded = true;
         }
         return onlineSettingsCurrent;
-    }
-
-    internal void SetOnlineSettings(MusicOnlineSettingsRecord next)
-    {
-        RequireWritable();
-        onlineSettingsCurrent = next;
-        onlineSettingsLoaded = true;
-        onlineSettingsDirty = true;
     }
 
     internal MusicDeviceSettingsRecord? ReadDeviceSettings()
@@ -470,7 +462,6 @@ internal sealed class MusicLibrarySession
         HistoryPlaylists = historyPlaylistMutations.ToArray(),
         HistoryDays = historyDayMutations.ToArray(),
         PlaybackMode = playbackModeDirty ? playbackModeCurrent : null,
-        OnlineSettings = onlineSettingsDirty ? onlineSettingsCurrent : null,
         DeviceSettings = deviceSettingsDirty ? deviceSettingsCurrent : null,
         Appearance = appearanceDirty ? appearanceCurrent : null,
         CatalogSource = catalogSourceDirty ? catalogSourceCurrent : null,

@@ -83,7 +83,6 @@ public sealed partial class MusicAccountsController : MusicController
     internal Task AccountSettlementTask => accountSettlement;
     internal bool CanEditFeedback => settings.CanEditFeedback;
 
-    internal void MarkAccountObserved() => Interlocked.Increment(ref accountObservation);
     internal void MarkAccountsStale() => accountsLoaded = false;
     internal bool HasSettledCurrentAccount(string platform) => accountsLoaded &&
         loadedAccountObservation == Volatile.Read(ref accountObservation) &&
@@ -159,12 +158,9 @@ public sealed partial class MusicAccountsController : MusicController
 
     private static MusicPlatformAccount AccountRow(MusicAccountStatusRecord item)
     {
-        MusicDto.Require(item.Platform is "wy" or "tx" or "kg");
         string name = MusicPlatformInfo.DisplayName(item.Platform);
-        MusicDto.Require(item.State is "none" or "saved" or "verified" or "revoked");
         if (item.Profile is not { } profile)
             return new(item.Platform, name, item.State, Generation: item.Generation);
-        MusicDto.Require(profile.Platform == item.Platform && !string.IsNullOrEmpty(profile.UserId));
         return new(item.Platform, name, item.State,
             string.IsNullOrEmpty(profile.DisplayName) ? profile.UserId : profile.DisplayName,
             profile.UserId, item.Generation);
@@ -175,7 +171,7 @@ public sealed partial class MusicAccountsController : MusicController
         int index = -1;
         for (int i = 0; i < Accounts.Count; i++)
             if (Accounts[i].Platform == value.Platform) { index = i; break; }
-        MusicDto.Require(index >= 0);
+        if (index < 0) return;
         if (!Equals(Accounts[index], value))
         {
             bool selected = selectedAccount?.Platform == value.Platform;
@@ -253,9 +249,7 @@ public sealed partial class MusicAccountsController : MusicController
                 try
                 {
                     var reply = await application.ListAccountsAsync(request.Token);
-                    MusicDto.Require(reply.Items.Count == 3);
                     var rows = reply.Items.Select(AccountRow).ToArray();
-                    MusicDto.Require(rows.Select(item => item.Platform).Distinct().Count() == 3);
                     if (epoch != accountEpoch || observation != Volatile.Read(ref accountObservation) || stopping && !allowStopping) return;
                     foreach (var row in rows) UpdateAccount(row, notify: false);
                     accountsLoaded = true;
@@ -341,9 +335,7 @@ public sealed partial class MusicAccountsController : MusicController
                     : await invoke(cancellation.Token);
                 if (stopping || epoch != accountEpoch) return;
                 if (handle(reply) is not { } account) return;
-                var row = AccountRow(account);
-                MusicDto.Require(row.Platform == platform);
-                UpdateAccount(row);
+                UpdateAccount(AccountRow(account));
                 accountsLoaded = false;
                 changedAccount = true;
                 if (operation == "sms.login") ClearAccountSms();

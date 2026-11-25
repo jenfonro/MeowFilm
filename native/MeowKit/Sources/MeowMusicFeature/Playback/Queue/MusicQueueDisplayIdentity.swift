@@ -16,12 +16,10 @@ public struct MusicQueueDisplayIdentity: Codable, Equatable, Sendable {
     }
 
     public func matches(_ current: MusicQueueDisplayIdentity?) -> Bool {
-        guard let current, !songID.isEmpty, songID.utf8.elementsEqual(current.songID.utf8) else { return false }
+        guard let current, !songID.isEmpty, songID == current.songID else { return false }
         if !sourceType.isEmpty || !sourceID.isEmpty {
-            return sourceType.utf8.elementsEqual(current.sourceType.utf8) &&
-                sourceID.utf8.elementsEqual(current.sourceID.utf8)
+            return sourceType == current.sourceType && sourceID == current.sourceID
         }
-        return !hasContext && !current.hasContext && !occurrenceID.isEmpty &&
-            occurrenceID.utf8.elementsEqual(current.occurrenceID.utf8)
+        return !hasContext && !current.hasContext && !occurrenceID.isEmpty && occurrenceID == current.occurrenceID
     }
 }

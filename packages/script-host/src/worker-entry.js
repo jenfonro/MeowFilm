@@ -2,13 +2,11 @@ import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { parentPort, workerData } from 'node:worker_threads';
 import { CatSession } from './cat-session.js';
 import { ownedExtension } from './cat-output.js';
-import { cancel, decodeWorkerPayload, encodeWorkerPayload, event, failure, request, response, validateMessage } from './worker-protocol.js';
+import { decodeWorkerPayload, encodeWorkerPayload, event, failure, response, validateMessage } from './worker-protocol.js';
 import { clone, fault, safeError } from './errors.js';
 
 if (workerData.protocol !== 'cat') throw fault('UNSUPPORTED_PROTOCOL');
 const sessions = new Map();
-let nextAdapterId = 1;
-const adapterPending = new Map();
 const cancellableRequests = new Map();
 let latestSettings;
 let latestAggregate;
@@ -20,41 +18,6 @@ function send(message, transfer = []) {
 function emit(name, value) {
   try { send(event(name, value)); }
   catch { /* Event delivery cannot outlive a worker that is already closing. */ }
-}
-
-function adapterCall(method, params, signal) {
-  const id = nextAdapterId++;
-  return new Promise((resolve, reject) => {
-    const entry = { resolve, reject, signal, abort: null, network: method === 'network' };
-    entry.abort = () => {
-      if (!adapterPending.delete(id)) return;
-      signal?.removeEventListener('abort', entry.abort);
-      const reason = safeError(signal?.reason ?? fault('CANCELLED'), 'CANCELLED');
-      try { send(cancel(id, reason.code)); }
-      catch { /* The parent may already be stopping this worker. */ }
-      reject(reason);
-    };
-    if (signal?.aborted) { reject(fault('CANCELLED')); return; }
-    adapterPending.set(id, entry);
-    signal?.addEventListener('abort', entry.abort, { once: true });
-    try { send(request(id, method, params)); }
-    catch (error) {
-      adapterPending.delete(id);
-      signal?.removeEventListener('abort', entry.abort);
-      reject(safeError(error));
-    }
-  });
-}
-
-function networkAdapter(input) {
-  const signal = input.signal;
-  if (!signal) throw fault('PERMISSION_DENIED');
-  return adapterCall('network', {
-    associationId: input.associationId,
-    url: input.url,
-    options: clone(input.options ?? {}),
-    scope: clone(input.scope ?? {}),
-  }, signal);
 }
 
 function makeCancellable(message, start) {
@@ -93,12 +56,11 @@ function applySettingsSnapshot(value) {
 }
 
 function createSession(spec) {
-  const { dataRoot, settings, aggregate, protocol, network,
+  const { dataRoot, settings, aggregate, protocol,
     observeScriptErrors, ...input } = spec;
   let session;
   session = new CatSession({
     ...input, dataRoot, settings, aggregate,
-    network: spec.network ? networkAdapter : undefined,
     onDiagnostic: value => emit('diagnostic', sessionEvent(session, value)),
     onScriptError: spec.observeScriptErrors
       ? value => emit('scriptError', sessionEvent(session, value)) : undefined,
@@ -179,21 +141,6 @@ parentPort.on('message', raw => {
     cancellableRequests.get(message.id)?.controller.abort(fault(message.code));
     return;
   }
-  if (message.kind === 'response') {
-    const entry = adapterPending.get(message.id);
-    if (!entry) return;
-    adapterPending.delete(message.id);
-    entry.signal?.removeEventListener('abort', entry.abort);
-    if (message.ok) {
-      const body = message.value?.body;
-      if (entry.network) {
-        entry.resolve({ ...message.value, ...(body ? { body: Buffer.from(body) } : {}) });
-      } else {
-        entry.resolve(message.value);
-      }
-    } else entry.reject(fault(message.code));
-    return;
-  }
   if (message.kind !== 'request') return;
   Promise.resolve().then(async () => {
     switch (message.method) {
@@ -211,9 +158,8 @@ parentPort.on('message', raw => {
         });
       case 'invoke': {
         const session = sessionFor(message.params);
-        const associationId = message.params.options.associationId;
         return makeCancellable(message, signal => session.invoke(message.params.request, {
-          ...message.params.options, signal, associationId,
+          ...message.params.options, signal,
         })).then(value => catResult(value, session.takeNewProxies()))
           .finally(() => emit('stats', sessionEvent(session, session.stats())));
       }

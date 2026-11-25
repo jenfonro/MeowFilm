@@ -49,16 +49,16 @@ public sealed partial class MusicCapability :
         var catalogActions = new MusicCatalogActionState();
         var contentState = new MusicContentState(ctx, catalogActions);
 
-        // Strict acyclic topological DAG construction (Layer 1 -> Layer 7).
+        // Strict acyclic topological DAG construction (Layer 1 -> Layer 5).
         Settings = new(ctx);
         Accounts = new(ctx, Settings);
         Playback = new(ctx, Settings, catalogActions, contentState);
         Lyrics = new(ctx, Settings, Playback);
         Queue = new(ctx, Playback, Accounts, catalogActions);
+        Discovery = new(ctx, Settings, Playback, catalogActions);
         Search = new(ctx, Settings, Accounts, catalogActions, contentState);
-        Catalog = new(ctx, Settings, Accounts, Playback, Queue, Search, catalogActions, contentState);
-        Discovery = new(ctx, Settings, Playback, Catalog, Search, catalogActions);
-        Library = new(ctx, Catalog, Search, Discovery, Playback, Queue, catalogActions, contentState);
+        Catalog = new(ctx, Settings, Accounts, Playback, Queue, catalogActions, contentState);
+        Library = new(ctx, Catalog, Playback, Queue, catalogActions, contentState);
         debugAdapter = new(this);
 
         SubscribeDomainEvents();
@@ -200,7 +200,7 @@ public sealed partial class MusicCapability :
                     Playback.RefreshSongsFromRepository(ids, Read, snapshot.Publication);
                     Library.RefreshSongsFromRepository(ids, Read, snapshot.Publication);
                     Search.RefreshSongsFromRepository(ids, Read, snapshot.Publication);
-                    Catalog.RefreshSongsFromRepository(ids, Read, snapshot.Publication, Search.CachedSearchCards());
+                    Catalog.RefreshSongsFromRepository(ids, Read, snapshot.Publication);
                     Queue.RefreshSongsFromRepository(ids, Read, snapshot.Publication);
                     Discovery.RefreshSongsFromRepository(ids, Read, snapshot.Publication);
                 }
@@ -287,6 +287,10 @@ public sealed partial class MusicCapability :
             Playback.RefreshAvailability();
             Library.RefreshAvailability();
         };
+        Library.ActiveSurfaceRefreshRequested += () =>
+            Discovery.IsDiscovery ? Discovery.RefreshDiscoveryAsync() :
+            Search.IsSearchPage ? Search.BeginSearchAsync(Search.SearchKeyword, ctx.Lifetime.Token, refresh: true) :
+            Catalog.RefreshCatalogAsync();
 
         // Layer 1 (Settings) -> upper layers
         Settings.PlatformSettingsActivating += Accounts.ActivatePlatformSettingsAsync;
@@ -382,13 +386,16 @@ public sealed partial class MusicCapability :
         Queue.PlaylistsChanged += token => Library.RefreshPlaylists(token);
         Queue.RecommendationActionError += Catalog.PublishCatalogActionError;
 
-        // Layer 4 (Search) -> upper layers
+        // Layer 3 (Discovery) -> upper layers
+        Discovery.DiscoveryLoading += Catalog.ClearCatalogSectionsAndTags;
+        Discovery.CatalogTargetRequested += Catalog.OpenCatalogTargetAsync;
+
+        // Layer 4 (Search & Catalog) -> peer / upper layers
         Search.CatalogPreviewSurfaceRetiring += Catalog.RetireCatalogPreviewSurface;
         Search.SearchSessionStarted += Catalog.BeginSearchCatalogState;
         Search.SearchMetadataPublished += Catalog.PublishSearchCatalogMetadata;
         Search.CatalogTagsClearing += Catalog.ClearCatalogTags;
-
-        // Layer 5 (Catalog) -> upper layers
+        Catalog.SessionRetiring += Search.RetireSearchTracked;
         Catalog.PlaylistsChanged += token => Library.RefreshPlaylists(token);
         Catalog.SongAppendNextRequested += song => Library.AppendSongNextAsync(song);
         Catalog.SongFavoriteRequested += (song, toggle) =>

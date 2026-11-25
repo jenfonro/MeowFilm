@@ -76,26 +76,6 @@ internal sealed class MusicRuntimeContext
     internal HashSet<Task> LoadDrains { get; } = [];
     internal void AddEventWrite(Task work) { lock (eventWritesGate) eventWrites.Add(work); }
     internal void RemoveEventWrite(Task work) { lock (eventWritesGate) eventWrites.Remove(work); }
-    internal void TrackEventWrite(Func<Task> action)
-    {
-        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (eventWritesGate) eventWrites.Add(tcs.Task);
-        _ = Run();
-        async Task Run()
-        {
-            try { await action().ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
-            catch (Exception error)
-            {
-                DebugLog.Warn(DebugCategories.MusicLibrary, "eventWrite", "failed", error: error);
-            }
-            finally
-            {
-                lock (eventWritesGate) eventWrites.Remove(tcs.Task);
-                tcs.TrySetResult();
-            }
-        }
-    }
     internal Task[] SnapshotEventWrites() { lock (eventWritesGate) return eventWrites.ToArray(); }
     internal Dictionary<string, MusicLocation> Locations { get; } = [];
     internal MusicLocation CurrentLocation { get; set; } = new("catalog-home");

@@ -219,12 +219,6 @@ public sealed partial class ManagementList : UserControl
         AutomationProperties.SetName(button, title); button.Click += (_, _) => action(); return button;
     }
 
-    public static Button RowButton(string title, Action action, string styleKey = "MeowFilm.ManagementRowButton")
-    {
-        var button = new Button { Content = title, Style = DesktopVisual.TryAppStyle(styleKey) };
-        AutomationProperties.SetName(button, title); button.Click += (_, _) => action(); return button;
-    }
-
     public static void OpenMenu(Button button) => (button.ContextFlyout as MenuFlyout)?.ShowAt(button, new FlyoutShowOptions { Placement = FlyoutPlacementMode.Bottom });
 }
 

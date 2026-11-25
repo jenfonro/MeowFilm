@@ -150,6 +150,32 @@ public sealed partial class MusicNativeApplication
         RunAdmittedAsync(token => scripts.ResolveOnlineAsync(
             installationId, platform, song, quality, sourceKey, manualSource, qualityPolicySignature, qualityCacheSignature, token), ct);
 
+    private Task<T> InLaneAsync<T>(Func<MusicLibraryOwner, CancellationToken, Task<T>> action, CancellationToken ct) =>
+        RunAdmittedAsync(token => recommendationQueue.InLaneAsync(action, token), ct);
+
+    private Task InLaneVoidAsync(Func<MusicLibraryOwner, CancellationToken, Task> action, CancellationToken ct) =>
+        InLaneAsync(async (owner, inner) => { await action(owner, inner).ConfigureAwait(false); return true; }, ct);
+
+    private Task<T> InLaneLyricsMutationAsync<T>(Func<MusicLibraryOwner, CancellationToken, Task<T>> action, CancellationToken ct) =>
+        RunAdmittedAsync(async token =>
+        {
+            lyrics.Invalidate();
+            try { return await recommendationQueue.InLaneAsync(action, token).ConfigureAwait(false); }
+            finally { lyrics.Invalidate(); }
+        }, ct);
+
+    private Task<T> InLaneSaveMatchesAsync<T>(Func<MusicLibraryOwner, CancellationToken, Task<T>> action, CancellationToken ct) =>
+        RunAdmittedAsync(async token =>
+        {
+            var reply = await recommendationQueue.InLaneAsync(action, token).ConfigureAwait(false);
+            await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
+            return reply;
+        }, ct);
+
+    private Task<T> InQueueAsync<T>(MusicRecommendationQueueChange change, Func<CancellationToken, Task<T>> action, CancellationToken ct)
+        where T : IMusicQueuePosition =>
+        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(change, action, token), ct);
+
     // ---- Lyrics ----
 
     public Task<MusicLyricLookupResult> LookupLyricsAsync(MusicSongRecord song, string? sourceKey = null, CancellationToken ct = default) =>
@@ -165,23 +191,13 @@ public sealed partial class MusicNativeApplication
         }, ct);
 
     public Task<MusicLyricLookupResult> GetLocalLyricsAsync(MusicSongRecord song, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetLocalLyricsAsync(song, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetLocalLyricsAsync(song, inner), ct);
 
     public Task<bool> SaveLocalLyricsAsync(MusicSongRecord song, string text, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            lyrics.Invalidate();
-            try { return await recommendationQueue.InLaneAsync((owner, inner) => owner.SaveLocalLyricsAsync(song, text, inner), token).ConfigureAwait(false); }
-            finally { lyrics.Invalidate(); }
-        }, ct);
+        InLaneLyricsMutationAsync((owner, inner) => owner.SaveLocalLyricsAsync(song, text, inner), ct);
 
     public Task<bool> RemoveLocalLyricsAsync(MusicSongRecord song, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            lyrics.Invalidate();
-            try { return await recommendationQueue.InLaneAsync((owner, inner) => owner.RemoveLocalLyricsAsync(song, inner), token).ConfigureAwait(false); }
-            finally { lyrics.Invalidate(); }
-        }, ct);
+        InLaneLyricsMutationAsync((owner, inner) => owner.RemoveLocalLyricsAsync(song, inner), ct);
 
     public Task<MusicLyricLookupResult> GetDisplayLyricsAsync(MusicSongRecord song, string? sourceKey = null, CancellationToken ct = default) =>
         RunAdmittedAsync(token => library.GetDisplayLyricsAsync(song, sourceKey, token), ct);
@@ -192,223 +208,160 @@ public sealed partial class MusicNativeApplication
     // ---- Settings & Source Exclusions ----
 
     public Task<MusicOnlineSettingsRecord> GetOnlineSettingsAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetOnlineSettingsAsync(inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetOnlineSettingsAsync(inner), ct);
 
     public Task<MusicMetadataPolicyRecord> GetMetadataPolicyAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetMetadataPolicyAsync(inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetMetadataPolicyAsync(inner), ct);
 
     public Task<MusicMetadataPolicyRecord> SaveMetadataPolicyAsync(long ifRevision, string[] platforms, string[] enabled, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            lyrics.Invalidate();
-            try { return await recommendationQueue.InLaneAsync((owner, inner) => owner.SaveMetadataPolicyAsync(ifRevision, platforms, enabled, inner), token).ConfigureAwait(false); }
-            finally { lyrics.Invalidate(); }
-        }, ct);
+        InLaneLyricsMutationAsync((owner, inner) => owner.SaveMetadataPolicyAsync(ifRevision, platforms, enabled, inner), ct);
 
     public Task<MusicAppearanceRecord> GetAppearanceAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetAppearanceAsync(inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetAppearanceAsync(inner), ct);
 
     public Task<MusicAppearanceRecord> SaveAppearanceAsync(long ifRevision, string playlistView, string playerTheme,
         string colorMode, string colorPalette, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) =>
-            owner.SaveAppearanceAsync(ifRevision, playlistView, playerTheme, colorMode, colorPalette, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.SaveAppearanceAsync(ifRevision, playlistView, playerTheme, colorMode, colorPalette, inner), ct);
 
     public Task<MusicCatalogSourceRecord> GetCatalogSourceAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetCatalogSourceAsync(inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetCatalogSourceAsync(inner), ct);
 
     public Task<MusicCatalogSourceRecord> SaveCatalogSourceAsync(long ifRevision, string platform, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.SaveCatalogSourceAsync(ifRevision, platform, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.SaveCatalogSourceAsync(ifRevision, platform, inner), ct);
 
     public Task<MusicDeviceSettingsRecord> GetDeviceSettingsAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetDeviceSettingsAsync(inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetDeviceSettingsAsync(inner), ct);
 
     public Task<MusicDeviceSettingsRecord> SaveDeviceSettingsAsync(long ifRevision, int volume, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.SaveDeviceSettingsAsync(ifRevision, volume, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.SaveDeviceSettingsAsync(ifRevision, volume, inner), ct);
 
     public Task<MusicDesktopLyricsRecord> GetDesktopLyricsAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetDesktopLyricsAsync(inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetDesktopLyricsAsync(inner), ct);
 
     public Task<MusicDesktopLyricsRecord> SaveDesktopLyricsAsync(long ifRevision, string layout, string normalColor,
         string highlightColor, MusicDesktopLyricsGeometryRecord? geometry = null, bool includeGeometry = false, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) =>
-            owner.SaveDesktopLyricsAsync(ifRevision, layout, normalColor, highlightColor, geometry, includeGeometry, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.SaveDesktopLyricsAsync(ifRevision, layout, normalColor, highlightColor, geometry, includeGeometry, inner), ct);
 
     public Task<MusicOfficialSourcesRecord> GetOfficialSourcesAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetOfficialSourcesAsync(inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetOfficialSourcesAsync(inner), ct);
 
     public Task<MusicOfficialSourcesRecord> SaveOfficialSourcesAsync(long ifRevision, string[] enabled, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.SaveOfficialSourcesAsync(ifRevision, enabled, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.SaveOfficialSourcesAsync(ifRevision, enabled, inner), ct);
 
     public Task<MusicQualitySettingsResult> GetQualityPolicyAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetQualityPolicyAsync(inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetQualityPolicyAsync(inner), ct);
 
     public Task<MusicQualitySettingsResult> SaveQualityPolicyAsync(long ifRevision, string request, string[] qualityOrder,
         string[] qualityEnabled, string[] spatialOrder, string[] spatialEnabled, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) =>
-            owner.SaveQualityPolicyAsync(ifRevision, request, qualityOrder, qualityEnabled, spatialOrder, spatialEnabled, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.SaveQualityPolicyAsync(ifRevision, request, qualityOrder, qualityEnabled, spatialOrder, spatialEnabled, inner), ct);
 
     public Task<MusicSourceExclusionListResult> ListSourceExclusionsAsync(string? songId = null,
         MusicSourceExclusionTier? tier = null, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.ListSourceExclusionsAsync(songId, tier, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.ListSourceExclusionsAsync(songId, tier, inner), ct);
 
     public Task<MusicSourceExclusionChangeResult> AddSourceExclusionAsync(string songId, string provider, string platform,
         string providerName, string title, string artist, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) =>
-            owner.AddSourceExclusionAsync(songId, provider, platform, providerName, title, artist, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.AddSourceExclusionAsync(songId, provider, platform, providerName, title, artist, inner), ct);
 
     public Task<MusicSourceExclusionChangeResult> RemoveSourceExclusionAsync(string songId, string provider, string platform,
         CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) =>
-            owner.RemoveSourceExclusionAsync(songId, provider, platform, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.RemoveSourceExclusionAsync(songId, provider, platform, inner), ct);
 
     public Task<MusicSourceExclusionChangeResult> AddRecordingExclusionAsync(string songId, string sourceKey, string platform,
         string providerName, string title, string artist, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) =>
-            owner.AddRecordingExclusionAsync(songId, sourceKey, platform, providerName, title, artist, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.AddRecordingExclusionAsync(songId, sourceKey, platform, providerName, title, artist, inner), ct);
 
     public Task<MusicSourceExclusionChangeResult> RemoveRecordingExclusionAsync(string songId, string sourceKey, string platform,
         CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) =>
-            owner.RemoveRecordingExclusionAsync(songId, sourceKey, platform, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.RemoveRecordingExclusionAsync(songId, sourceKey, platform, inner), ct);
 
     // ---- Library Collections & Network Playlists ----
 
     public Task<MusicCollectionsPage> ListCollectionsAsync(long offset = 0, int limit = 50, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.ListCollectionsAsync(offset, limit, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.ListCollectionsAsync(offset, limit, inner), ct);
 
     public Task<MusicCollectionDetail> GetCollectionDetailAsync(string id, long offset = 0, int limit = 50, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetCollectionDetailAsync(id, offset, limit, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetCollectionDetailAsync(id, offset, limit, inner), ct);
 
     public Task<MusicCollectionMembership> GetCollectionMembershipAsync(string id, MusicSongRecord song, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetCollectionMembershipAsync(id, song, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetCollectionMembershipAsync(id, song, inner), ct);
 
     public Task<MusicLibrarySearchPage> SearchLibraryAsync(string query, long offset = 0, int limit = 50, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.SearchLibraryAsync(query, offset, limit, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.SearchLibraryAsync(query, offset, limit, inner), ct);
 
     public Task<MusicCollectionSummaryRecord> CreatePlaylistAsync(string name, IReadOnlyList<MusicSongRecord>? songs = null, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            var reply = await recommendationQueue.InLaneAsync((owner, inner) => owner.CreatePlaylistAsync(name, songs, inner), token).ConfigureAwait(false);
-            await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
-            return reply;
-        }, ct);
+        InLaneSaveMatchesAsync((owner, inner) => owner.CreatePlaylistAsync(name, songs, inner), ct);
 
     public Task<bool> RemoveCollectionAsync(string id, long ifRevision, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            var reply = await recommendationQueue.InLaneAsync((owner, inner) => owner.RemoveCollectionAsync(id, ifRevision, inner), token).ConfigureAwait(false);
-            await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
-            return reply;
-        }, ct);
+        InLaneSaveMatchesAsync((owner, inner) => owner.RemoveCollectionAsync(id, ifRevision, inner), ct);
 
     public Task<MusicCollectionSummaryRecord> EditCollectionAsync(string id, long ifRevision, string? name = null,
         IReadOnlyList<MusicSongRecord>? songs = null, string[]? order = null, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            var reply = await recommendationQueue.InLaneAsync((owner, inner) => owner.EditCollectionAsync(id, ifRevision, name, songs, order, inner), token).ConfigureAwait(false);
-            await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
-            return reply;
-        }, ct);
+        InLaneSaveMatchesAsync((owner, inner) => owner.EditCollectionAsync(id, ifRevision, name, songs, order, inner), ct);
 
     public Task<MusicCollectionSummaryRecord> AddSongsToCollectionAsync(string id, long ifRevision, IReadOnlyList<MusicSongRecord> songs, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            var reply = await recommendationQueue.InLaneAsync((owner, inner) => owner.AddSongsToCollectionAsync(id, ifRevision, songs, inner), token).ConfigureAwait(false);
-            await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
-            return reply;
-        }, ct);
+        InLaneSaveMatchesAsync((owner, inner) => owner.AddSongsToCollectionAsync(id, ifRevision, songs, inner), ct);
 
     public Task<MusicCollectionSummaryRecord> RemoveSongFromCollectionAsync(string id, long ifRevision, string songId, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            var reply = await recommendationQueue.InLaneAsync((owner, inner) => owner.RemoveSongFromCollectionAsync(id, ifRevision, songId, inner), token).ConfigureAwait(false);
-            await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
-            return reply;
-        }, ct);
+        InLaneSaveMatchesAsync((owner, inner) => owner.RemoveSongFromCollectionAsync(id, ifRevision, songId, inner), ct);
 
     public Task<MusicCollectionSummaryRecord> ReorderSongInCollectionAsync(string id, long ifRevision, string songId, string targetId, bool after, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) =>
-            owner.ReorderSongInCollectionAsync(id, ifRevision, songId, targetId, after, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.ReorderSongInCollectionAsync(id, ifRevision, songId, targetId, after, inner), ct);
 
     public Task<MusicNetworkPlaylistMutationResult> RemoveNetworkPlaylistAsync(string id, long ifRevision, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.RemoveNetworkPlaylistAsync(id, ifRevision, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.RemoveNetworkPlaylistAsync(id, ifRevision, inner), ct);
 
     // ---- Queue & History ----
 
     public Task<MusicQueuePageResult> GetQueueAsync(long offset = 0, int limit = 50, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetQueueAsync(offset, limit, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetQueueAsync(offset, limit, inner), ct);
 
     public Task<MusicQueuePositionResult> SetPlaybackModeAsync(int mode, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(
-            MusicRecommendationQueueChange.Mode, inner => library.SetPlaybackModeAsync(mode, inner), token), ct);
+        InQueueAsync(MusicRecommendationQueueChange.Mode, inner => library.SetPlaybackModeAsync(mode, inner), ct);
 
     public Task<MusicQueuePeekResult> PeekNextQueueAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.PeekNextQueueAsync(inner), token), ct);
+        InLaneAsync((owner, inner) => owner.PeekNextQueueAsync(inner), ct);
 
     public Task<MusicQueuePositionResult> PlayCollectionAsync(string id, long ifRevision, int index, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(
-            MusicRecommendationQueueChange.Replace, inner => library.PlayCollectionAsync(id, ifRevision, index, inner), token), ct);
+        InQueueAsync(MusicRecommendationQueueChange.Replace, inner => library.PlayCollectionAsync(id, ifRevision, index, inner), ct);
 
     public Task<MusicQueuePositionResult> ReplaceQueueAsync(IReadOnlyList<MusicSongRecord> songs, int index,
         MusicPlayContextRecord? context = null, MusicQueueSourceRecord? queueSource = null,
         long? expectedVersion = null, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(
-            MusicRecommendationQueueChange.Replace, inner => library.ReplaceQueueAsync(songs, index, context, queueSource, expectedVersion, inner), token), ct);
+        InQueueAsync(MusicRecommendationQueueChange.Replace, inner => library.ReplaceQueueAsync(songs, index, context, queueSource, expectedVersion, inner), ct);
 
     public Task<MusicQueueAppendResult> AppendQueueAsync(IReadOnlyList<MusicSongRecord> songs,
         MusicPlayContextRecord? context = null, bool next = false, long? expectedVersion = null, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(
-            next ? MusicRecommendationQueueChange.PlayNext : MusicRecommendationQueueChange.Append,
-            inner => library.AppendQueueAsync(songs, context, next, expectedVersion, inner), token), ct);
+        InQueueAsync(next ? MusicRecommendationQueueChange.PlayNext : MusicRecommendationQueueChange.Append,
+            inner => library.AppendQueueAsync(songs, context, next, expectedVersion, inner), ct);
 
     public Task<MusicQueuePositionResult> SelectQueueEntryAsync(string id, bool remember = true, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(
-            MusicRecommendationQueueChange.Selection, inner => library.SelectQueueEntryAsync(id, remember, inner), token), ct);
+        InQueueAsync(MusicRecommendationQueueChange.Selection, inner => library.SelectQueueEntryAsync(id, remember, inner), ct);
 
     public Task<MusicQueueRemoveResult> RemoveQueueEntryAsync(string id, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(
-            MusicRecommendationQueueChange.Remove, inner => library.RemoveQueueEntryAsync(id, inner), token), ct);
+        InQueueAsync(MusicRecommendationQueueChange.Remove, inner => library.RemoveQueueEntryAsync(id, inner), ct);
 
     public Task<MusicQueuePositionResult> ClearQueueAsync(CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(
-            MusicRecommendationQueueChange.Clear, inner => library.ClearQueueAsync(inner), token), ct);
+        InQueueAsync(MusicRecommendationQueueChange.Clear, inner => library.ClearQueueAsync(inner), ct);
 
     public Task<MusicQueueStepResult> StepQueueAsync(int direction, int? modeOverride = null, string reason = "manual", CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(
-            MusicRecommendationQueueChange.Selection, inner => library.StepQueueAsync(direction, modeOverride, reason, inner), token), ct);
+        InQueueAsync(MusicRecommendationQueueChange.Selection, inner => library.StepQueueAsync(direction, modeOverride, reason, inner), ct);
 
     public Task<MusicHistoryPlaylistsPage> ListHistoryPlaylistsAsync(long offset = 0, int limit = 50, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.ListHistoryPlaylistsAsync(offset, limit, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.ListHistoryPlaylistsAsync(offset, limit, inner), ct);
 
     public Task<MusicHistoryDaysPage> ListHistoryDaysAsync(long offset = 0, int limit = 50, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.ListHistoryDaysAsync(offset, limit, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.ListHistoryDaysAsync(offset, limit, inner), ct);
 
     public Task<MusicHistoryDayDetail> GetHistoryDayDetailAsync(string id, long offset = 0, int limit = 50, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.InLaneAsync((owner, inner) => owner.GetHistoryDayDetailAsync(id, offset, limit, inner), token), ct);
+        InLaneAsync((owner, inner) => owner.GetHistoryDayDetailAsync(id, offset, limit, inner), ct);
 
     public Task RemoveHistoryPlaylistAsync(string id, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            await recommendationQueue.InLaneAsync(async (owner, inner) =>
-            {
-                await owner.RemoveHistoryPlaylistAsync(id, inner).ConfigureAwait(false);
-                return true;
-            }, token).ConfigureAwait(false);
-            return true;
-        }, ct);
+        InLaneVoidAsync((owner, inner) => owner.RemoveHistoryPlaylistAsync(id, inner), ct);
 
     public Task<MusicQueuePositionResult> RestoreHistoryPlaylistAsync(string id, CancellationToken ct = default) =>
-        RunAdmittedAsync(token => recommendationQueue.ExecuteExternalAsync(
-            MusicRecommendationQueueChange.Restore, inner => library.RestoreHistoryPlaylistAsync(id, inner), token), ct);
+        InQueueAsync(MusicRecommendationQueueChange.Restore, inner => library.RestoreHistoryPlaylistAsync(id, inner), ct);
 
     public Task RecordPlayedHistoryAsync(string entryId, long atMs, CancellationToken ct = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            await recommendationQueue.InLaneAsync(async (owner, inner) =>
-            {
-                await owner.RecordPlayedHistoryAsync(entryId, atMs, inner).ConfigureAwait(false);
-                return true;
-            }, token).ConfigureAwait(false);
-            return true;
-        }, ct);
+        InLaneVoidAsync((owner, inner) => owner.RecordPlayedHistoryAsync(entryId, atMs, inner), ct);
 }

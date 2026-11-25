@@ -64,15 +64,14 @@ extension NativeMusicService {
     }
 
     public func state() async throws -> MusicPlaybackState {
-        let d = try read(); try d.requireQueue(); try d.requireRevision(.playback)
-        return stateDTO(d)
+        try stateDTO(read())
     }
 
     public func queue() async throws -> MusicQueueSnapshot {
-        let d = try read(); try d.requireQueue()
+        let d = try read()
         let rows = d.queue.entries
         let songsByID = try d.referenceSongs(rows.map(\.songID))
-        var tracks: [Data: (song: MusicSongRecord, track: MusicRemoteTrack)] = [:]
+        var tracks: [String: (song: MusicSongRecord, track: MusicRemoteTrack)] = [:]
         return .init(
             revision: d.queue.revision,
             currentId: d.queue.currentID,
@@ -81,7 +80,7 @@ extension NativeMusicService {
                 let id = entry.id
                 let title = MusicModel.firstText(entry.context.sourceTitle, entry.context.playlist, d.queue.source?.title)
                 let ref = MusicReference(kind: .queue, id: id)
-                let key = Data(song.songID.utf8)
+                let key = song.songID
                 let track: MusicRemoteTrack
                 if !key.isEmpty, let cached = tracks[key], cached.song == song {
                     track = .init(ref: ref, songId: cached.track.songId, title: cached.track.title,
@@ -223,9 +222,8 @@ extension NativeMusicService {
             case .reorder(let ids):
                 let rows = d.queue.entries
                 try musicRequire(ids.count == rows.count && Set(ids).count == ids.count && Set(ids) == Set(rows.map(\.id)))
-                var byID: [Data: MusicQueueEntryRecord] = [:]
-                for row in rows { byID[Data(row.id.utf8)] = row }
-                d.queue.entries = ids.map { byID[Data($0.utf8)]! }
+                let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+                d.queue.entries = ids.map { byID[$0]! }
             case .clear:
                 d.queue.entries = []; d.queue.priority = []; d.queue.history = []; d.queue.failed = []
                 d.queue.currentID = nil; d.queue.source = nil

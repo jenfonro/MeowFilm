@@ -5,13 +5,13 @@ using MeowFilm.Core.Debug;
 namespace MeowFilm.Capabilities;
 
 /// <summary>
-/// Standalone non-UI source selection session for one playback intent.
+/// Per-playback-intent source selection session.
 /// Automatic play, manual quality, source list, "load more" and "wrong source" share its attempts;
 /// each tier is exhausted over every eligible source (cache first, then bounded 3-way network probes)
 /// before a later tier is tried.
 /// </summary>
 internal sealed class MusicSourceSession(
-    MusicPlaybackSourceService service,
+    MusicPlaybackController owner,
     SongRow song,
     string signature,
     MusicQualityPolicyRecord policy,
@@ -29,7 +29,7 @@ internal sealed class MusicSourceSession(
     private const long ScriptMediaTtl = 10 * 60 * 1000;
     internal readonly SongRow Song = song;
     internal readonly string Signature = signature;
-    internal readonly long Revision = service.SelectionSourcesRevision;
+    internal readonly long Revision = owner.SelectionSourcesRevision;
     internal readonly MusicQualityPolicyRecord Policy = policy;
     internal readonly MusicQualityPolicy.Tier[] Tiers = MusicQualityPolicy.Tiers(policy);
     internal readonly Dictionary<string, SourceAttempt> Attempts = new(StringComparer.Ordinal);
@@ -82,7 +82,7 @@ internal sealed class MusicSourceSession(
     internal async Task RefreshSongAsync(CancellationToken token)
     {
         RefreshSong();
-        var snapshot = await service.Application.SongSnapshotsAsync([Song.Id], token);
+        var snapshot = await owner.Application.SongSnapshotsAsync([Song.Id], token);
         token.ThrowIfCancellationRequested();
         if (snapshot.Publication > expandedPublication && snapshot.Songs.GetValueOrDefault(Song.Id) is { } value)
             AcceptSong(value, snapshot.Publication);
@@ -90,7 +90,7 @@ internal sealed class MusicSourceSession(
 
     private async Task AcceptReplyAsync(MusicSongRecord value, CancellationToken token)
     {
-        var snapshot = await service.Application.SongSnapshotsAsync([Song.Id], token);
+        var snapshot = await owner.Application.SongSnapshotsAsync([Song.Id], token);
         token.ThrowIfCancellationRequested();
         AcceptSong(snapshot.Songs.GetValueOrDefault(Song.Id) ?? value, snapshot.Publication);
     }
@@ -106,12 +106,12 @@ internal sealed class MusicSourceSession(
         if (scriptsLoaded) return;
         try
         {
-            var list = await service.Application.ListSourcesAsync(token);
+            var list = await owner.Application.ListSourcesAsync(token);
             Scripts = list.Items.Where(item => item.Enabled)
                 .Select(item => new SourceScript(item.InstallationId, item.Name, item.Sites)).ToArray();
             scriptsLoaded = true;
         }
-        catch (MusicOperationException error) when (MusicPlaybackSourceService.UnavailableSourceCandidate(error.Code))
+        catch (MusicOperationException error) when (MusicPlaybackController.UnavailableSourceCandidate(error.Code))
         {
             DebugLog.Warn(DebugCategories.MusicPlayback, "source-session", "scripts-unavailable",
                 new { songId = Song.Id, code = error.Code });
@@ -127,14 +127,14 @@ internal sealed class MusicSourceSession(
         foreach (var pair in previous.Attempts.Where(pair => pair.Value.State == SourceAttemptState.Ok && Fresh(pair.Value) &&
             (!pair.Value.Target.Official || previous.Signature == Signature &&
                 pair.Value.Target.AccountScope is { } scope &&
-                service.Application.IsOfficialPlaybackCurrent(pair.Value.Target.Platform, scope, pair.Value.Target.Generation))))
+                owner.Application.IsOfficialPlaybackCurrent(pair.Value.Target.Platform, scope, pair.Value.Target.Generation))))
             Attempts[pair.Key] = pair.Value;
     }
 
     private async Task LoadHistoryAsync(CancellationToken token)
     {
-        if (historyLoaded || OfficialOnly || service.AudioFileCache is null) return;
-        foreach (var info in await service.AudioFileCache.ReadScriptHistoryAsync(Song.Id, token))
+        if (historyLoaded || OfficialOnly || owner.AudioFileCache is null) return;
+        foreach (var info in await owner.AudioFileCache.ReadScriptHistoryAsync(Song.Id, token))
         {
             RefreshSong();
             string level = info.Quality!;
@@ -176,24 +176,24 @@ internal sealed class MusicSourceSession(
 
     private bool Rejected(MusicOnlineTarget target) =>
         rejected.Contains(AttemptKey(target, target.PolicyRequest)) ||
-        mismatchedRecordings.Contains(MusicPlaybackSourceService.SourceIdentity(target));
+        mismatchedRecordings.Contains(MusicPlaybackController.SourceIdentity(target));
 
-    internal bool CanReuse(ResolvedMusic media) => Revision == service.SelectionSourcesRevision &&
-        Signature == service.Settings.SavedQualitySignature && exclusionsRevision == service.ExclusionsRevision &&
+    internal bool CanReuse(ResolvedMusic media) => Revision == owner.SelectionSourcesRevision &&
+        Signature == owner.Settings.SavedQualitySignature && exclusionsRevision == owner.ExclusionsRevision &&
         !Excluded(media.Target!) && !Rejected(media.Target!);
 
     internal static bool Fresh(SourceAttempt attempt) => attempt.Media is { } media && (media.Uri is null ||
         (media.ExpiresAt ?? attempt.At + ScriptMediaTtl) - 30_000 > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
     private bool Accepts(MusicQualityPolicy.Tier tier, ResolvedMusic media, bool exact) =>
-        tier.Levels.Contains(MusicPlaybackSourceService.EffectiveLevel(media)) || !exact && tier.Levels.Any(level =>
-            MusicQualityPolicy.Priority(MusicPlaybackSourceService.EffectiveLevel(media), Policy) < MusicQualityPolicy.Priority(level, Policy));
+        tier.Levels.Contains(MusicPlaybackController.EffectiveLevel(media)) || !exact && tier.Levels.Any(level =>
+            MusicQualityPolicy.Priority(MusicPlaybackController.EffectiveLevel(media), Policy) < MusicQualityPolicy.Priority(level, Policy));
 
     internal async Task LoadExclusionsAsync(CancellationToken token)
     {
-        long revision = service.ExclusionsRevision;
+        long revision = owner.ExclusionsRevision;
         if (revision == exclusionsRevision) return;
-        var list = await service.Application.ListSourceExclusionsAsync(songId: Song.Id, ct: token);
+        var list = await owner.Application.ListSourceExclusionsAsync(songId: Song.Id, ct: token);
         var next = list.Items.Select(item => new SourceExclusion(item.Provider, item.Platform)).ToHashSet();
         bool restored = exclusions.Except(next).Any();
         exclusions = next;
@@ -210,7 +210,7 @@ internal sealed class MusicSourceSession(
         .Where(attempt => attempt.State == SourceAttemptState.Ok && attempt.Media is { } media &&
             !Excluded(attempt.Target) && !Rejected(attempt.Target) &&
             (!attempt.Target.Official || attempt.Target.AccountScope is { } scope &&
-                service.Application.IsOfficialPlaybackCurrent(attempt.Target.Platform, scope, attempt.Target.Generation)) &&
+                owner.Application.IsOfficialPlaybackCurrent(attempt.Target.Platform, scope, attempt.Target.Generation)) &&
             Fresh(attempt) && Accepts(tier, media, exact))
         .Select(attempt => attempt.Media).FirstOrDefault();
 
@@ -219,7 +219,7 @@ internal sealed class MusicSourceSession(
     internal void ObserveFailure(MusicOnlineTarget target, string code)
     {
         if (code != "CACHE_MISS" && !code.StartsWith("MEDIA_READ_", StringComparison.Ordinal))
-            (MusicPlaybackSourceService.ContentSourceFailure(code) ? contentFailed : otherFailed).Add(target.Platform);
+            (MusicPlaybackController.ContentSourceFailure(code) ? contentFailed : otherFailed).Add(target.Platform);
     }
 
     private void Reject(MusicOnlineTarget target, string code)
@@ -235,7 +235,7 @@ internal sealed class MusicSourceSession(
                 code
             });
         if (code is "RECORDING_MISMATCH" or "IDENTITY_MISMATCH" or "MEDIA_MISMATCH")
-            mismatchedRecordings.Add(MusicPlaybackSourceService.SourceIdentity(target));
+            mismatchedRecordings.Add(MusicPlaybackController.SourceIdentity(target));
         else rejected.Add(AttemptKey(target, target.PolicyRequest));
         foreach (var attempt in Attempts.Values.Where(attempt => Rejected(attempt.Target)))
         { attempt.State = SourceAttemptState.Unavailable; attempt.Code = code; attempt.Media = null; }
@@ -246,10 +246,8 @@ internal sealed class MusicSourceSession(
         RefreshSong();
         string cacheKey = level + (manualSource ? ":manual" : ":automatic");
         if (official.TryGetValue(cacheKey, out var known)) return known;
-        var result = await service.Application.GetOfficialCandidatesAsync(expanded, level, Signature, manualSource, token);
-        MusicDto.Require(result.QualityPolicySignature == Signature);
+        var result = await owner.Application.GetOfficialCandidatesAsync(expanded, level, Signature, manualSource, token);
         var decorated = SongRow.FromRecord(result.Song, Song.EntryId);
-        MusicDto.Require(decorated.Id == Song.Id);
         await AcceptReplyAsync(decorated.Record, token);
         if (preference.Length == 0) preference = result.Candidates.Select(row => row.SourceKey).ToArray();
         var targets = result.Candidates.Select(row => new MusicOnlineTarget(null, row.Platform,
@@ -301,7 +299,7 @@ internal sealed class MusicSourceSession(
         attempt is { State: SourceAttemptState.Ok, Media: { } media } && attempt.Target.Official &&
         attempt.Target.Platform == target.Platform && attempt.Target.SourceKey == target.SourceKey &&
         MusicQualityPolicy.Priority(attempt.Target.PolicyRequest, Policy) < MusicQualityPolicy.Priority(level, Policy) &&
-        MusicQualityPolicy.Priority(MusicPlaybackSourceService.EffectiveLevel(media), Policy) > MusicQualityPolicy.Priority(level, Policy));
+        MusicQualityPolicy.Priority(MusicPlaybackController.EffectiveLevel(media), Policy) > MusicQualityPolicy.Priority(level, Policy));
 
     private async Task<ResolvedMusic?> TryAsync(MusicOnlineTarget target, string level, MusicQualityPolicy.Tier tier,
         bool exact, CancellationToken token, bool cacheOnly = false, bool urlCacheOnly = false)
@@ -319,9 +317,9 @@ internal sealed class MusicSourceSession(
         try
         {
             ResolvedMusic media = target.Official
-                ? await service.ResolveOfficialTargetAsync(Song, target, token, initial: true,
+                ? await owner.ResolveOfficialTargetAsync(Song, target, token, initial: true,
                     cacheOnly: cacheOnly, urlCacheOnly: urlCacheOnly, refresh: !cacheOnly && !urlCacheOnly)
-                : await service.ResolveScriptTargetAsync(Song, target, token, initial: true);
+                : await owner.ResolveScriptTargetAsync(Song, target, token, initial: true);
             token.ThrowIfCancellationRequested();
             await LoadExclusionsAsync(token);
             if (Excluded(target) || Rejected(target)) return null;
@@ -335,7 +333,7 @@ internal sealed class MusicSourceSession(
                     provider = target.Installation ?? MusicLibraryOwner.OfficialProvider,
                     platform = target.Platform,
                     requestedQuality = level,
-                    effectiveQuality = MusicPlaybackSourceService.EffectiveLevel(media),
+                    effectiveQuality = MusicPlaybackController.EffectiveLevel(media),
                     cacheMode = cacheOnly ? "file" : urlCacheOnly ? "url" : "network",
                     accepted
                 });
@@ -343,7 +341,7 @@ internal sealed class MusicSourceSession(
         }
         catch (MusicOperationException error) when (error.Code == "CACHE_MISS" && (cacheOnly || urlCacheOnly))
         { if (attempt.State == SourceAttemptState.Pending && known is null) Attempts.Remove(key); return null; }
-        catch (MusicOperationException error) when (MusicPlaybackSourceService.UnavailableSourceCandidate(error.Code))
+        catch (MusicOperationException error) when (MusicPlaybackController.UnavailableSourceCandidate(error.Code))
         {
             Reject(target, error.Code);
             Failure ??= error.Code;
@@ -418,11 +416,10 @@ internal sealed class MusicSourceSession(
         if (targets.Length == 0) { completed = true; return false; }
         RefreshSong();
         var beforeSources = expanded.Sources;
-        var completion = await service.Application.CompleteSongAsync(
+        var completion = await owner.Application.CompleteSongAsync(
             expanded, targets, failures.Intersect(targets).ToArray(), token);
         token.ThrowIfCancellationRequested();
         var merged = SongRow.FromRecord(completion.Song, Song.EntryId);
-        MusicDto.Require(merged.Id == Song.Id);
         await AcceptReplyAsync(merged.Record, token);
         completed = true;
         checkedContent.UnionWith(failures);
@@ -495,7 +492,7 @@ internal sealed class MusicSourceSession(
                         tier = tier.Category,
                         provider = media.Target!.Installation ?? MusicLibraryOwner.OfficialProvider,
                         platform = media.Target.Platform,
-                        quality = MusicPlaybackSourceService.EffectiveLevel(media),
+                        quality = MusicPlaybackController.EffectiveLevel(media),
                         cachedFile = media.Uri is null
                     });
                 return media.Target!.ManualSource ? media with { Target = media.Target with { ManualSource = false } } : media;
@@ -508,7 +505,7 @@ internal sealed class MusicSourceSession(
     internal async Task<ResolvedMusic> RefreshAsync(MusicOnlineTarget target, CancellationToken token)
     {
         try { return await RefreshTargetAsync(target, token); }
-        catch (MusicOperationException error) when (MusicPlaybackSourceService.UnavailableSourceCandidate(error.Code))
+        catch (MusicOperationException error) when (MusicPlaybackController.UnavailableSourceCandidate(error.Code))
         {
             Reject(target, error.Code);
             Failure ??= error.Code;
@@ -527,20 +524,20 @@ internal sealed class MusicSourceSession(
         {
             await LoadScriptsAsync(token);
             var eligible = ScriptTargets(target.Quality, target.ManualSource)
-                .FirstOrDefault(value => MusicPlaybackSourceService.SourceIdentity(value) == MusicPlaybackSourceService.SourceIdentity(target));
+                .FirstOrDefault(value => MusicPlaybackController.SourceIdentity(value) == MusicPlaybackController.SourceIdentity(target));
             if (eligible is null) throw new MusicOperationException("SOURCE_DISABLED");
-            media = await service.ResolveScriptTargetAsync(Song, eligible, token, initial: true);
+            media = await owner.ResolveScriptTargetAsync(Song, eligible, token, initial: true);
         }
         else if (target.Official && (target.QualityPolicySignature != Signature ||
             target.AccountScope is not { } scope ||
-            !service.Application.IsOfficialPlaybackCurrent(target.Platform, scope, target.Generation)))
+            !owner.Application.IsOfficialPlaybackCurrent(target.Platform, scope, target.Generation)))
         {
             var eligible = (await OfficialAsync(target.PolicyRequest, token, target.ManualSource))
-                .FirstOrDefault(value => MusicPlaybackSourceService.SourceIdentity(value) == MusicPlaybackSourceService.SourceIdentity(target));
+                .FirstOrDefault(value => MusicPlaybackController.SourceIdentity(value) == MusicPlaybackController.SourceIdentity(target));
             if (eligible is null) throw new MusicOperationException("RECORDING_UNAVAILABLE");
-            media = await service.ResolveOfficialTargetAsync(Song, eligible, token, initial: true);
+            media = await owner.ResolveOfficialTargetAsync(Song, eligible, token, initial: true);
         }
-        else media = await service.ResolveTargetAsync(Song, target, token);
+        else media = await owner.ResolveTargetAsync(Song, target, token);
         token.ThrowIfCancellationRequested();
         await LoadExclusionsAsync(token);
         if (Excluded(media.Target!)) throw new MusicOperationException("SOURCE_EXCLUDED");

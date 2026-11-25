@@ -252,7 +252,7 @@ extension NativeMusicService: MusicHomeBrowsing {
         let display = try access.perform {
             if !homeDisplayPrepared {
                 homeDisplayPrepared = true
-                if let store = homeSnapshot as? any MusicHomeDisplaySnapshotStoring {
+                if let store = homeSnapshot {
                     do { homeDisplay = try store.readDisplay() }
                     catch {
                         DebugRuntime.logError(.musicCatalog, sub: "home", event: "displaySnapshot.readFailed", error: error)
@@ -492,7 +492,7 @@ extension NativeMusicService: MusicHomeBrowsing {
                     homeCache = (load.source, load.binding.scope, load.binding.revision,
                                  now().addingTimeInterval(600), cachedDisplay)
                 }
-                if let store = homeSnapshot as? any MusicHomeDisplaySnapshotStoring {
+                if let store = homeSnapshot {
                     // Storage failure keeps the previous durable success
                     // without discarding the usable in-memory display.
                     do { try store.writeDisplay(display, source: load.source) }

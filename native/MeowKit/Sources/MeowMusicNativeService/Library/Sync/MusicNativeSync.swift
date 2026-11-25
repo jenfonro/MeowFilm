@@ -138,7 +138,7 @@ extension NativeMusicService: MusicLibrarySyncing {
 
     private func requireSyncBindings(_ library: MusicLibraryState, selections: [MusicLibrarySyncSelection]) throws {
         var targets = Set<String>()
-        let identities = Dictionary(grouping: library.collections, by: { Data($0.id.utf8) })
+        let identities = Dictionary(grouping: library.collections, by: \.id)
         if selections.contains(where: { $0.kinds.contains(.favorites) }) {
             let favorites = library.collections.filter { $0.id == "favorites" }
             try musicRequire(favorites.count == 1 && favorites[0].kind == "favorites", .favoritesProtected)
@@ -165,9 +165,9 @@ extension NativeMusicService: MusicLibrarySyncing {
         for row in library.collections {
             let selected = selections.filter { $0.kinds.map(\.rawValue).contains(row.kind) }
             guard !selected.isEmpty else { continue }
-            try musicRequire(!row.id.isEmpty && identities[Data(row.id.utf8)]?.count == 1 &&
+            try musicRequire(!row.id.isEmpty && identities[row.id]?.count == 1 &&
                 (0...musicMaxSafeInteger).contains(row.revision) &&
-                musicIDs(row.order).count == row.order.count, .corruptStorage)
+                Set(row.order).count == row.order.count, .corruptStorage)
             try musicRequire(row.kind != "favorites" || (row.id == "favorites" && !row.deleted), .favoritesProtected)
             for songID in row.order {
                 try musicRequire(existingSongs.contains(songID), .corruptStorage)
@@ -181,7 +181,7 @@ extension NativeMusicService: MusicLibrarySyncing {
                     binding.accountID == library.accountID(for: binding.platform) &&
                     targets.insert(MusicNativeSyncLogic.bindingKey(binding)).inserted &&
                     binding.writable &&
-                    musicIDs(binding.baseline).count == binding.baseline.count, .corruptStorage)
+                    Set(binding.baseline).count == binding.baseline.count, .corruptStorage)
                 for occurrence in binding.baseline {
                     try musicRequire(!occurrence.isEmpty &&
                         existingSongs.contains(binding.songID(for: occurrence) ?? ""), .corruptStorage)

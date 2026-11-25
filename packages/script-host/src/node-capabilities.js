@@ -26,7 +26,7 @@ import { fault, requireValue } from './errors.js';
 import { PrivateVolume, inside } from './private-volume.js';
 import { NativeResources } from './cat-resources.js';
 import { Request, Response } from './node-web-values.js';
-import { dnsFacade, isLoopbackHost } from './network-boundary.js';
+import { dnsFacade } from './network-boundary.js';
 import { afterCloseDispatch, closeResource, guardDetachedEmitter, ignoreError } from './resource-close.js';
 
 const require = createRequire(import.meta.url);
@@ -433,7 +433,6 @@ export class NodeCapabilities {
           requireValue(!options.createConnection && options.socketPath === undefined &&
             options.fd === undefined && !options.path, 'PERMISSION_DENIED');
           const authority = new URL(input), target = this.services.outboundURL(authority);
-          requireValue(this.session.network === undefined, 'CAPABILITY_UNAVAILABLE');
           const local = this.services.mapLocal(authority.href) !== null;
           const client = http2.connect(target,
             this.services.tlsOptions(options, { client: true, local }));
@@ -459,7 +458,7 @@ export class NodeCapabilities {
         },
         getDefaultSettings: http2.getDefaultSettings, getPackedSettings: http2.getPackedSettings,
         getUnpackedSettings: http2.getUnpackedSettings },
-      dns: dnsFacade({ adapter: typeof session.network === 'function' }),
+      dns: dnsFacade(),
       os: { ...os, homedir: () => '/', tmpdir: () => '/tmp',
         userInfo: options => ({ ...os.userInfo(options), homedir: '/', shell: null }) },
       perf_hooks: { performance }, tty: { isatty: () => false },
@@ -1048,8 +1047,6 @@ export class NodeCapabilities {
         !options.createConnection && !options.lookup &&
         Number.isInteger(Number(options.port)), 'PERMISSION_DENIED');
       const mapped = this.services.connection(options, native === tls);
-      requireValue(mapped.meowLocal || isLoopbackHost(mapped.host) ||
-        this.session.network === undefined, 'CAPABILITY_UNAVAILABLE');
       const clean = {
         ...(native === tls
           ? this.services.tlsOptions(options, { client: true, local: mapped.meowLocal })

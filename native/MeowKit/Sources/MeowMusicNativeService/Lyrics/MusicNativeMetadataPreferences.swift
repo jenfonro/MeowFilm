@@ -101,7 +101,7 @@ extension NativeMusicService {
     public func metadataCandidates(occurrenceID: String) async throws -> MusicMetadataCandidates {
         try musicRequire(!occurrenceID.isEmpty)
         let d = try read()
-        try musicRequire(musicSame(d.queue.currentID ?? "", occurrenceID), .targetChanged)
+        try musicRequire(d.queue.currentID == occurrenceID, .targetChanged)
         let ref = MusicReference(kind: .queue, id: occurrenceID)
         let song = try self.song(ref, d), track = try MusicModel.track(song, ref)
         let prefs = try NativeMetadataPreferences(d.playback)
@@ -114,7 +114,7 @@ extension NativeMusicService {
                 .sorted { $0.sourceKey.compare($1.sourceKey,
                     locale: Self.metadataSortLocale) == .orderedAscending }
             for row in ordered {
-                guard let source = sources.first(where: { musicSame($0.sourceKey, row.sourceKey) }) else { continue }
+                guard let source = sources.first(where: { $0.sourceKey == row.sourceKey }) else { continue }
                 let artwork = MusicModel.artworkURL(row.img ?? "")
                 candidates.append(.init(source: source, artwork: artwork))
             }

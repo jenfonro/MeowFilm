@@ -1,6 +1,6 @@
 import * as dns from 'node:dns';
 import { isIP } from 'node:net';
-import { fault, requireValue } from './errors.js';
+import { requireValue } from './errors.js';
 
 const localNames = new Set(['localhost', 'localhost.localdomain', 'ip6-localhost', '0.0.0.0', '::', '::1']);
 
@@ -58,15 +58,7 @@ export function isLoopbackHost(input) {
     v6.slice(0, 15).every(byte => byte === 0) && v6[15] === 1));
 }
 
-function unavailable(callback) {
-  const error = fault('CAPABILITY_UNAVAILABLE');
-  if (typeof callback === 'function') { queueMicrotask(() => callback(error)); return; }
-  throw error;
-}
-
-/** Guest DNS is unavailable when a platform network adapter owns all external
- * networking; otherwise it delegates directly to the host resolver. */
-export function dnsFacade({ adapter = false } = {}) {
+export function dnsFacade() {
   const methods = ['lookup', 'resolve', 'resolve4', 'resolve6', 'resolveTxt',
     'resolveCname', 'resolveMx', 'resolveSrv', 'resolveNs', 'resolvePtr', 'reverse'];
   const facade = {};
@@ -74,7 +66,6 @@ export function dnsFacade({ adapter = false } = {}) {
   for (const name of methods) {
     facade[name] = (...args) => {
       const callback = args.at(-1);
-      if (adapter) return unavailable(typeof callback === 'function' ? callback : undefined);
       if (typeof callback !== 'function') throw Object.assign(new TypeError('Callback required'), { code: 'ERR_INVALID_ARG_TYPE' });
       if (name === 'lookup') {
         const options = typeof args[1] === 'object' && args[1] !== null ? { ...args[1] }
@@ -87,7 +78,6 @@ export function dnsFacade({ adapter = false } = {}) {
     };
   }
   facade.promises = Object.fromEntries(methods.map(name => [name, async (...args) => {
-    if (adapter) throw fault('CAPABILITY_UNAVAILABLE');
     if (name === 'lookup') {
       const options = typeof args[1] === 'object' && args[1] !== null ? { ...args[1] }
         : typeof args[1] === 'number' ? { family: args[1] } : {};

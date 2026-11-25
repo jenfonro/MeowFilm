@@ -179,8 +179,6 @@ export function createPanService({ dataRoot, store: suppliedStore, debug } = {})
     }
     const receipt = accountValue(saved, id);
     accountRevision(receipt);
-    requireValue(receipt.revision === next.revision && receipt.rowRevision === old.rowRevision + 1 &&
-      stable(receipt.credentials) === stable(next.credentials), 'STORAGE_ERROR');
     next.rowRevision = receipt.rowRevision;
     document = saved;
     for (const other of providers.keys()) {

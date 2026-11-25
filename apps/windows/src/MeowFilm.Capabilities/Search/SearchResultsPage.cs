@@ -37,10 +37,25 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
             new("playlists", "歌单"), new("film", "影视"), new("novel", "小说") });
         view = new(this);
         debugAdapter = new(this);
+    }
+    private bool subscribed;
+    private void SubscribeDomains()
+    {
+        if (subscribed) return;
         film.Search.Changed += FilmChanged;
         film.RuntimeRestored += RuntimeRestored;
-        music.Search.PropertyChanged += MusicSearchChanged;
+        Music.Search.PropertyChanged += MusicSearchChanged;
         if (novel is not null) novel.Search.Changed += NovelChanged;
+        subscribed = true;
+    }
+    private void UnsubscribeDomains()
+    {
+        if (!subscribed) return;
+        film.Search.Changed -= FilmChanged;
+        film.RuntimeRestored -= RuntimeRestored;
+        Music.Search.PropertyChanged -= MusicSearchChanged;
+        if (novel is not null) novel.Search.Changed -= NovelChanged;
+        subscribed = false;
     }
     private void NovelChanged(object? sender, EventArgs e) { if (!disposed && active && tab == "novel") view.PublishNovel(); }
     private void FilmChanged(object? sender, EventArgs e)
@@ -68,10 +83,6 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
     {
         if (disposed) return;
         Deactivate(); disposed = true;
-        film.Search.Changed -= FilmChanged;
-        film.RuntimeRestored -= RuntimeRestored;
-        Music.Search.PropertyChanged -= MusicSearchChanged;
-        if (novel is not null) novel.Search.Changed -= NovelChanged;
         NavigateToPlaybackAsync = null; NavigationToken = null;
         NavigateToNovelAsync = null; NovelNavigationToken = null;
         musicGate.Dispose();
@@ -125,6 +136,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
         ObjectDisposedException.ThrowIf(disposed, this);
         RetireNovel();
         active = true;
+        SubscribeDomains();
         long operation = ++submission;
         if (tab is not ("film" or "novel") && musicLocation is not null)
             await PresentMusicAsync(operation, query, tab, submit: false, cancellationToken);
@@ -140,6 +152,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
     {
         RememberScroll();
         active = false;
+        UnsubscribeDomains();
         submission++;
         view.ReleaseMusic();
         _ = film.Search.StopAsync();
@@ -151,6 +164,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
         token.ThrowIfCancellationRequested();
         ObjectDisposedException.ThrowIf(disposed, this);
         active = true;
+        SubscribeDomains();
         long operation = ++submission;
         query = query.Trim();
         ArgumentException.ThrowIfNullOrEmpty(query);

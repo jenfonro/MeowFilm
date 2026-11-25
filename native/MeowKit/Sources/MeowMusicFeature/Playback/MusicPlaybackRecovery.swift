@@ -29,7 +29,9 @@ public protocol MusicPlaybackRecoveryServing: Sendable {
 /// this must check the original installation/generation before ANY provider
 /// call, and keep that binding across suspension. It cannot restore, log in or
 /// silently use another account. Cache-display scope is not this permission.
-public protocol MusicNativePlaybackRecoveryAuthorizing: MusicNativeAccountURLRefreshing {
+public protocol MusicNativePlaybackRecoveryAuthorizing: Sendable {
+    func nativeRefreshAudio(platform: MusicAccountPlatform, nativeID: String,
+                            selection: MusicPlaybackSelection, rejectedURL: URL) async throws -> MusicNativeAudio
     func nativeRecoveryOptions(platform: MusicAccountPlatform, nativeID: String,
                                selection: MusicPlaybackSelection) async throws -> [MusicPlaybackOption]
 }

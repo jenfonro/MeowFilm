@@ -86,11 +86,11 @@ async function downloadCatSource(url, { signal, timeoutMs, debug } = {}) {
 /** Shared execution owner. A platform may supply native source intent; actual
  * source files, installation facts, sandbox and routing remain in this package. */
 export class CatRuntime {
-  constructor({ dataRoot, network, onDiagnostic, onScriptError, onNetwork, limits, configuration, debug } = {}) {
+  constructor({ dataRoot, onDiagnostic, onScriptError, onNetwork, limits, configuration, debug } = {}) {
     requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
     this.productRoot = resolve(dataRoot);
     this.dataRoot = join(this.productRoot, 'cat');
-    this.network = network; this.onDiagnostic = onDiagnostic; this.onScriptError = onScriptError;
+    this.onDiagnostic = onDiagnostic; this.onScriptError = onScriptError;
     this.configuration = configuration;
     this.onNetwork = onNetwork; this.limits = limits;
     this.debug = debug ?? null;
@@ -169,7 +169,7 @@ export class CatRuntime {
         await this.settings.ready;
         this.host = new ScriptHost({ adapters: {
           cat: input => this.workerSession(input),
-        }, network: this.network, onDiagnostic: this.onDiagnostic,
+        }, onDiagnostic: this.onDiagnostic,
         onScriptError: this.onScriptError, limits: this.limits, debug: this.debug });
         this.aggregatePort = 0;
         await this.apply(this.settings.read(), { background: true });
@@ -274,7 +274,7 @@ export class CatRuntime {
         });
         if (this.candidates.get(session.installationId) === session)
           this.candidates.delete(session.installationId);
-        if (!session.worker && !session.live && !session.adapterTasks.size) {
+        if (!session.worker && !session.live) {
           this.workers.delete(session);
         }
         if (this.sessions.get(session.installationId) !== session) return;
@@ -519,9 +519,7 @@ export class CatRuntime {
       const file = this.sourcePath(sourceHash);
       const state = statSync(file);
       requireValue(state.isFile(), 'CORRUPT_STORAGE');
-      const bytes = readFileSync(file);
-      if (this.configuration) requireValue(hash(bytes) === sourceHash, 'CORRUPT_STORAGE');
-      return bytes;
+      return readFileSync(file);
     } catch (error) { throw safeError(error, 'CORRUPT_STORAGE'); }
   }
   deleteSource(sourceHash) {
@@ -563,7 +561,7 @@ export class CatRuntime {
         this.sessions.delete(installationId); this.snapshots.delete(installationId);
         this.settled.delete(installationId);
         if (![...this.workers].some(worker => worker.installationId === installationId &&
-          (worker.worker || worker.live || worker.adapterTasks.size))) {
+          (worker.worker || worker.live))) {
           try { removePrivateVolume(this.dataRoot, installationId); }
           catch (error) { this.failures.set(installationId, safeError(error, 'STORAGE_ERROR').code); }
           const hashes = new Set([old?.sourceHash,
@@ -771,15 +769,10 @@ export class CatRuntime {
     });
     try { await worker.stop(); } catch (error) { failure ??= error; }
     try {
-      if (worker.adapterTasks.size) {
-        const draining = new ResourceScope(undefined, worker.limits.cleanupTimeoutMs);
-        try { await draining.race(worker.whenAdaptersIdle()); }
-        finally { draining.close(); }
-      }
-      requireValue(!worker.worker && !worker.live && !worker.adapterTasks.size, 'SERVICE_ERROR');
+      requireValue(!worker.worker && !worker.live, 'SERVICE_ERROR');
     } catch (error) { failure ??= error; }
     await proxyClosing;
-    if (!worker.worker && !worker.live && !worker.adapterTasks.size) {
+    if (!worker.worker && !worker.live) {
       this.workers.delete(worker);
       this.debug?.emit({
         level: failure ? 'warn' : 'info',
@@ -938,8 +931,7 @@ export class CatRuntime {
     return bytes;
   }
   async install(input, { signal } = {}) {
-    const proposal = clone({ ...input, config: undefined });
-    if (input.config !== undefined) proposal.config = cloneJSONValue(input.config);
+    const proposal = { ...input };
     identifier(proposal.installationId);
     requireValue(typeof proposal.source === 'string');
     requireValue(signal === undefined || signal instanceof AbortSignal);
@@ -953,8 +945,8 @@ export class CatRuntime {
       task => this.replaceSource(proposal, task, { bytes }), 'STALE_SESSION');
   }
   async import(input, { signal } = {}) {
-    const proposal = clone({ ...input, config: undefined });
-    if (input.config !== undefined) proposal.config = cloneJSONValue(input.config);
+    const proposal = { ...input };
+    if (proposal.config !== undefined) proposal.config = normalizeCatConfig(proposal.config);
     catName(proposal.name); catSourceURL(proposal.sourceUrl);
     requireValue(proposal.enabled === undefined || typeof proposal.enabled === 'boolean');
     return this.manage(proposal.installationId, signal, (task, prepared) => {
@@ -972,7 +964,7 @@ export class CatRuntime {
     return downloadCatSource(sourceUrl, { signal, timeoutMs: this.limit('requestTimeoutMs') });
   }
   async edit(input, { signal } = {}) {
-    const { installationId, name, sourceUrl } = clone(input);
+    const { installationId, name, sourceUrl } = input ?? {};
     const displayName = catName(name);
     if (sourceUrl !== undefined) catSourceURL(sourceUrl);
     return this.manage(installationId, signal, async task => {
@@ -1397,7 +1389,7 @@ export class CatRuntime {
       this.initialization = null;
       try { await this.settings?.close(); } catch (error) { failure ??= error; }
       this.host = null; this.settings = null;
-      this.network = null; this.onDiagnostic = null; this.onScriptError = null; this.onNetwork = null;
+      this.onDiagnostic = null; this.onScriptError = null; this.onNetwork = null;
       if (failure) throw failure;
     })();
     return this.closing;

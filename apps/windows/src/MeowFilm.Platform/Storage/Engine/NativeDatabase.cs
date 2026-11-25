@@ -31,8 +31,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     public const int FormatVersion = 1;
     public const string DataFileName = "meowfilm-data.sqlite3";
     public const string CacheFileName = "meowfilm-cache.sqlite3";
-    public const string RelativePath = "storage-v1/" + DataFileName;
-    public const string CacheRelativePath = "storage-v1/" + CacheFileName;
     private const int MaximumPendingOperations = 128;
     private const int MaximumPendingBytes = 32 * 1024 * 1024;
     private const int PreparedStatementCacheCapacity = 256;

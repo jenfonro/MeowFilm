@@ -27,12 +27,6 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
 
     internal void Apply(MusicSearchKindRecord value)
     {
-        MusicDto.Require(value.Pages is >= 1 and <= int.MaxValue &&
-            value.Concurrency is >= 1 and <= int.MaxValue &&
-            value.CacheMinutes is >= 1 and <= MusicSearchSettings.MaxCacheMinutes);
-        int nextPages = (int)value.Pages,
-            nextConcurrency = (int)value.Concurrency,
-            nextCache = (int)value.CacheMinutes;
         var enabled = value.Enabled.ToHashSet(StringComparer.Ordinal);
         var order = value.Order;
         savedOrder = order;
@@ -41,15 +35,13 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
         MusicSettingsController.ReconcilePriorityRows(Platforms, order, row => row.Platform,
             key => new(key, enabled.Contains(key)),
             (row, key) => row.Apply(enabled.Contains(key)));
-        pages = nextPages; concurrency = nextConcurrency; cacheMinutes = nextCache;
+        pages = (int)value.Pages; concurrency = (int)value.Concurrency; cacheMinutes = (int)value.CacheMinutes;
         Changed(nameof(Pages));
         Changed(nameof(Concurrency));
         Changed(nameof(CacheMinutes));
     }
 
-    internal SearchKindState Snapshot() => new(
-        savedOrder, savedEnabled,
-        pages, concurrency, cacheMinutes);
+    internal SearchKindState Snapshot() => new(savedOrder, savedEnabled, pages, concurrency, cacheMinutes);
 
     private void Changed([CallerMemberName] string name = "") =>
         PropertyChanged?.Invoke(this, new(name));
@@ -60,13 +52,8 @@ internal sealed record SearchKindState(string[] Order, string[] Enabled, int Pag
     internal MusicSearchKindRecord ToRecord() => new(Order, Enabled, Pages, Concurrency, CacheMinutes);
 }
 
-/// <summary>
-/// Standalone domain handler for search platform priorities, search history lifecycle,
-/// and metadata platform priority policy.
-/// </summary>
-internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Action<string> notify)
+public sealed partial class MusicSettingsController
 {
-    // Search policy & history state
     private bool songSearchLoaded, playlistSearchLoaded, searchPreferencesBusy, searchHistoryLoaded;
     private bool SearchPreferencesLoadedAll => songSearchLoaded && playlistSearchLoaded;
     private int searchHistoryCount;
@@ -78,41 +65,29 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
     private Task searchHistoryTail = Task.CompletedTask;
     private string searchPreferenceStatus = "";
 
-    // Metadata policy state
     private long metadataRevision, metadataGeneration;
     private string[] metadataOrder = [], metadataEnabled = [];
     private bool metadataLoaded, metadataBusy;
     private Task metadataWork = Task.CompletedTask;
 
-    internal event Func<Task>? SearchPolicyChanging;
-    internal event Action? MetadataPolicyChanging;
-    internal event Func<Task>? MetadataPolicyApplied;
-    internal event Func<CancellationToken, Task>? MetadataArtworkRefreshRequested;
-
-    internal MusicSearchKindSettings SongSearch { get; } = new("songs");
-    internal MusicSearchKindSettings PlaylistSearch { get; } = new("playlists");
-    internal ObservableCollection<MusicPlatformPriorityRow> MetadataPlatforms { get; } = [];
-
-    internal bool CanEditSearchPreferences => ctx.CanEdit && SearchPreferencesLoadedAll && !searchPreferencesBusy;
-    internal bool HasSearchHistory => searchHistoryCount > 0;
-    internal string SearchPreferenceStatus => searchPreferenceStatus;
-    internal bool CanEditMetadata => ctx.CanEdit && metadataLoaded && !metadataBusy;
-    internal bool MetadataLoaded => metadataLoaded;
-    internal Task SearchPreferencesWork => searchPreferencesWork;
-    internal Task MetadataWork => metadataWork;
+    public MusicSearchKindSettings SongSearch { get; } = new("songs");
+    public MusicSearchKindSettings PlaylistSearch { get; } = new("playlists");
+    public ObservableCollection<MusicPlatformPriorityRow> MetadataPlatforms { get; } = [];
+    public bool CanEditSearchPreferences => CanEdit && SearchPreferencesLoadedAll && !searchPreferencesBusy;
+    public bool HasSearchHistory => searchHistoryCount > 0;
+    public string SearchPreferenceStatus => searchPreferenceStatus;
+    public bool CanEditMetadata => CanEdit && metadataLoaded && !metadataBusy;
 
     internal bool SearchPreferencesLoaded(string kind) => kind == "songs" ? songSearchLoaded : playlistSearchLoaded;
 
     private bool SearchPreferencesCurrent(long generation) =>
-        generation == searchPreferencesGeneration && !ctx.Stopping && !ctx.Disposed;
+        generation == searchPreferencesGeneration && !stopping && !disposed;
 
-    internal void RetireSearchPreferences() => searchPreferencesGeneration++;
-
-    internal void RetireMetadata()
+    private void RetireMetadataSettings()
     {
         metadataGeneration++;
         metadataLoaded = false;
-        notify(nameof(MusicSettingsController.CanEditMetadata));
+        Changed(nameof(CanEditMetadata));
     }
 
     internal void CancelSearchHistoryForShutdown() => searchHistoryRequest?.Cancel();
@@ -120,7 +95,7 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
     internal async Task<bool> EnsureSearchPreferencesLoadedAsync(string kind, CancellationToken token)
     {
         if (SearchPreferencesLoaded(kind)) return true;
-        try { await ReadSearchPreferencesAsync(token); }
+        try { await ReadSearchPreferences(token); }
         catch (OperationCanceledException) { throw; }
         catch (Exception error)
         {
@@ -130,7 +105,7 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         return SearchPreferencesLoaded(kind);
     }
 
-    internal async Task ReadSearchPreferencesAsync(CancellationToken token)
+    internal async Task ReadSearchPreferences(CancellationToken token)
     {
         long generation = searchPreferencesGeneration;
         Exception? failure = null;
@@ -140,8 +115,8 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
             {
                 try
                 {
-                    var settings = await ctx.RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
-                        ct => ctx.Application.GetSearchPolicyAsync(kind, ct), token);
+                    var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
+                        ct => application.GetSearchPolicyAsync(kind, ct), token);
                     if (!SearchPreferencesCurrent(generation)) return;
                     PublishSearchPreferences(settings, kind);
                 }
@@ -180,18 +155,17 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
 
     private void PublishSearchHistory(MusicSearchHistoryRecord value)
     {
-        long revision = value.Revision;
-        if (searchHistoryLoaded && revision < searchHistoryRevision) return;
-        searchHistoryRevision = revision;
+        if (searchHistoryLoaded && value.Revision < searchHistoryRevision) return;
+        searchHistoryRevision = value.Revision;
         searchHistoryCount = value.Items.Length;
         searchHistoryLoaded = true;
-        notify(nameof(MusicSettingsController.HasSearchHistory));
+        Changed(nameof(HasSearchHistory));
     }
 
     internal Task ActivateSearchHistoryAsync(SearchHistorySurface surface)
     {
         searchHistorySurfaces |= surface;
-        if (ctx.Stopping || ctx.Disposed || searchHistoryLoaded) return Task.CompletedTask;
+        if (stopping || disposed || searchHistoryLoaded) return Task.CompletedTask;
         long epoch = searchHistoryEpoch;
         var previous = searchHistoryTail;
         return searchHistoryTail = Read();
@@ -199,23 +173,23 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         async Task Read()
         {
             await previous;
-            if (ctx.Stopping || ctx.Disposed || searchHistoryLoaded || epoch != searchHistoryEpoch ||
+            if (stopping || disposed || searchHistoryLoaded || epoch != searchHistoryEpoch ||
                 searchHistorySurfaces == SearchHistorySurface.None)
                 return;
-            using var request = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime.Token);
+            using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             searchHistoryRequest = request;
             try
             {
-                var history = await ctx.Application.GetSearchHistoryAsync(request.Token);
+                var history = await application.GetSearchHistoryAsync(request.Token);
                 request.Token.ThrowIfCancellationRequested();
-                if (!ctx.Stopping && !ctx.Disposed && epoch == searchHistoryEpoch &&
+                if (!stopping && !disposed && epoch == searchHistoryEpoch &&
                     searchHistorySurfaces != SearchHistorySurface.None)
                     PublishSearchHistory(history);
             }
             catch (OperationCanceledException) when (request.IsCancellationRequested) { }
             catch
             {
-                if (!ctx.Stopping && !ctx.Disposed && epoch == searchHistoryEpoch &&
+                if (!stopping && !disposed && epoch == searchHistoryEpoch &&
                     searchHistorySurfaces != SearchHistorySurface.None)
                 {
                     searchPreferenceStatus = "搜索历史不可用";
@@ -247,11 +221,11 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
 
     private void SearchPreferenceBindings()
     {
-        notify(nameof(MusicSettingsController.CanEditSearchPreferences));
-        notify(nameof(MusicSettingsController.SearchPreferenceStatus));
+        Changed(nameof(CanEditSearchPreferences));
+        Changed(nameof(SearchPreferenceStatus));
     }
 
-    internal Task SetSearchAdvancedAsync(string kind, int pages, int concurrency, int cacheMinutes)
+    public Task SetSearchAdvancedAsync(string kind, int pages, int concurrency, int cacheMinutes)
     {
         if (!CanEditSearchPreferences || kind is not ("songs" or "playlists") ||
             !MusicSearchSettings.ValidPages(pages) ||
@@ -267,7 +241,7 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         return SaveSearchPreferencesAsync(songs, playlists);
     }
 
-    internal Task SetSearchPlatformEnabledAsync(string kind, MusicPlatformPriorityRow row, bool enabled)
+    public Task SetSearchPlatformEnabledAsync(string kind, MusicPlatformPriorityRow row, bool enabled)
     {
         if (!CanEditSearchPreferences) return Task.CompletedTask;
         var settings = kind == "songs" ? SongSearch : kind == "playlists" ? PlaylistSearch : null;
@@ -286,7 +260,7 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         return SaveSearchPreferencesAsync(songs, playlists);
     }
 
-    internal Task MoveSearchPlatformAsync(string kind, MusicPlatformPriorityRow source, MusicPlatformPriorityRow target)
+    public Task MoveSearchPlatformAsync(string kind, MusicPlatformPriorityRow source, MusicPlatformPriorityRow target)
     {
         if (!CanEditSearchPreferences || ReferenceEquals(source, target)) return Task.CompletedTask;
         var settings = kind == "songs" ? SongSearch : kind == "playlists" ? PlaylistSearch : null;
@@ -308,7 +282,7 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         return SaveSearchPreferencesAsync(songs, playlists);
     }
 
-    private static bool Matches(MusicSearchKindSettings current, SearchKindState desired)
+    private static bool SearchKindMatches(MusicSearchKindSettings current, SearchKindState desired)
     {
         var saved = current.Snapshot();
         return saved.Pages == desired.Pages && saved.Concurrency == desired.Concurrency &&
@@ -325,13 +299,13 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         searchPreferencesBusy = true;
         long generation = searchPreferencesGeneration;
         SearchPreferenceBindings();
-        return searchPreferencesWork = ctx.RunAsync(async () =>
+        return searchPreferencesWork = RunAsync(async () =>
         {
             if (SearchPolicyChanging is { } onChanging) await onChanging();
             try
             {
-                var saved = await ctx.RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
-                    ct => ctx.Application.SaveSearchPolicyAsync(revision, songsRecord, playlistsRecord, ct), ctx.Lifetime.Token);
+                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
+                    ct => application.SaveSearchPolicyAsync(revision, songsRecord, playlistsRecord, ct), lifetime.Token);
                 if (!SearchPreferencesCurrent(generation)) return;
                 PublishSearchPreferences(saved);
                 searchPreferenceStatus = "";
@@ -342,15 +316,13 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
                 if (!SearchPreferencesCurrent(generation)) return;
                 try
                 {
-                    var current = await ctx.RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
-                        ct => ctx.Application.GetSearchPolicyAsync(null, ct), ctx.Lifetime.Token);
+                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
+                        ct => application.GetSearchPolicyAsync(null, ct), lifetime.Token);
                     if (!SearchPreferencesCurrent(generation)) return;
                     PublishSearchPreferences(current);
-                    searchPreferenceStatus = Matches(SongSearch, songs) && Matches(PlaylistSearch, playlists)
+                    searchPreferenceStatus = SearchKindMatches(SongSearch, songs) && SearchKindMatches(PlaylistSearch, playlists)
                         ? ""
-                        : error.Code == "REVISION_CONFLICT"
-                            ? "搜索设置已更新"
-                            : "搜索设置保存失败";
+                        : error.Code == "REVISION_CONFLICT" ? "搜索设置已更新" : "搜索设置保存失败";
                 }
                 catch (OperationCanceledException) { throw; }
                 catch
@@ -376,21 +348,21 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         }, publishStatus: false);
     }
 
-    internal async Task ClearSearchHistoryAsync()
+    public async Task ClearSearchHistoryAsync()
     {
-        if (!ctx.CanEdit || !HasSearchHistory || !await ctx.ConfirmAsync("清空搜索历史？", "搜索历史", ctx.Lifetime.Token))
+        if (!CanEdit || !HasSearchHistory || !await ConfirmAsync("清空搜索历史？", "搜索历史", lifetime.Token))
             return;
-        if (ctx.Stopping || ctx.Disposed || !ctx.CanEdit || !HasSearchHistory) return;
+        if (stopping || disposed || !CanEdit || !HasSearchHistory) return;
         long revision = searchHistoryRevision;
-        await ctx.RunAsync(async () => PublishSearchHistory(
-            await ctx.Application.ClearSearchHistoryAsync(revision, confirm: true, ctx.Lifetime.Token)));
+        await RunAsync(async () => PublishSearchHistory(
+            await application.ClearSearchHistoryAsync(revision, confirm: true, lifetime.Token)));
     }
 
-    internal async Task RecordSearchHistoryAsync(string text, string kind, CancellationToken token)
+    internal async Task RecordSearchHistory(string text, string kind, CancellationToken token)
     {
         try
         {
-            PublishSearchHistory(await ctx.Application.RecordSearchHistoryAsync(text, kind, token));
+            PublishSearchHistory(await application.RecordSearchHistoryAsync(text, kind, token));
         }
         catch (OperationCanceledException) { throw; }
         catch
@@ -403,15 +375,14 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
     internal string[] SearchDispatchPlatforms(string kind) =>
         (kind == "songs" ? SongSearch : PlaylistSearch).Snapshot().Enabled;
 
-    // Metadata policy methods
-    internal async Task ReadMetadataSettingsAsync(CancellationToken token)
+    internal async Task ReadMetadataSettings(CancellationToken token)
     {
         long generation = metadataGeneration;
-        var settings = await ctx.RunSettingReceiptAsync(MusicSettingReceiptKeys.MetadataPolicy,
-            ct => ctx.Application.GetMetadataPolicyAsync(ct), token);
-        if (generation != metadataGeneration || ctx.Stopping || ctx.Disposed) return;
+        var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.MetadataPolicy,
+            ct => application.GetMetadataPolicyAsync(ct), token);
+        if (generation != metadataGeneration || stopping || disposed) return;
         PublishMetadataSettings(settings);
-        if (generation == metadataGeneration && !ctx.Stopping && !ctx.Disposed &&
+        if (generation == metadataGeneration && !stopping && !disposed &&
             MetadataArtworkRefreshRequested is { } refresh)
             await refresh(token);
     }
@@ -424,17 +395,14 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         metadataOrder = platforms;
         metadataEnabled = settings.Enabled;
         platforms = platforms.Concat(MusicLibraryOwner.MetadataPlatforms.Except(platforms)).ToArray();
-        MusicSettingsController.ReconcilePriorityRows(MetadataPlatforms, platforms, row => row.Platform,
+        ReconcilePriorityRows(MetadataPlatforms, platforms, row => row.Platform,
             platform => new(platform, enabled.Contains(platform)),
             (row, platform) => row.Apply(enabled.Contains(platform)));
         metadataLoaded = true;
-        notify(nameof(MusicSettingsController.CanEditMetadata));
+        Changed(nameof(CanEditMetadata));
     }
 
-    private bool MetadataSettingsMatch(string[] platforms, string[] enabled) =>
-        metadataOrder.SequenceEqual(platforms) && metadataEnabled.SequenceEqual(enabled);
-
-    internal Task SetMetadataEnabledAsync(MusicPlatformPriorityRow row, bool enabled)
+    public Task SetMetadataEnabledAsync(MusicPlatformPriorityRow row, bool enabled)
     {
         if (!CanEditMetadata || !MetadataPlatforms.Contains(row) || row.Enabled == enabled)
             return Task.CompletedTask;
@@ -447,7 +415,7 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         return SaveMetadataSettingsAsync(order, selected.ToArray());
     }
 
-    internal Task MoveMetadataPlatformAsync(MusicPlatformPriorityRow source, MusicPlatformPriorityRow target)
+    public Task MoveMetadataPlatformAsync(MusicPlatformPriorityRow source, MusicPlatformPriorityRow target)
     {
         if (!CanEditMetadata || ReferenceEquals(source, target) ||
             !MetadataPlatforms.Contains(source) || !MetadataPlatforms.Contains(target))
@@ -468,32 +436,32 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
         long revision = metadataRevision;
         long generation = metadataGeneration;
         metadataBusy = true;
-        notify(nameof(MusicSettingsController.CanEditMetadata));
+        Changed(nameof(CanEditMetadata));
         MetadataPolicyChanging?.Invoke();
-        return metadataWork = ctx.RunAsync(async () =>
+        return metadataWork = RunAsync(async () =>
         {
             try
             {
-                var saved = await ctx.RunSettingReceiptAsync(MusicSettingReceiptKeys.MetadataPolicy,
-                    ct => ctx.Application.SaveMetadataPolicyAsync(revision, platforms, enabled, ct), ctx.Lifetime.Token);
-                if (generation != metadataGeneration || ctx.Stopping || ctx.Disposed) return;
+                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.MetadataPolicy,
+                    ct => application.SaveMetadataPolicyAsync(revision, platforms, enabled, ct), lifetime.Token);
+                if (generation != metadataGeneration || stopping || disposed) return;
                 PublishMetadataSettings(saved);
-                if (generation == metadataGeneration && !ctx.Stopping && !ctx.Disposed &&
+                if (generation == metadataGeneration && !stopping && !disposed &&
                     MetadataArtworkRefreshRequested is { } refresh)
-                    await refresh(ctx.Lifetime.Token);
+                    await refresh(lifetime.Token);
             }
             catch
             {
-                if (generation != metadataGeneration || ctx.Stopping || ctx.Disposed) return;
+                if (generation != metadataGeneration || stopping || disposed) return;
                 try
                 {
-                    await ReadMetadataSettingsAsync(ctx.Lifetime.Token);
-                    if (generation != metadataGeneration || ctx.Stopping || ctx.Disposed) return;
-                    if (MetadataSettingsMatch(platforms, enabled)) return;
+                    await ReadMetadataSettings(lifetime.Token);
+                    if (generation != metadataGeneration || stopping || disposed) return;
+                    if (metadataOrder.SequenceEqual(platforms) && metadataEnabled.SequenceEqual(enabled)) return;
                 }
                 catch
                 {
-                    if (generation != metadataGeneration || ctx.Stopping || ctx.Disposed) return;
+                    if (generation != metadataGeneration || stopping || disposed) return;
                     metadataLoaded = false;
                     throw;
                 }
@@ -502,9 +470,9 @@ internal sealed class MusicSearchMetadataSettings(MusicRuntimeContext ctx, Actio
             finally
             {
                 metadataBusy = false;
-                if (generation == metadataGeneration && !ctx.Stopping && !ctx.Disposed)
-                    notify(nameof(MusicSettingsController.CanEditMetadata));
-                if (!ctx.Stopping && !ctx.Disposed && MetadataPolicyApplied is { } applied)
+                if (generation == metadataGeneration && !stopping && !disposed)
+                    Changed(nameof(CanEditMetadata));
+                if (!stopping && !disposed && MetadataPolicyApplied is { } applied)
                     await applied();
             }
         });

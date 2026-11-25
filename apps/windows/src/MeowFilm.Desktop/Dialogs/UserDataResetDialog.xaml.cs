@@ -7,14 +7,14 @@ namespace MeowFilm.Desktop;
 
 public partial class UserDataResetDialog : UserControl, IDesktopDebugModal
 {
+    private bool confirming;
+
     internal event Action? ConfirmRequested;
     internal event Action? CancelRequested;
     internal event Action? ExitRequested;
     internal bool IsOpen => Parent is DesktopModalHost host && host.IsPresented(this);
     internal bool IsPending { get; private set; }
-    internal bool IsConfirming => confirming;
     internal FrameworkElement SurfaceElement => DialogSurface;
-    private bool confirming;
 
     public UserDataResetDialog() => InitializeComponent();
 
@@ -33,8 +33,6 @@ public partial class UserDataResetDialog : UserControl, IDesktopDebugModal
 
     internal void FocusInitial()
     {
-        // The newly attached surface must participate in layout before
-        // WinUI can move focus to its safe initial choice.
         UpdateLayout();
         CancelChoice.Focus(FocusState.Programmatic);
     }
@@ -77,41 +75,18 @@ public partial class UserDataResetDialog : UserControl, IDesktopDebugModal
         if (IsOpen && confirming && !IsPending) CancelRequested?.Invoke();
     }
 
-    DesktopDebugDialogDescription IDesktopDebugModal.DescribeDebugDialog()
-    {
-        bool enabled = !IsPending;
-        return new(
-            Id: "user-data-reset",
-            Kind: "user-data-reset",
-            FallbackTitle: confirming ? "清除全部本机数据" : "清除未完成",
-            Message: confirming ? "清空本机数据确认框" : "清空本机数据失败提示框",
-            Surface: DialogSurface,
-            ExplicitButtons: confirming
-                ? [
-                    new { index = 0, label = "取消", automationName = "取消", enabled, kind = "cancel" },
-                    new { index = 1, label = "确认清除", automationName = "清除全部数据", enabled, kind = "confirm" }
-                ]
-                : [
-                    new { index = 0, label = "退出", automationName = "退出", enabled, kind = "exit" },
-                    new { index = 1, label = "重试清除", automationName = "重试清除", enabled, kind = "confirm" }
-                ]);
-    }
+    DesktopDebugDialogDescription IDesktopDebugModal.DescribeDebugDialog() => new(
+        Id: "user-data-reset",
+        Kind: "user-data-reset",
+        FallbackTitle: confirming ? "清除全部本机数据" : "清除未完成",
+        Message: confirming ? "清空本机数据确认框" : "清空本机数据失败提示框",
+        Surface: DialogSurface,
+        Buttons: confirming
+            ? [new("取消", "cancel", !IsPending), new("确认清除", "confirm", !IsPending, "清除全部数据")]
+            : [new("退出", "exit", !IsPending), new("重试清除", "confirm", !IsPending)]);
 
-    object IDesktopDebugModal.HandleDebugAction(string act, int? btnIndex, string? btnLabel)
+    object IDesktopDebugModal.HandleDebugAction(string act)
     {
-        if (act == "button")
-        {
-            if (confirming)
-            {
-                if (btnIndex == 0 || string.Equals(btnLabel, "取消", StringComparison.OrdinalIgnoreCase)) act = "cancel";
-                else if (btnIndex == 1 || string.Equals(btnLabel, "确认清除", StringComparison.OrdinalIgnoreCase) || string.Equals(btnLabel, "清除全部数据", StringComparison.OrdinalIgnoreCase)) act = "confirm";
-            }
-            else
-            {
-                if (btnIndex == 0 || string.Equals(btnLabel, "退出", StringComparison.OrdinalIgnoreCase)) act = "exit";
-                else if (btnIndex == 1 || string.Equals(btnLabel, "重试清除", StringComparison.OrdinalIgnoreCase) || string.Equals(btnLabel, "确认清除", StringComparison.OrdinalIgnoreCase)) act = "confirm";
-            }
-        }
         if (act is "cancel" or "dismiss" or "close")
         {
             if (!confirming || IsPending)

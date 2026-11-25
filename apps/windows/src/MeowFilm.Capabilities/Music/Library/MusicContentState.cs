@@ -3,8 +3,8 @@ using System.Collections.ObjectModel;
 namespace MeowFilm.Capabilities;
 
 /// <summary>
-/// Shared Layer-0 content-page collections, summary metadata, and song selection state
-/// shared across Library, Catalog, Search, and Playback without circular controller references.
+/// Shared Layer-0 content-page collections, summary metadata, search section projections,
+/// and song selection state shared across Library, Catalog, Search, and Playback without cross-controller coupling.
 /// </summary>
 internal sealed class MusicContentState(MusicRuntimeContext ctx, MusicCatalogActionState catalogActions)
 {
@@ -15,6 +15,25 @@ internal sealed class MusicContentState(MusicRuntimeContext ctx, MusicCatalogAct
     internal ObservableCollection<PlaylistRow> Playlists { get; } = [];
     internal ObservableCollection<PlaylistRow> NetworkPlaylists { get; } = [];
     internal ObservableCollection<SongRow> CatalogSongsSource { get; } = [];
+
+    internal ObservableCollection<MusicCatalogSection> SearchOverviewSections { get; } = [];
+    internal ObservableCollection<MusicCatalogSection> SearchSongSections { get; } = [];
+    internal ObservableCollection<MusicCatalogSection> SearchPlaylistSections { get; } = [];
+    internal string SearchKeyword { get; set; } = "";
+    internal string SearchView { get; set; } = "overview";
+    internal string SearchKindLabel { get; set; } = "歌曲";
+    internal long SearchAccountEpoch { get; set; }
+    internal bool HasSearchSession { get; set; }
+
+    internal ObservableCollection<MusicCatalogSection> SearchActiveSections => SearchView switch
+    {
+        "overview" => SearchOverviewSections,
+        "songs" => SearchSongSections,
+        _ => SearchPlaylistSections
+    };
+    internal bool IsDiscovery => ctx.CurrentRoute == "catalog-discovery";
+    internal bool IsSearchPage => ctx.CurrentRoute == "catalog-search";
+    internal bool IsSearchSongs => IsSearchPage && SearchView == "songs";
 
     internal string Heading { get => heading; set => heading = value; }
     internal int Total { get => total; set => total = value; }
@@ -30,7 +49,6 @@ internal sealed class MusicContentState(MusicRuntimeContext ctx, MusicCatalogAct
     internal void SetSelectedSong(SongRow? value)
     {
         if (ctx.Stopping) return;
-        // Ignore a binding/context-menu callback from a retired page.
         if (value is not null && !ctx.ActiveSongs.Any(row => ReferenceEquals(row, value)))
         {
             SelectionRejected?.Invoke();

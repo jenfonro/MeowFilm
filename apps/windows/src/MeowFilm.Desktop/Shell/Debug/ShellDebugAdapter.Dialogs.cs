@@ -18,13 +18,21 @@ internal sealed partial class ShellDebugAdapter
         if (activePanel is IDesktopDebugModal modal)
         {
             var info = modal.DescribeDebugDialog();
+            var explicitButtons = info.Buttons.Select((b, index) => (object)new
+            {
+                index,
+                label = b.Label,
+                automationName = b.AutomationName ?? b.Label,
+                enabled = b.Enabled,
+                kind = b.Action
+            }).ToArray();
             return DescribeDialogSurface(
                 id: info.Id,
                 kind: info.Kind,
                 fallbackTitle: info.FallbackTitle,
                 message: info.Message,
                 surface: info.Surface,
-                explicitButtons: info.ExplicitButtons,
+                explicitButtons: explicitButtons,
                 stackDepth: host.StackDepth);
         }
         return DescribeDialogSurface(
@@ -47,7 +55,19 @@ internal sealed partial class ShellDebugAdapter
             throw DebugApiException.InvalidState("No matching active dialog for dialog.action.");
 
         if (activePanel is IDesktopDebugModal modal)
-            return modal.HandleDebugAction(act, btnIndex, btnLabel);
+        {
+            if (act == "button")
+            {
+                var btns = modal.DescribeDebugDialog().Buttons;
+                if (btnIndex is { } idx && idx >= 0 && idx < btns.Length)
+                    act = btns[idx].Action;
+                else if (!string.IsNullOrWhiteSpace(btnLabel) &&
+                    btns.FirstOrDefault(b => string.Equals(b.Label, btnLabel, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(b.AutomationName, btnLabel, StringComparison.OrdinalIgnoreCase)) is { Label: not null } matched)
+                    act = matched.Action;
+            }
+            return modal.HandleDebugAction(act);
+        }
 
         if (act is "cancel" or "dismiss" or "close")
         {
@@ -56,28 +76,28 @@ internal sealed partial class ShellDebugAdapter
         }
 
         var buttons = CollectVisibleButtons(activePanel);
-        Button? matched = null;
+        Button? matchedButton = null;
         if (btnIndex is { } bi && bi >= 0 && bi < buttons.Count)
         {
-            matched = buttons[bi];
+            matchedButton = buttons[bi];
         }
         else if (!string.IsNullOrWhiteSpace(btnLabel))
         {
-            matched = buttons.FirstOrDefault(b =>
+            matchedButton = buttons.FirstOrDefault(b =>
                 string.Equals(DescribeButtonLabel(b), btnLabel, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(AutomationProperties.GetName(b), btnLabel, StringComparison.OrdinalIgnoreCase));
         }
         else if (act is "confirm" or "primary")
         {
-            matched = buttons.LastOrDefault(b => b.IsEnabled);
+            matchedButton = buttons.LastOrDefault(b => b.IsEnabled);
         }
-        if (matched is not null)
+        if (matchedButton is not null)
         {
-            if (!matched.IsEnabled)
-                throw DebugApiException.InvalidState($"Dialog button '{DescribeButtonLabel(matched)}' is disabled.");
-            if (FrameworkElementAutomationPeer.CreatePeerForElement(matched)?.GetPattern(PatternInterface.Invoke) is IInvokeProvider invoke)
+            if (!matchedButton.IsEnabled)
+                throw DebugApiException.InvalidState($"Dialog button '{DescribeButtonLabel(matchedButton)}' is disabled.");
+            if (FrameworkElementAutomationPeer.CreatePeerForElement(matchedButton)?.GetPattern(PatternInterface.Invoke) is IInvokeProvider invoke)
                 invoke.Invoke();
-            return new { dialog = "channel-dialog", action = act, label = DescribeButtonLabel(matched) };
+            return new { dialog = "channel-dialog", action = act, label = DescribeButtonLabel(matchedButton) };
         }
         throw DebugApiException.InvalidArgument($"No matching button for action '{act}' on 'channel-dialog'.");
     }

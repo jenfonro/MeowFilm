@@ -34,7 +34,6 @@ internal sealed record ResolvedMusic(
     MusicFileIdentity? File = null,
     MusicAudioFileCache.PreparedFile? Bytes = null);
 
-// User intent outlives every resolved URL and every recovery attempt.
 internal sealed record MusicSelection(
     MusicQualityPolicy.Tier? Tier = null,
     ResolvedMusic? Source = null,
@@ -44,12 +43,12 @@ internal sealed record MusicSelection(
     internal bool Manual => ManualSource || Source is not null;
 
     internal bool Allows(ResolvedMusic media) =>
-        (Tier is null || Tier.Levels.Contains(MusicPlaybackSourceService.EffectiveLevel(media))) &&
-        (Source is null || MusicPlaybackSourceService.SourceIdentity(Source.Target!) == MusicPlaybackSourceService.SourceIdentity(media.Target!) &&
+        (Tier is null || Tier.Levels.Contains(MusicPlaybackController.EffectiveLevel(media))) &&
+        (Source is null || MusicPlaybackController.SourceIdentity(Source.Target!) == MusicPlaybackController.SourceIdentity(media.Target!) &&
             Source.Target!.PolicyRequest == media.Target!.PolicyRequest &&
             Source.Target.Quality == media.Target.Quality &&
-            (!MusicPlaybackSourceService.QualityVerified(Source) || !MusicPlaybackSourceService.QualityVerified(media) ||
-                MusicPlaybackSourceService.EffectiveLevel(Source) == MusicPlaybackSourceService.EffectiveLevel(media)));
+            (!MusicPlaybackController.QualityVerified(Source) || !MusicPlaybackController.QualityVerified(media) ||
+                MusicPlaybackController.EffectiveLevel(Source) == MusicPlaybackController.EffectiveLevel(media)));
 }
 
 internal enum SourceAttemptState { Pending, Ok, Unavailable }
@@ -64,53 +63,36 @@ internal sealed class SourceAttempt(string key, MusicOnlineTarget target)
     internal long At;
 }
 
-/// <summary>
-/// Non-UI domain service owning music source candidate resolution (official + script),
-/// quality-policy verification, recording choice memory, and exclusion/source revision tracking.
-/// </summary>
-internal sealed class MusicPlaybackSourceService
+public sealed partial class MusicPlaybackController
 {
-    private readonly MusicRuntimeContext ctx;
-    private readonly MusicSettingsController settings;
-    private readonly Func<SongRow, string, string, AudioFileInfoRecord?> tryGetVerifiedPreparedReceipt;
     private readonly Dictionary<string, string> recordingChoices = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> recordingPlatforms = new(StringComparer.Ordinal);
     private long exclusionsRevision;
     private long selectionSourcesRevision;
 
-    internal MusicPlaybackSourceService(
-        MusicRuntimeContext ctx,
-        MusicSettingsController settings,
-        Func<SongRow, string, string, AudioFileInfoRecord?> tryGetVerifiedPreparedReceipt)
-    {
-        this.ctx = ctx;
-        this.settings = settings;
-        this.tryGetVerifiedPreparedReceipt = tryGetVerifiedPreparedReceipt;
-    }
-
-    internal MusicNativeApplication Application => ctx.Application;
+    internal MusicNativeApplication Application => application;
     internal MusicSettingsController Settings => settings;
-    internal MusicAudioFileCache? AudioFileCache => ctx.AudioFileCache;
+    internal MusicAudioFileCache? AudioFileCache => audioFileCache;
     internal long ExclusionsRevision => Interlocked.Read(ref exclusionsRevision);
     internal long SelectionSourcesRevision => Interlocked.Read(ref selectionSourcesRevision);
 
-    internal void IncrementExclusionsRevision() => Interlocked.Increment(ref exclusionsRevision);
+    private void IncrementExclusionsRevision() => Interlocked.Increment(ref exclusionsRevision);
     internal void IncrementSelectionSourcesRevision() => Interlocked.Increment(ref selectionSourcesRevision);
 
-    internal void RememberRecording(string songId, string platform, string sourceKey)
+    private void RememberRecording(string songId, string platform, string sourceKey)
     {
         recordingPlatforms[songId] = platform;
         recordingChoices[songId + "\0" + platform] = sourceKey;
     }
 
-    internal void ForgetRecording(string songId)
+    private void ForgetRecording(string songId)
     {
         recordingPlatforms.Remove(songId);
         foreach (var key in recordingChoices.Keys.Where(key => key.StartsWith(songId + "\0", StringComparison.Ordinal)).ToArray())
             recordingChoices.Remove(key);
     }
 
-    internal bool HasRememberedRecording(string songId) =>
+    private bool HasRememberedRecording(string songId) =>
         recordingChoices.Keys.Any(key => key.StartsWith(songId + "\0", StringComparison.Ordinal));
 
     internal static MusicSongRecord KnownOfficialSong(SongRow song, MusicSongRecord? snapshot = null) =>
@@ -120,7 +102,6 @@ internal sealed class MusicPlaybackSourceService
         (media.Target is { Official: true, AccountScope: not null, QualityCacheSignature: not null } target
             ? new(target.AccountScope, target.QualityCacheSignature) : null);
 
-    // The identity of a candidate includes its provider, not only the recording.
     internal static string SourceIdentity(MusicOnlineTarget target) =>
         MusicRules.CanonicalArray(target.Installation ?? "\0", target.Platform, target.SourceKey ?? "\0");
 
@@ -156,18 +137,16 @@ internal sealed class MusicPlaybackSourceService
     internal static bool MediaDurationMismatch(SongRow song, double actual) =>
         double.IsFinite(actual) && actual > 0 && ExpectedDuration(song) is > 0 and var expected && Math.Abs(actual - expected) > 10;
 
-    internal async Task<MusicSourceSession> BeginSessionAsync(SongRow song, CancellationToken token, bool officialOnly = false)
+    private async Task<MusicSourceSession> BeginSourceSessionAsync(SongRow song, CancellationToken token, bool officialOnly = false)
     {
-        var qualityResult = await ctx.RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-            ct => ctx.Application.GetQualityPolicyAsync(ct), token);
+        var qualityResult = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+            ct => application.GetQualityPolicyAsync(ct), token);
         settings.AcceptQuality(qualityResult);
-        var policy = qualityResult.Settings;
-        string signature = qualityResult.Signature;
-        var officials = await ctx.Application.GetOfficialSourcesAsync(token);
+        var officials = await application.GetOfficialSourcesAsync(token);
         var enabled = officials.Enabled.ToHashSet(StringComparer.Ordinal);
         string? platform = recordingPlatforms.GetValueOrDefault(song.Id);
         string? key = platform is null ? null : recordingChoices.GetValueOrDefault(song.Id + "\0" + platform);
-        var session = new MusicSourceSession(this, song, signature, policy, enabled, officialOnly, platform, key);
+        var session = new MusicSourceSession(this, song, qualityResult.Signature, qualityResult.Settings, enabled, officialOnly, platform, key);
         await session.RefreshSongAsync(token);
         await session.LoadExclusionsAsync(token);
         return session;
@@ -189,14 +168,14 @@ internal sealed class MusicPlaybackSourceService
     {
         var knownSong = KnownOfficialSong(song, target.RecordingSong);
         string quality = initial ? target.PolicyRequest : target.Quality;
-        if (initial && cacheOnly && ctx.AudioFileCache is not null)
+        if (initial && cacheOnly && audioFileCache is not null)
         {
-            var authority = await ctx.Application.GetOfficialCacheContextAsync(
+            var authority = await application.GetOfficialCacheContextAsync(
                 target.Platform, knownSong, quality, target.SourceKey, target.AccountScope,
                 target.Generation, target.QualityPolicySignature, target.ManualSource, token);
             string scope = authority.Scope, signature = authority.QualityCacheSignature;
-            var info = tryGetVerifiedPreparedReceipt(song, scope, signature)
-                ?? await ctx.AudioFileCache.ReadInfoAsync(scope, song.Id, signature, token);
+            var info = TryGetVerifiedPreparedReceipt(song, scope, signature)
+                ?? await audioFileCache.ReadInfoAsync(scope, song.Id, signature, token);
             if (info is not null)
             {
                 if (info.Full != true)
@@ -207,32 +186,26 @@ internal sealed class MusicPlaybackSourceService
                     SourceKey = authority.SourceKey, QualityCacheSignature = signature,
                     Quality = info.Quality!, RecordingSong = knownSong
                 };
-                var policy = await ctx.RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-                    ct => ctx.Application.GetQualityPolicyAsync(ct), token);
+                var policy = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+                    ct => application.GetQualityPolicyAsync(ct), token);
                 if (policy.Signature != target.QualityPolicySignature)
                     throw new MusicOperationException("QUALITY_POLICY_CHANGED");
                 return new(null, new Dictionary<string, string>(), cachedTarget, Receipt: info);
             }
         }
         if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
-        var response = await ctx.Application.ResolveOfficialAudioAsync(
+        var response = await application.ResolveOfficialAudioAsync(
             target.Platform, knownSong, quality, target.SourceKey, target.AccountScope,
             target.Generation, target.QualityPolicySignature, target.ManualSource,
             cacheOnly: urlCacheOnly, refresh: !initial || refresh, cancellationToken: token);
         token.ThrowIfCancellationRequested();
-        MusicDto.Require(
-            response.Platform == target.Platform && response.SongId == song.Id &&
-            (target.SourceKey is null || response.SourceKey == target.SourceKey) &&
-            (initial || response.Generation == target.Generation && response.Scope == target.AccountScope) &&
-            response.QualityPolicySignature == target.QualityPolicySignature &&
-            !response.PlaybackVerified &&
-            (initial || response.Quality == target.Quality));
-        var currentPolicy = await ctx.RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-            ct => ctx.Application.GetQualityPolicyAsync(ct), token);
+        var currentPolicy = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+            ct => application.GetQualityPolicyAsync(ct), token);
         token.ThrowIfCancellationRequested();
         if (currentPolicy.Signature != target.QualityPolicySignature)
             throw new MusicOperationException("QUALITY_POLICY_CHANGED");
-        MusicDto.Require(response.ExpiresAt is null || response.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        if (response.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            throw new MusicOperationException("MEDIA_EXPIRED");
         return new(response.Uri, response.Headers, target with
         {
             Generation = response.Generation, SourceKey = response.SourceKey,
@@ -250,9 +223,7 @@ internal sealed class MusicPlaybackSourceService
     {
         var recordingSong = KnownOfficialSong(song, target.RecordingSong);
         string installationId = target.Installation ?? throw new MusicOperationException("TARGET_REQUIRED");
-        if (!initial)
-            MusicDto.Require(target.QualityPolicySignature is not null && target.QualityCacheSignature is not null);
-        var response = await ctx.Application.ResolveOnlineAudioAsync(
+        var response = await application.ResolveOnlineAudioAsync(
             installationId,
             target.Platform,
             recordingSong,
@@ -263,23 +234,15 @@ internal sealed class MusicPlaybackSourceService
             target.QualityCacheSignature,
             token);
         token.ThrowIfCancellationRequested();
-        MusicDto.Require(
-            response.InstallationId == target.Installation &&
-            response.Platform == target.Platform && response.SongId == song.Id &&
-            response.Quality == target.Quality &&
-            (target.SourceKey is null || response.SourceKey == target.SourceKey) &&
-            (initial || response.Generation == target.Generation) &&
-            (target.QualityPolicySignature is null || response.QualityPolicySignature == target.QualityPolicySignature) &&
-            (target.QualityCacheSignature is null || response.QualityCacheSignature == target.QualityCacheSignature) &&
-            !response.PlaybackVerified && !response.QualityVerified);
         if (response.Duration is { } seconds && MediaDurationMismatch(song, seconds))
             throw new MusicOperationException("RECORDING_MISMATCH");
-        var qualityReply = await ctx.RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-            ct => ctx.Application.GetQualityPolicyAsync(ct), token);
+        var qualityReply = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+            ct => application.GetQualityPolicyAsync(ct), token);
         token.ThrowIfCancellationRequested();
         if (qualityReply.Signature != response.QualityPolicySignature)
             throw new MusicOperationException("QUALITY_POLICY_CHANGED");
-        MusicDto.Require(response.ExpiresAt is null || response.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        if (response.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            throw new MusicOperationException("EXPIRED_MEDIA_CANDIDATE");
         return new(response.Uri, response.Headers, target with
         {
             Generation = response.Generation, SourceKey = response.SourceKey, Quality = response.Quality,
@@ -289,12 +252,12 @@ internal sealed class MusicPlaybackSourceService
         }, response.ExpiresAt);
     }
 
-    internal async Task ConfirmOfficialPlaybackAsync(SongRow song, MusicOnlineTarget target, CancellationToken token)
+    private async Task ConfirmOfficialPlaybackAsync(SongRow song, MusicOnlineTarget target, CancellationToken token)
     {
         var knownSong = KnownOfficialSong(song, target.RecordingSong);
         try
         {
-            await ctx.Application.ConfirmOfficialPlaybackAsync(
+            await application.ConfirmOfficialPlaybackAsync(
                 target.Platform, knownSong, target.Quality, target.SourceKey, target.AccountScope,
                 target.Generation, target.QualityPolicySignature, target.ManualSource, token);
         }

@@ -407,8 +407,8 @@ struct MusicNativeSyncRound {
 
 enum MusicNativeSyncLogic {
     static func unique(_ ids: [String]) -> [String] {
-        var seen = Set<Data>()
-        return ids.filter { seen.insert(Data($0.utf8)).inserted }
+        var seen = Set<String>()
+        return ids.filter { seen.insert($0).inserted }
     }
 
     /// iWebPlus mergeOrder: stable existing anchors, including conflicting

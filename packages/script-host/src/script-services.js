@@ -1,7 +1,6 @@
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { EventEmitter } from 'node:events';
-import { Writable, Readable } from 'node:stream';
 import { randomBytes } from 'node:crypto';
 import { deferred, fault, requireValue } from './errors.js';
 import { isLoopbackHost } from './network-boundary.js';
@@ -494,8 +493,6 @@ export class ScriptServices {
           !options.path && !options.socket && !options.lookup && !options.createConnection,
         'PERMISSION_DENIED');
         const mapped = owner.connection(options, secure);
-        requireValue(mapped.meowLocal || isLoopbackHost(mapped.host) ||
-          owner.session.network === undefined, 'CAPABILITY_UNAVAILABLE');
         const clean = { ...options, host: mapped.host, port: mapped.port,
           ...(secure ? owner.tlsOptions(options, { client: true, local: Boolean(mapped.meowLocal) }) : {}) };
         const socket = connect.call(this, clean, secure ? callback : undefined);
@@ -620,12 +617,11 @@ export class ScriptServices {
           hostname: options.hostname, port: options.port, path: options.path, method: options.method,
           headers: options.headers, auth: options.auth, timeout: options.timeout, agent: selectedAgent,
         };
-        const open = settings => this.openRequest(requested, settings, outbound);
         const intercepted = !loopback && this.session.interceptor?.request(requested, clean, outbound);
         if (intercepted) {
           return this.trackRequest(intercepted, outbound, callback);
         }
-        return this.trackRequest(open(clean), outbound, callback, scopeToken);
+        return this.trackRequest((clean.protocol === 'https:' ? https : http).request(clean), outbound, callback, scopeToken);
       }
       catch (error) { scopeToken?.release(); outbound.close(); throw error; }
     };
@@ -645,15 +641,9 @@ export class ScriptServices {
     };
   }
 
-  openRequest(requested, options, context) {
-    if (!isLoopbackHost(requested.hostname) && typeof this.session.network === 'function')
-      return new AdapterRequest(this.session, requested, options, context);
-    return (options.protocol === 'https:' ? https : http).request(options);
-  }
-
   createOutboundScope(context) {
     const scope = new ResourceScope(this.session.root.signal);
-    for (const key of ['siteId', 'requestId', 'associationId', 'settings', 'panShares', 'storageReceipt'])
+    for (const key of ['siteId', 'requestId', 'settings', 'panShares', 'storageReceipt'])
       if (Object.hasOwn(context, key)) scope[key] = context[key];
     // A script request can outlive the inbound exchange, including a delayed
     // ClientRequest.end() or a request to another listener of this instance.
@@ -662,7 +652,6 @@ export class ScriptServices {
     if (context !== this.session.root && context !== this.session.resourceScope?.()) {
       const ended = () => {
         if (context.completedResponse) {
-          delete scope.associationId;
           delete scope.storageReceipt;
         } else scope.close(context.reason);
       };
@@ -792,12 +781,6 @@ export class ScriptServices {
     return target;
   }
 
-  externalURL(input) {
-    const target = new URL(input);
-    requireValue(['http:', 'https:'].includes(target.protocol), 'INVALID_ARGUMENT');
-    return target.href;
-  }
-
   listener(port) {
     const target = [...this.listeners].find(server => server.meowStarted && server.listening &&
       server.address?.()?.port === Number(port)) ?? this.aliases.get(Number(port));
@@ -830,7 +813,7 @@ export class ScriptServices {
     const scope = new ResourceScope(this.session.root.signal);
     scope.ownsTransport = true;
     scope.assertOpen();
-    for (const key of ['siteId', 'requestId', 'associationId', 'settings', 'panShares', 'storageReceipt'])
+    for (const key of ['siteId', 'requestId', 'settings', 'panShares', 'storageReceipt'])
       if (Object.hasOwn(transferScope, key)) scope[key] = transferScope[key];
     scope.failureScope = transferScope;
     const state = { scope };
@@ -1104,128 +1087,5 @@ export class ScriptServices {
     failure ??= this.cleanupState.error;
     this.cleanupState.error = null;
     if (failure) throw failure;
-  }
-}
-
-// An injected metadata network adapter cannot accidentally fall through to
-// host TCP. Production without an adapter uses native streaming HTTP above.
-class AdapterRequest extends Writable {
-  constructor(session, url, options, scope) {
-    super();
-    this.session = session; this.url = url; this.options = options; this.scope = scope;
-    this.chunks = []; this.headers = Object.fromEntries(Object.entries(options.headers ?? {})
-      .map(([key, value]) => [key.toLowerCase(), value]));
-    if (options.auth !== undefined && this.headers.authorization === undefined)
-      this.headers.authorization = 'Basic ' + Buffer.from(options.auth).toString('base64');
-    this.method = options.method ?? 'GET'; this.path = url.pathname + url.search;
-    this.controller = new AbortController();
-    this.scopeAbort = () => this.controller.abort(scope.reason);
-    if (scope.signal.aborted) this.scopeAbort();
-    else scope.signal.addEventListener('abort', this.scopeAbort, { once: true });
-  }
-  setHeader(key, value) { this.headers[key.toLowerCase()] = value; }
-  getHeader(key) { return this.headers[key.toLowerCase()]; }
-  getHeaders() { return { ...this.headers }; }
-  getHeaderNames() { return Object.keys(this.headers); }
-  hasHeader(key) { return Object.hasOwn(this.headers, key.toLowerCase()); }
-  removeHeader(key) { delete this.headers[key.toLowerCase()]; }
-  flushHeaders() {}
-  setTimeout(delay, callback) {
-    clearTimeout(this.timer);
-    if (callback) this.once('timeout', callback);
-    this.timer = setTimeout(() => this.emit('timeout'), delay);
-    return this;
-  }
-  setNoDelay() { return this; }
-  setSocketKeepAlive() { return this; }
-  abort() {
-    try { this.emit('abort'); }
-    finally { this.destroy(); }
-    return this;
-  }
-  _write(chunk, _, done) { this.chunks.push(Buffer.from(chunk)); done(); }
-  _final(done) {
-    const session = this.session;
-    if (!session || !this.controller || this.controller.signal.aborted) {
-      done(fault('SERVICE_CLOSED'));
-      return;
-    }
-    const sessionRef = new WeakRef(session);
-    const network = session.network;
-    const input = {
-      url: this.url.href, options: { method: this.method, headers: this.headers,
-        ...(this.chunks.length ? { body: Buffer.concat(this.chunks) } : {}) },
-      signal: this.controller.signal, scope: session.scopeIdentity(this.scope),
-      associationId: this.scope.associationId,
-      validateURL: value => {
-        const owner = sessionRef.deref();
-        if (!owner) throw fault('STALE_SESSION');
-        return owner.services.externalURL(value);
-      },
-    };
-    const completion = {
-      active: true, request: new WeakRef(this), done,
-      settle(error, reply) {
-        if (!this.active) return;
-        this.active = false;
-        const request = this.request.deref();
-        const finish = this.done;
-        this.request = null; this.done = null;
-        if (!request || request.destroyed || request.controller.signal.aborted) return;
-        if (error) { finish(error); return; }
-        try {
-          const response = Readable.from([Buffer.from(reply.body ?? '')]);
-          Object.assign(response, {
-            statusCode: reply.statusCode, statusMessage: reply.statusMessage ?? '',
-            headers: reply.headers ?? {}, rawHeaders: Object.entries(reply.headers ?? {})
-              .flatMap(([key, value]) => [key, String(value)]),
-            trailers: {}, rawTrailers: [], httpVersion: '1.1', httpVersionMajor: 1,
-            httpVersionMinor: 1, complete: true, req: request,
-          });
-          request.emit('response', response);
-          finish();
-        } catch (failure) { finish(failure); }
-      },
-      clear() {
-        this.active = false;
-        this.request = null; this.done = null;
-      },
-    };
-    this.adapterCompletion = completion;
-    const task = Promise.resolve().then(() => network(input));
-    try { session.trackAdapter(task); }
-    catch (error) {
-      completion.clear();
-      task.catch(() => {});
-      done(error);
-      return;
-    }
-    task.then(
-      reply => completion.settle(null, reply),
-      error => completion.settle(error),
-    ).catch(() => {});
-  }
-  _destroy(error, done) {
-    let failure = error;
-    const failed = next => { failure ??= next; };
-    try { this.adapterCompletion?.clear(); } catch (next) { failed(next); }
-    this.adapterCompletion = null;
-    clearTimeout(this.timer);
-    this.timer = null;
-    try { this.scope?.signal.removeEventListener('abort', this.scopeAbort); }
-    catch (next) { failed(next); }
-    try { this.controller?.abort(error ?? fault('CANCELLED')); }
-    catch (next) { failed(next); }
-    this.chunks = [];
-    this.headers = {};
-    this.options = null;
-    this.url = null;
-    this.path = null;
-    this.method = null;
-    this.controller = null;
-    this.scopeAbort = null;
-    this.session = null;
-    this.scope = null;
-    done(failure);
   }
 }

@@ -42,19 +42,6 @@ public struct MusicSourceDiscoveryEntry: Codable, Equatable, Sendable {
         self.checkedAt = checkedAt; self.sourceKeys = sourceKeys; self.observations = observations
     }
 }
-public protocol MusicSourceDiscoveryCaching: Sendable {
-    var persistsRecords: Bool { get }
-    func entries() async -> [String: [String: MusicSourceDiscoveryEntry]]
-    func entries(songID: String) async -> [String: MusicSourceDiscoveryEntry]
-    func observe(songID: String, observation: MusicSearchObservation, sourceKeys: [String]) async
-    func persist(retaining songIDs: [String]) async
-    func clear() async throws
-}
-public extension MusicSourceDiscoveryCaching {
-    func entries(songID: String) async -> [String: MusicSourceDiscoveryEntry] {
-        await entries()[songID] ?? [:]
-    }
-}
 
 private struct SourceDiscoveryState {
     var records: [String: [String: MusicSourceDiscoveryEntry]] = [:]
@@ -90,21 +77,7 @@ private struct SourceDiscoveryState {
     }
 }
 
-public actor MusicNativeMemorySourceDiscoveryCache: MusicSourceDiscoveryCaching {
-    public nonisolated var persistsRecords: Bool { false }
-    private var state = SourceDiscoveryState()
-    private let maximumBytes: Int
-    public init(maximumBytes: Int = 4 * 1024 * 1024) { self.maximumBytes = maximumBytes }
-    public func entries() -> [String: [String: MusicSourceDiscoveryEntry]] { state.records }
-    public func observe(songID: String, observation: MusicSearchObservation, sourceKeys: [String]) {
-        state.observe(songID: songID, observation: observation, sourceKeys: sourceKeys, maximumBytes: maximumBytes)
-    }
-    public func persist(retaining songIDs: [String]) {}
-    public func clear() { state.records.removeAll() }
-}
-
-public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCaching {
-    public nonisolated var persistsRecords: Bool { true }
+public actor MusicNativePersistentSourceDiscoveryCache {
     private let database: SQLiteDatabase
     private let maximumBytes: Int
     private var loaded: Set<String> = []
@@ -301,7 +274,7 @@ extension NativeMusicService {
         try await recordSourceDiscovery(song, platform: platform, rows: rows, observation: observation)
     }
     func scheduleSourceDiscoveryPersist() {
-        guard sourceDiscovery.persistsRecords, !closed else { return }
+        guard !closed else { return }
         sourceDiscoveryPersistPending = true
         guard sourceDiscoveryPersistTask == nil else { return }
         sourceDiscoveryPersistTask = Task { await self.runSourceDiscoveryPersist() }

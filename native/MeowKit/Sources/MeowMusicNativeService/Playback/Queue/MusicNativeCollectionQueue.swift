@@ -14,7 +14,7 @@ extension NativeMusicService: MusicCollectionQueueServing {
             try musicRequire(!refs.isEmpty && refs.indices.contains(index))
             try musicRequire(expectedRevision < musicMaxSafeInteger, .limit)
 
-            let ids = musicIDs(refs.map(\.id)), members = musicIDs(source.order)
+            let ids = Set(refs.map(\.id)), members = Set(source.order)
             try musicRequire(refs.allSatisfy { $0.kind == .library } &&
                 ids.count == refs.count && ids.isSubset(of: members))
             let songs = try refs.map { try song($0, d) }

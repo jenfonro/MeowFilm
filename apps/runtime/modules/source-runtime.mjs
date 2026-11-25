@@ -13,8 +13,8 @@ import {
   SourceRuntimeError,
 } from '@meowfilm/source-runtime';
 
-import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
-import { cloneJSONValue, isRawJSON, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
+import { BridgeError } from '@meowfilm/runtime-bridge';
+import { isRawJSON, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { canonicalJSON } from './json-canonical.mjs';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 import { createSourceLibrary } from './source-library.mjs';
@@ -53,10 +53,8 @@ function integer(value, minimum = 0) {
   requireValue(Number.isSafeInteger(value) && value >= minimum);
 }
 
-function snapshot(value) { return cloneJSONValue(value); }
 function metadataValue(value) {
   requireValue(object(value));
-  validateJSONValue(value);
   return value;
 }
 
@@ -158,7 +156,7 @@ export function createSourceRuntimeModule({
   let closed = false;
   let closing;
 
-  const success = value => { validateJSONValue(value); return { ok: true, contract: sourceRuntimeContract, value }; };
+  const success = value => ({ ok: true, contract: sourceRuntimeContract, value });
   const failure = error => ({ ok: false, contract: sourceRuntimeContract, code: errorCode(error) });
   const guard = signal => {
     requireValue(!closed, 'CLOSED');
@@ -244,8 +242,8 @@ export function createSourceRuntimeModule({
         requireValue(signal === undefined || signal instanceof AbortSignal);
         guard(signal);
         requireValue(object(parameters));
-        const captured = snapshot(Object.fromEntries(parametersUsed
-          .filter(key => Object.hasOwn(parameters, key)).map(key => [key, parameters[key]])));
+        const captured = Object.fromEntries(parametersUsed
+          .filter(key => Object.hasOwn(parameters, key)).map(key => [key, parameters[key]]));
         const active = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
         const result = await body(captured, active);
         guard(active);
@@ -395,7 +393,6 @@ export function createSourceRuntimeModule({
             observe: host.observe(id),
           };
           const response = { instance: instance(binding, next) };
-          success(response);
           if (initial) initial.binding = binding;
           bindings.set(id, binding);
           await releaseProfiles(id, next.generation);

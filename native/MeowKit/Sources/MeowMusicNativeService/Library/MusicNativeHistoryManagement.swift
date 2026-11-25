@@ -21,7 +21,7 @@ extension NativeMusicService: MusicHistoryManaging {
     public func removeHistory(detail: MusicHistoryDetail) async throws {
         try transaction([.history]) { d in
             _ = try boundHistorySnapshot(detail, in: d)
-            d.history.playlists = d.history.playlists.filter { !musicSame($0.id, detail.id) }
+            d.history.playlists = d.history.playlists.filter { $0.id != detail.id }
         }
     }
 
@@ -72,7 +72,7 @@ extension NativeMusicService: MusicHistoryManaging {
 
     private func historySnapshot(id: String, in d: MusicDomainState) throws -> MusicHistoryPlaylistRecord {
         _ = try musicText(id)
-        let matches = d.history.playlists.filter { musicSame($0.id, id) }
+        let matches = d.history.playlists.filter { $0.id == id }
         guard let snapshot = matches.first else { throw MusicServiceError.notFound }
         try musicRequire(matches.count == 1, .corruptStorage)
         return snapshot
@@ -121,7 +121,7 @@ extension NativeMusicService: MusicHistoryManaging {
     private func boundHistorySnapshot(_ detail: MusicHistoryDetail, in d: MusicDomainState) throws -> MusicHistoryPlaylistRecord {
         let snapshot = try historySnapshot(id: detail.id, in: d)
         try musicRequire(musicHex(detail.actionToken.rawValue) &&
-            musicSame(detail.actionToken.rawValue, historyActionToken(snapshot).rawValue), .targetChanged)
+            detail.actionToken.rawValue == historyActionToken(snapshot).rawValue, .targetChanged)
         return snapshot
     }
 }
@@ -159,8 +159,6 @@ private struct MusicNativeHistorySnapshot {
                     throw MusicServiceError.corruptStorage
                 }
                 serial = max(serial, number)
-                _ = try musicText(song.songID)
-                _ = try MusicModel.sources(song)
                 rows.append(MusicQueueEntryRecord(id: occurrence, songID: entry.songID, context: entry.context))
                 let displayContext = entry.context.isEmpty
                     ? (raw.context.isEmpty ? (raw.entries.first?.context ?? .empty) : raw.context)

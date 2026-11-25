@@ -103,11 +103,7 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
         private readonly Func<string, ValueTask> releaseResource;
         private readonly CancellationTokenSource lifetime;
         private Task? release;
-        private bool released;
-        private bool lifetimeCancelled;
-        private bool lifetimeCancelling;
-        private bool lifetimeDisposePending;
-        private bool lifetimeDisposed;
+        private bool released, lifetimeCancelled, lifetimeDisposed;
         internal string Id { get; }
         public Uri Address { get; }
         public IReadOnlyDictionary<string, string> Headers => NoHeaders;
@@ -130,18 +126,13 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
             {
                 if (released) return ValueTask.CompletedTask;
                 if (release is { IsCompleted: false } inFlight) return new(inFlight);
-                var task = ReleaseAsync();
-                release = task;
-                return new(task);
+                return new(release = ReleaseAsync());
             }
         }
 
         internal async Task CloseForAuthorityAsync()
         {
-            try
-            {
-                await DisposeAsync().ConfigureAwait(false);
-            }
+            try { await DisposeAsync().ConfigureAwait(false); }
             finally
             {
                 // Detach authority accounting and local CTS even if remote RPC release failed;
@@ -151,60 +142,30 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
             }
         }
 
-        private bool TryBeginCancelLifetime()
-        {
-            lock (sync)
-            {
-                if (lifetimeCancelled || lifetimeDisposed) return false;
-                lifetimeCancelled = true;
-                lifetimeCancelling = true;
-                return true;
-            }
-        }
-
-        private void EndCancelLifetime()
-        {
-            bool shouldDispose;
-            lock (sync)
-            {
-                lifetimeCancelling = false;
-                shouldDispose = lifetimeDisposePending && !lifetimeDisposed;
-                if (shouldDispose)
-                {
-                    lifetimeDisposePending = false;
-                    lifetimeDisposed = true;
-                }
-            }
-            if (shouldDispose) lifetime.Dispose();
-        }
-
         private void DisposeLifetimeOnce()
         {
-            bool shouldDispose;
             lock (sync)
             {
                 if (lifetimeDisposed) return;
-                if (lifetimeCancelling)
-                {
-                    lifetimeDisposePending = true;
-                    return;
-                }
                 lifetimeDisposed = true;
-                shouldDispose = true;
             }
-            if (shouldDispose) lifetime.Dispose();
+            lifetime.Dispose();
         }
 
         private async Task ReleaseAsync()
         {
             await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
-            bool cancelFailed = false;
-            if (TryBeginCancelLifetime())
+            bool shouldCancel, cancelFailed = false;
+            lock (sync)
+            {
+                shouldCancel = !lifetimeCancelled && !lifetimeDisposed;
+                lifetimeCancelled = true;
+            }
+            if (shouldCancel)
             {
                 try { lifetime.Cancel(); }
                 catch (ObjectDisposedException) { }
                 catch { cancelFailed = true; }
-                finally { EndCancelLifetime(); }
             }
             bool resourceFailed = false;
             try { await releaseResource(Id).ConfigureAwait(false); }

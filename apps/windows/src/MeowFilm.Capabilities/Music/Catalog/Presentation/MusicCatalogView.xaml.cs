@@ -150,12 +150,12 @@ public partial class MusicCatalogView : UserControl
         {
             observedCatalog.PropertyChanged -= Changed;
             observedCatalog.ChannelPageRetired -= RetireChannelPresentation;
-            observedCatalog.SearchPlaylistSections.CollectionChanged -= SearchPlaylistsChanged;
             observedCatalog = null;
         }
         if (observedSearch is not null)
         {
             observedSearch.PropertyChanged -= Changed;
+            observedSearch.PlaylistSections.CollectionChanged -= SearchPlaylistsChanged;
             observedSearch = null;
         }
         if (observedLibrary is not null)
@@ -173,7 +173,7 @@ public partial class MusicCatalogView : UserControl
         observedSearch = Search;
         observedLibrary = Library;
         homeDisplay.Observe(observedCatalog?.HomeSections);
-        searchDisplay.Observe(observedCatalog?.SearchOverviewSections);
+        searchDisplay.Observe(observedSearch?.OverviewSections);
         utilityDisplay.Observe(observedCatalog?.UtilitySections);
         ShowChannelPresentation();
         RefreshSearchCards();
@@ -181,9 +181,12 @@ public partial class MusicCatalogView : UserControl
         {
             observedCatalog.PropertyChanged += Changed;
             observedCatalog.ChannelPageRetired += RetireChannelPresentation;
-            observedCatalog.SearchPlaylistSections.CollectionChanged += SearchPlaylistsChanged;
         }
-        if (observedSearch is not null) observedSearch.PropertyChanged += Changed;
+        if (observedSearch is not null)
+        {
+            observedSearch.PropertyChanged += Changed;
+            observedSearch.PlaylistSections.CollectionChanged += SearchPlaylistsChanged;
+        }
         if (observedLibrary is not null) observedLibrary.PropertyChanged += Changed;
     }
 
@@ -249,7 +252,7 @@ public partial class MusicCatalogView : UserControl
     private void SearchPlaylistsChanged(object? sender, NotifyCollectionChangedEventArgs e) => RefreshSearchCards();
 
     private void RefreshSearchCards() => MusicCatalogSectionView.ReconcileCards(searchPlaylists,
-        Catalog is { SearchPlaylistSections.Count: 1 } catalog ? catalog.SearchPlaylistSections[0].Items : []);
+        Search is { PlaylistSections.Count: 1 } search ? search.PlaylistSections[0].Items : []);
 
     internal void ResetSearchPlaylistProjection()
     {
@@ -361,7 +364,11 @@ public partial class MusicCatalogView : UserControl
 
     private void Tag_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Microsoft.UI.Xaml.Controls.Primitives.ButtonBase { Tag: MusicCatalogTag tag }) RunUiAction(() => catalog.CatalogTagAsync(tag)); }
     private void SearchBack_Click(object sender, RoutedEventArgs e) { if (Search is { } search) RunUiAction(search.ReturnToSearchAsync); }
-    private void Cancel_Click(object sender, RoutedEventArgs e) => Catalog?.CancelCatalog();
+    private void Cancel_Click(object sender, RoutedEventArgs e)
+    {
+        if (Search is { IsSearchPage: true } search) _ = search.CancelSearchAsync();
+        else Catalog?.CancelCatalog();
+    }
     private void PlayAll_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.PlayCatalogPlaylistAsync); }
     private void Save_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.SaveCatalogPlaylistAsync); }
     private void Account_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.ReadCatalogAccountAsync); }
@@ -387,11 +394,10 @@ public partial class MusicCatalogView : UserControl
     private void Kind_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (sender is ComboBox { IsLoaded: true, SelectedItem: string kind } picker &&
-            DesktopVisual.IsVisible(picker) && Catalog is { CanCatalogBrowse: true } catalog &&
-            Search is { IsSearchPage: false } && kind != catalog.CatalogSearchKind)
+            DesktopVisual.IsVisible(picker) && Catalog is { CanCatalogBrowse: true } &&
+            Search is { IsSearchPage: false } search && kind != search.SearchKindLabel)
         {
-            catalog.CatalogSearchKind = kind;
-            RunUiAction(catalog.CatalogSearchKindAsync);
+            search.SearchKindLabel = kind;
         }
     }
 

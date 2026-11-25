@@ -1,8 +1,7 @@
 namespace MeowFilm.Capabilities;
 
-internal sealed partial class MusicCatalogBrowseService
+public sealed partial class MusicCatalogController
 {
-    // Home snapshot & lifecycle
     internal async Task ClearHomeSnapshotAsync(CancellationToken token = default)
     {
         homeSnapshot = null;
@@ -14,22 +13,22 @@ internal sealed partial class MusicCatalogBrowseService
     internal Task<(bool HasSnapshot, int PageCount, int SectionCount, int CardCount)> GetHomeSnapshotStatsAsync(CancellationToken token = default) =>
         homeSnapshotStore.GetStatsAsync(token);
 
-    internal Task PrepareStartupAsync(CancellationToken cancellationToken = default)
+    public Task PrepareStartupAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (ctx.Stopping) return Task.FromException(new MusicOperationException("CLOSED"));
+        if (stopping) return Task.FromException(new MusicOperationException("CLOSED"));
         if (startupPreparation is null)
         {
             var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            ctx.LoadDrains.Add(drained.Task);
-            var request = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime.Token);
+            loadDrains.Add(drained.Task);
+            var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             startupCancellation = request;
             startupPreparation = Prepare(request, drained);
             _ = Observe(startupPreparation);
         }
         return startupPreparation.WaitAsync(cancellationToken);
 
-        static async Task Observe(Task work) { try { await work; } catch { /* The caller owns startup failure. */ } }
+        static async Task Observe(Task work) { try { await work; } catch { } }
         async Task Prepare(CancellationTokenSource request, TaskCompletionSource drained)
         {
             await Task.Yield();
@@ -40,7 +39,7 @@ internal sealed partial class MusicCatalogBrowseService
                 if (!homeSnapshotRead)
                 {
                     homeSnapshot = await MusicHomeSnapshotCodec.ReadAsync(
-                        homeSnapshotStore, ctx.Application.ReadSongRecord, request.Token);
+                        homeSnapshotStore, application.ReadSongRecord, request.Token);
                     homeSnapshotRead = true;
                 }
             }
@@ -49,12 +48,12 @@ internal sealed partial class MusicCatalogBrowseService
             {
                 if (ReferenceEquals(startupCancellation, request)) startupCancellation = null;
                 request.Dispose();
-                ctx.LoadDrains.Remove(drained.Task); drained.TrySetResult();
+                loadDrains.Remove(drained.Task); drained.TrySetResult();
             }
         }
     }
 
-    internal async Task NavigateHomeAsync(CancellationToken token)
+    private async Task NavigateHomeAsync(CancellationToken token)
     {
         long submission = ctx.NavigationSubmission;
         try
@@ -65,15 +64,15 @@ internal sealed partial class MusicCatalogBrowseService
         catch (OperationCanceledException) { throw; }
         catch (Exception error)
         {
-            if (!ctx.Stopping && submission == ctx.NavigationSubmission)
+            if (!stopping && submission == ctx.NavigationSubmission)
             {
                 if (!settings.CatalogSourceLoaded) PublishCatalogSourceUnavailable("catalog-home");
-                else ctx.SetStatus(MusicRuntimeContext.ErrorText(error));
+                else ctx.SetStatus(ErrorText(error));
             }
             return;
         }
         token.ThrowIfCancellationRequested();
-        if (ctx.Stopping || submission != ctx.NavigationSubmission) return;
+        if (stopping || submission != ctx.NavigationSubmission) return;
         var sourcePlatform = settings.CatalogSourcePlatform;
         if (publishedHomeState is null && IsCatalogHome && catalogLoadFlight is { } flight && !flight.Work.IsCompleted &&
             flight.Request.Key.Route == "catalog-home" && flight.Request.Key.Platform == sourcePlatform)
@@ -120,12 +119,12 @@ internal sealed partial class MusicCatalogBrowseService
 
     private void StartHomeRefresh()
     {
-        if (ctx.Stopping || !IsCatalogHome || !settings.CatalogSourceLoaded || settings.IsSettingsRequested) return;
+        if (stopping || !IsCatalogHome || !settings.CatalogSourceLoaded || settings.IsSettingsRequested) return;
         homeRefreshRequired = false;
         _ = Refresh();
         async Task Refresh()
         {
-            try { await LoadCatalogAsync("catalog-home", "", 1, null, ctx.Lifetime.Token, refresh: true); }
+            try { await LoadCatalogAsync("catalog-home", "", 1, null, lifetime.Token, refresh: true); }
             catch (OperationCanceledException) { }
         }
     }
@@ -139,17 +138,17 @@ internal sealed partial class MusicCatalogBrowseService
         homeCursors = catalogCursors.ToArray();
         var saved = homeSnapshot;
         var write = Save();
-        ctx.LoadDrains.Add(write);
+        loadDrains.Add(write);
         _ = Observe();
         async Task Save()
         {
-            try { await MusicHomeSnapshotCodec.SaveAsync(homeSnapshotStore, saved, ctx.Lifetime.Token); }
+            try { await MusicHomeSnapshotCodec.SaveAsync(homeSnapshotStore, saved, lifetime.Token); }
             catch (OperationCanceledException) { }
         }
         async Task Observe()
         {
             try { await write; }
-            finally { ctx.LoadDrains.Remove(write); }
+            finally { loadDrains.Remove(write); }
         }
     }
 
@@ -158,18 +157,19 @@ internal sealed partial class MusicCatalogBrowseService
         if (ctx.Dispatcher.IsClosing) return;
         _ = ctx.Dispatcher.EnqueueAsync(() =>
         {
-            if (ctx.Stopping) return;
+            if (stopping) return;
             optionalReads.RetireForAccount(platform, observation);
             RetireChannelAccountPages(platform, observation);
             changedCatalogAccounts.Add(platform);
-            CatalogAccountObserved?.Invoke(platform, observation);
+            if (catalogAction is { } action && action.Platform == platform && action.Observation < observation)
+                catalogActions.Invalidate();
             bool currentRead = catalogLoadFlight is { } flight && flight.Request.Key.Platform == platform &&
                 flight.Request.Key.AccountObservation >= observation;
             if (platform == settings.CatalogSourcePlatform &&
                 !(currentRead && catalogLoadFlight!.Request.Key.Route == "catalog-home") &&
-                publishedHomeState?.AccountStamp != personal.CatalogAccountKey(platform))
+                publishedHomeState?.AccountStamp != CatalogAccountKey(platform))
                 RetireHomeAuthority();
-            if (platform == catalogLoadedPlatform && !currentRead && personal.AccountStamp != personal.CatalogAccountKey(platform))
+            if (platform == catalogLoadedPlatform && !currentRead && catalogAccountStamp != CatalogAccountKey(platform))
                 RetireCatalogContent();
             BeginHomeAccountRecovery(forceRead: false);
         });
@@ -178,7 +178,7 @@ internal sealed partial class MusicCatalogBrowseService
     internal void RefreshHomeDisplay()
     {
         if (homePlatform.Length == 0) return;
-        bool includeAccountEntries = publishedHomeState?.AccountStamp == personal.CatalogAccountKey(homePlatform) ||
+        bool includeAccountEntries = publishedHomeState?.AccountStamp == CatalogAccountKey(homePlatform) ||
             accounts.HasSettledCurrentAccount(homePlatform);
         var display = homeSections.Select(source =>
         {
@@ -212,31 +212,31 @@ internal sealed partial class MusicCatalogBrowseService
 
     internal void BeginHomeAccountRecovery(bool forceRead)
     {
-        if (ctx.Stopping || !settings.CatalogSourceLoaded) return;
+        if (stopping || !settings.CatalogSourceLoaded) return;
         homeAccountRecoveryPending = true;
         homeAccountRecoveryForceRead |= forceRead;
         if (!homeAccountRecovery.IsCompleted) return;
         homeAccountRecovery = Recover();
-        ctx.LoadDrains.Add(homeAccountRecovery);
+        loadDrains.Add(homeAccountRecovery);
         _ = Drain(homeAccountRecovery);
-        async Task Drain(Task work) { try { await work; } finally { ctx.LoadDrains.Remove(work); } }
+        async Task Drain(Task work) { try { await work; } finally { loadDrains.Remove(work); } }
         async Task Recover()
         {
             await Task.Yield();
             try
             {
-                while (!ctx.Stopping && homeAccountRecoveryPending)
+                while (!stopping && homeAccountRecoveryPending)
                 {
                     bool forced = homeAccountRecoveryForceRead;
                     homeAccountRecoveryPending = false;
                     homeAccountRecoveryForceRead = false;
                     if (forced) accounts.MarkAccountsStale();
                     await ctx.CommandTail;
-                    if (ctx.Stopping) return;
+                    if (stopping) return;
                     var changed = changedCatalogAccounts.ToArray();
                     changedCatalogAccounts.Clear();
-                    await accounts.EnsureAccountsForRequestAsync(ctx.Lifetime.Token);
-                    if (ctx.Stopping) return;
+                    await accounts.EnsureAccountsForRequestAsync(lifetime.Token);
+                    if (stopping) return;
                     var account = accounts.Accounts.Single(a => a.Platform == settings.CatalogSourcePlatform);
                     if (forced && account.State is "none" or "revoked") RetireHomeAuthority();
                     if (homeRefreshRequired && IsCatalogHome) StartHomeRefresh();
@@ -245,7 +245,7 @@ internal sealed partial class MusicCatalogBrowseService
                 }
             }
             catch (OperationCanceledException) { }
-            catch (MusicOperationException) { /* Preserve the original operation notice. */ }
+            catch (MusicOperationException) { }
             finally
             {
                 homeAccountRecoveryPending = false;
@@ -254,37 +254,37 @@ internal sealed partial class MusicCatalogBrowseService
         }
     }
 
-    internal void PublishCatalogAccountNotice(string code)
+    private void PublishCatalogAccountNotice(string code)
     {
         catalogAccountNotice = MusicCatalogDto.ErrorText(code);
         ctx.NotifyStatusChanged();
     }
 
-    internal void RecoverHomeAfterAuthenticationFailure()
+    private void RecoverHomeAfterAuthenticationFailure()
     {
-        if (ctx.Stopping || !IsCatalogHome ||
+        if (stopping || !IsCatalogHome ||
             accounts.Accounts.Single(a => a.Platform == settings.CatalogSourcePlatform).State is not ("saved" or "verified")) return;
         BeginHomeAccountRecovery(forceRead: true);
     }
 
     private void StartHomeContinuation()
     {
-        if (ctx.Stopping || !IsCatalogHome || !catalogMore || ctx.LoadCancellation is not null ||
+        if (stopping || !IsCatalogHome || !catalogMore || ctx.LoadCancellation is not null ||
             homeContinuationCancellation is not null) return;
-        var request = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime.Token);
+        var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         homeContinuationCancellation = request;
-        notify(nameof(MusicCatalogController.CanCancelCatalog));
+        Changed(nameof(CanCancelCatalog));
         var generation = ctx.LoadGeneration;
         var work = Read();
-        ctx.LoadDrains.Add(work);
+        loadDrains.Add(work);
         _ = Drain(work);
-        async Task Drain(Task task) { try { await task; } finally { ctx.LoadDrains.Remove(task); } }
+        async Task Drain(Task task) { try { await task; } finally { loadDrains.Remove(task); } }
         async Task Read()
         {
             await Task.Yield();
             try
             {
-                while (!ctx.Stopping && generation == ctx.LoadGeneration && !request.IsCancellationRequested && IsCatalogHome && catalogMore)
+                while (!stopping && generation == ctx.LoadGeneration && !request.IsCancellationRequested && IsCatalogHome && catalogMore)
                 {
                     int previous = catalogPage;
                     var next = CaptureCatalogLoadRequest(ctx.CurrentRoute, catalogQuery, previous + 1, catalogContinuation, true, catalogTag);
@@ -296,7 +296,7 @@ internal sealed partial class MusicCatalogBrowseService
             {
                 if (ReferenceEquals(homeContinuationCancellation, request)) homeContinuationCancellation = null;
                 request.Dispose();
-                if (!ctx.Disposed) catalogBindings();
+                if (!disposed) CatalogBindings();
             }
         }
     }

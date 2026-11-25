@@ -1,51 +1,51 @@
 namespace MeowFilm.Capabilities;
 
-internal sealed partial class MusicCatalogBrowseService
+public sealed partial class MusicCatalogController
 {
-    // Navigation & browsing operations
     internal Task ChangeCatalogPlatformAsync(MusicCatalogPlatform platform)
     {
-        if (ctx.Publishing || !CanCatalogBrowse || !IsCatalogPage || platform == personal.SelectedCatalogPlatform ||
-            !personal.PlatformChoicesFor(catalogLoadedPlatform).Contains(platform)) return Task.CompletedTask;
+        if (ctx.Publishing || !CanCatalogBrowse || !IsCatalogPage || platform == SelectedCatalogPlatform ||
+            !CatalogPlatformChoices.Contains(platform)) return Task.CompletedTask;
         RememberCatalogLocation();
-        personal.SelectedCatalogPlatform = platform;
-        if (platform.Key != "tx") personal.CatalogPersonalKind = "all";
-        return LoadCatalogAsync(personal.IsCatalogPersonal ? "catalog-personal" : "catalog-home", "", 1, null, ctx.Lifetime.Token);
+        SelectedCatalogPlatform = platform;
+        if (platform.Key != "tx") CatalogPersonalKind = "all";
+        return LoadCatalogAsync(IsCatalogPersonal ? "catalog-personal" : "catalog-home", "", 1, null, lifetime.Token);
     }
 
-    internal Task CatalogTagAsync(MusicCatalogTag tag)
+    public Task CatalogTagAsync(MusicCatalogTag tag)
     {
         if (ctx.Publishing || !CanCatalogBrowse || tag is null || !CatalogTags.Contains(tag) ||
             !ctx.CurrentRoute.StartsWith("catalog-channel/", StringComparison.Ordinal) ||
             tag.Id == catalogTag && ctx.LoadCancellation is null) return Task.CompletedTask;
-        return LoadCatalogAsync(ctx.CurrentRoute, catalogQuery, 1, null, ctx.Lifetime.Token, tag: tag.Id);
+        return LoadCatalogAsync(ctx.CurrentRoute, catalogQuery, 1, null, lifetime.Token, tag: tag.Id);
     }
 
-    internal Task RefreshCatalogAsync()
+    public Task RefreshCatalogAsync()
     {
-        if (!IsCatalogPage || ctx.Stopping || personal.IsCatalogDaily && personal.DailyStyleBusy || personal.IsUnsupportedCatalogRoute(ctx.CurrentRoute))
+        if (!IsCatalogPage || contentState.IsSearchPage || stopping || IsCatalogDaily && dailyStyleBusy || IsUnsupportedCatalogRoute(ctx.CurrentRoute))
             return Task.CompletedTask;
         ctx.RetireOperationStatus();
-        if (personal.IsCatalogDaily) personal.RetireDailyStyleEditor();
-        return search.IsSearchPage ? search.BeginSearchAsync(search.SearchKeyword, ctx.Lifetime.Token, refresh: true) :
-            LoadCatalogAsync(ctx.CurrentRoute, catalogQuery, 1, null, ctx.Lifetime.Token, refresh: true, tag: catalogTag);
+        if (IsCatalogDaily) RetireDailyStyleEditor();
+        return LoadCatalogAsync(ctx.CurrentRoute, catalogQuery, 1, null, lifetime.Token, refresh: true, tag: catalogTag);
     }
 
-    internal async Task CatalogPageAsync(int direction)
+    public async Task CatalogPageAsync(int direction)
     {
         if (direction is not (-1 or 1) || (direction > 0 ? !CanCatalogNext : !CanCatalogPrevious)) return;
         RememberCatalogLocation();
         int next = catalogPage + direction;
-        if (catalogPages.TryGetValue(next, out var cached) && personal.RestoreCatalogPage(cached, catalogLoadedPlatform))
+        if (catalogPages.TryGetValue(next, out var cached) && RestoreCatalogPage(cached, catalogLoadedPlatform))
         {
             ctx.AdvanceLoadGeneration();
             catalogActions.Invalidate();
             await PublishCatalogAsync(ctx.CurrentRoute, catalogQuery, catalogLoadedPlatform, catalogLoadedKind, next, cached,
-                token: ctx.Lifetime.Token, restore: true);
+                token: lifetime.Token, restore: true);
             return;
         }
-        await LoadCatalogAsync(ctx.CurrentRoute, catalogQuery, next, catalogContinuation, ctx.Lifetime.Token, tag: catalogTag);
+        await LoadCatalogAsync(ctx.CurrentRoute, catalogQuery, next, catalogContinuation, lifetime.Token, tag: catalogTag);
     }
+
+    public Task LoadMoreCatalogPlaylistAsync() => CanLoadMoreCatalogPlaylist ? CatalogPageAsync(1) : Task.CompletedTask;
 
     internal void SelectCatalogSectionTab(MusicCatalogTab tab)
     {
@@ -66,10 +66,10 @@ internal sealed partial class MusicCatalogBrowseService
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch
             {
-                if (!ctx.Stopping && submission == ctx.NavigationSubmission) PublishCatalogSourceUnavailable(route);
+                if (!stopping && submission == ctx.NavigationSubmission) PublishCatalogSourceUnavailable(route);
                 return;
             }
-            if (ctx.Stopping || submission != ctx.NavigationSubmission) return;
+            if (stopping || submission != ctx.NavigationSubmission) return;
             if (route.StartsWith("catalog-channel/", StringComparison.Ordinal) &&
                 route.Split('/', 3)[1] != settings.CatalogSourcePlatform)
                 route = "catalog-channels";
@@ -84,21 +84,20 @@ internal sealed partial class MusicCatalogBrowseService
                 ctx.SetLocation(new(route), heading: "音乐频道", clearSelection: true, clearTotal: true);
                 ctx.SetStatusQuiet(channelEntryError);
                 catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
-                personal.LoadedTarget = null; catalogMore = false; catalogContinuation = null;
+                catalogLoadedTarget = null; catalogMore = false; catalogContinuation = null;
                 catalogPage = 1;
                 ctx.PublishContentSelection(previousSelection); ctx.RefreshBindings(); return;
             }
         }
-        if (route == "catalog-search") { await search.RestoreSearchAsync(token); return; }
-        if (!MusicCatalogDispatcher.IsCatalogSourceRoute(route) && !route.Contains('/') && personal.SelectedCatalogPlatform.Key is "kw" or "mg")
-            personal.SelectedCatalogPlatform = personal.CatalogPlatforms[0];
+        if (!MusicCatalogDispatcher.IsCatalogSourceRoute(route) && !route.Contains('/') && SelectedCatalogPlatform.Key is "kw" or "mg")
+            SelectedCatalogPlatform = CatalogPlatforms[0];
         catalogActions.Invalidate();
         var platform = route.Split('/') is { Length: 3 } parts ? parts[1] :
-            MusicCatalogDispatcher.IsCatalogSourceRoute(route) ? settings.CatalogSourcePlatform : personal.SelectedCatalogPlatform.Key;
+            MusicCatalogDispatcher.IsCatalogSourceRoute(route) ? settings.CatalogSourcePlatform : SelectedCatalogPlatform.Key;
         bool playlist = route.StartsWith("catalog-playlist/", StringComparison.Ordinal);
         if (!playlist && catalogLocations.TryGetValue(route + "/" + platform, out var saved) &&
             saved.Pages.TryGetValue(saved.Page, out var savedPage) &&
-            savedPage.Target?.Cacheable != false && personal.RestoreCatalogPage(savedPage, platform))
+            savedPage.Target?.Cacheable != false && RestoreCatalogPage(savedPage, platform))
         {
             token.ThrowIfCancellationRequested();
             RetireCatalogLoad();
@@ -117,10 +116,9 @@ internal sealed partial class MusicCatalogBrowseService
         await LoadCatalogAsync(route, "", 1, null, token, refresh: playlist);
     }
 
-    internal void CancelCatalog()
+    public void CancelCatalog()
     {
-        if (ctx.Stopping) return;
-        if (search.IsSearchPage) { _ = search.CancelSearchAsync(); return; }
+        if (stopping) return;
         optionalReads.Retire(ctx.CurrentRoute);
         RetireCatalogLoad();
         catalogActions.Invalidate();
@@ -154,7 +152,7 @@ internal sealed partial class MusicCatalogBrowseService
                 heading: IsCatalogHome ? "发现音乐" : "音乐频道", clearCatalogSongs: true, clearSelection: true, clearTotal: true);
             catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
             catalogLoadedPlatform = catalogTag = catalogPageCode = catalogQuery = catalogArtwork = "";
-            personal.AccountStamp = ""; personal.LoadedTarget = null;
+            catalogAccountStamp = ""; catalogLoadedTarget = null;
             catalogContinuation = null; catalogMore = false; catalogPage = 1;
         }
         ctx.PublishContentSelection(previousSelection); ctx.RefreshBindings();
@@ -172,19 +170,19 @@ internal sealed partial class MusicCatalogBrowseService
         ctx.RefreshBindings();
     }
 
-    internal Task ActivateCatalogLandingAsync()
+    public Task ActivateCatalogLandingAsync()
     {
-        if (ctx.Stopping || !settings.CatalogSourceLoaded || ctx.LoadCancellation is not null) return Task.CompletedTask;
+        if (stopping || !settings.CatalogSourceLoaded || ctx.LoadCancellation is not null) return Task.CompletedTask;
         if (IsCatalogHome && homeRefreshRequired)
-            return NavigateHomeAsync(ctx.Lifetime.Token);
+            return NavigateHomeAsync(lifetime.Token);
         if (!catalogSourceReload) return Task.CompletedTask;
         catalogSourceReload = false;
         if (!IsCatalogLanding || catalogLoadedPlatform == settings.CatalogSourcePlatform)
             return Task.CompletedTask;
-        return LoadCatalogAsync(IsCatalogHome ? "catalog-home" : "catalog-channels", "", 1, null, ctx.Lifetime.Token);
+        return LoadCatalogAsync(IsCatalogHome ? "catalog-home" : "catalog-channels", "", 1, null, lifetime.Token);
     }
 
-    internal void RetireCatalogSession()
+    public void RetireCatalogSession()
     {
         catalogActions.Invalidate();
         RetireCatalogContent();
@@ -193,8 +191,8 @@ internal sealed partial class MusicCatalogBrowseService
     private void RetireCatalogContent()
     {
         optionalReads.Retire();
-        personal.ClearForSessionRetire();
-        search.RetireSearchTracked();
+        ClearPersonalForSessionRetire();
+        SessionRetiring?.Invoke();
         var wasPublishing = ctx.Publishing; ctx.Publishing = true;
         try
         {
@@ -206,8 +204,6 @@ internal sealed partial class MusicCatalogBrowseService
             catalogTag = catalogPageCode = catalogQuery = ""; catalogContinuation = null; catalogMore = false; catalogPage = 1;
             channelTags.Clear(); utilityTags.Clear(); CatalogTagGroups = [];
             utilitySections.Clear();
-            search.ClearSearchSections();
-            search.SearchSongsSource.Clear();
             if (IsCatalogPage && !IsCatalogHome) contentState.CatalogSongsSource.Clear();
             ChannelTabs.Clear(); VisibleChannelTabs.Clear(); MoreChannelTabs.Clear(); lastChannelRoute = null; channelEntryError = "";
             if (IsCatalogHome && publishedHomeState is { } home)
@@ -222,7 +218,7 @@ internal sealed partial class MusicCatalogBrowseService
         finally { ctx.Publishing = wasPublishing; }
     }
 
-    internal void RetireCatalogLoad()
+    private void RetireCatalogLoad()
     {
         ctx.AdvanceLoadGeneration();
         var cancellation = ctx.LoadCancellation;

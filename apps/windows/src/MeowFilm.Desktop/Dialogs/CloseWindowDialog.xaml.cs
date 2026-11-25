@@ -56,21 +56,15 @@ public partial class CloseWindowDialog : UserControl, IDesktopDebugModal
         FallbackTitle: "关闭主窗口",
         Message: "关闭行为选择框",
         Surface: DialogSurface,
-        ExplicitButtons:
+        Buttons:
         [
-            new { index = 0, label = "取消", automationName = "取消", enabled = !IsPending, kind = "cancel" },
-            new { index = 1, label = "最小化到托盘", automationName = "最小化到托盘", enabled = !IsPending, kind = "tray" },
-            new { index = 2, label = "退出应用", automationName = "退出", enabled = !IsPending, kind = "exit" }
+            new("取消", "cancel", !IsPending),
+            new("最小化到托盘", "tray", !IsPending),
+            new("退出应用", "exit", !IsPending, "退出")
         ]);
 
-    object IDesktopDebugModal.HandleDebugAction(string act, int? btnIndex, string? btnLabel)
+    object IDesktopDebugModal.HandleDebugAction(string act)
     {
-        if (act == "button")
-        {
-            if (btnIndex == 0 || string.Equals(btnLabel, "取消", StringComparison.OrdinalIgnoreCase)) act = "cancel";
-            else if (btnIndex == 1 || string.Equals(btnLabel, "最小化到托盘", StringComparison.OrdinalIgnoreCase)) act = "tray";
-            else if (btnIndex == 2 || string.Equals(btnLabel, "退出应用", StringComparison.OrdinalIgnoreCase) || string.Equals(btnLabel, "退出", StringComparison.OrdinalIgnoreCase)) act = "exit";
-        }
         if (act is "cancel" or "dismiss" or "close")
         {
             ForceDismissRequested?.Invoke();

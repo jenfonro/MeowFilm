@@ -11,8 +11,6 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicLibraryController : MusicController
 {
     private readonly MusicCatalogController catalog;
-    private readonly MusicSearchController search;
-    private readonly MusicDiscoveryController discovery;
     private readonly MusicPlaybackController playbackController;
     private readonly MusicQueueController queue;
     private readonly MusicCatalogActionState catalogActions;
@@ -24,16 +22,12 @@ public sealed partial class MusicLibraryController : MusicController
     internal MusicLibraryController(
         MusicRuntimeContext ctx,
         MusicCatalogController catalog,
-        MusicSearchController search,
-        MusicDiscoveryController discovery,
         MusicPlaybackController playbackController,
         MusicQueueController queue,
         MusicCatalogActionState catalogActions,
         MusicContentState contentState) : base(ctx)
     {
         this.catalog = catalog;
-        this.search = search;
-        this.discovery = discovery;
         this.playbackController = playbackController;
         this.queue = queue;
         this.catalogActions = catalogActions;
@@ -86,6 +80,7 @@ public sealed partial class MusicLibraryController : MusicController
     public ObservableCollection<ArchivedPlaylist> Archives { get; } = [];
 
     internal event Action? SongFavoritesChanged;
+    internal event Func<Task>? ActiveSurfaceRefreshRequested;
     internal long LoadGeneration => ctx.LoadGeneration;
     internal ObservableCollection<SongRow> ActiveSongs => ctx.ActiveSongs;
     internal void ReportUiError(Exception error)
@@ -93,8 +88,8 @@ public sealed partial class MusicLibraryController : MusicController
         if (!ctx.Stopping && !ctx.Disposed) ctx.SetStatus(MusicRuntimeContext.ErrorText(error));
     }
 
-    public MusicContentPage ContentPage => discovery.IsDiscovery ? MusicContentPage.Discovery :
-        IsArchives ? MusicContentPage.Archives : search.IsSearchSongs ? MusicContentPage.SearchSongs :
+    public MusicContentPage ContentPage => contentState.IsDiscovery ? MusicContentPage.Discovery :
+        IsArchives ? MusicContentPage.Archives : contentState.IsSearchSongs ? MusicContentPage.SearchSongs :
         ShowsSongTable ? MusicContentPage.Songs : MusicContentPage.Catalog;
 
     public string Heading => contentState.Heading;
@@ -106,7 +101,7 @@ public sealed partial class MusicLibraryController : MusicController
     public bool IsLocalLibraryPage => IsSongList || IsArchives;
     public bool IsCollectionPage => IsSongList && collection is not null;
     public bool IsContentDetailPage => IsCollectionPage || catalog.IsCatalogDetailPage;
-    public bool ShowsSongTable => IsSongList || catalog.IsCatalogDetailPage || search.IsSearchSongs;
+    public bool ShowsSongTable => IsSongList || catalog.IsCatalogDetailPage || contentState.IsSearchSongs;
     public bool ShowSongPager => IsSongList && !IsCollectionPage;
     public string? HistoryDate => ctx.CurrentLocation.Date;
     public bool HasCollection => collection is not null;
@@ -139,8 +134,8 @@ public sealed partial class MusicLibraryController : MusicController
 
     public SongRow? CatalogSelectedSong
     {
-        get => search.IsSearchPage ? null : contentState.SelectedSong;
-        set { if (!search.IsSearchPage) SelectedSong = value; }
+        get => contentState.IsSearchPage ? null : contentState.SelectedSong;
+        set { if (!contentState.IsSearchPage) SelectedSong = value; }
     }
 
     public SongRow? SelectedSong
@@ -259,10 +254,10 @@ public sealed partial class MusicLibraryController : MusicController
 
     private (MusicPlayContextRecord? Context, MusicQueueSourceRecord? Source) CaptureFeedbackContext()
     {
-        if (search.IsSearchPage && search.SearchKeyword.Length > 0)
+        if (contentState.IsSearchPage && contentState.SearchKeyword.Length > 0)
         {
             return (
-                MusicPlayContextRecord.Empty with { SourceType = "search", SearchKeyword = search.SearchKeyword },
+                MusicPlayContextRecord.Empty with { SourceType = "search", SearchKeyword = contentState.SearchKeyword },
                 new MusicQueueSourceRecord("search", "搜索结果", "search", null));
         }
         return (catalog.CaptureCatalogFeedbackContext(), null);
@@ -273,8 +268,8 @@ public sealed partial class MusicLibraryController : MusicController
 
     public Task RefreshAsync()
     {
-        if (discovery.IsDiscovery) return discovery.RefreshDiscoveryAsync();
-        if (catalog.IsCatalogPage) return catalog.RefreshCatalogAsync();
+        if (contentState.IsDiscovery || contentState.IsSearchPage || catalog.IsCatalogPage)
+            return ActiveSurfaceRefreshRequested?.Invoke() ?? Task.CompletedTask;
         var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
@@ -480,7 +475,7 @@ public sealed partial class MusicLibraryController : MusicController
         catalogActions.Invalidate();
         playbackController.CancelOnline();
         var song = contentState.SelectedSong; var selected = collection;
-        bool searchDirect = search.IsSearchPage;
+        bool searchDirect = contentState.IsSearchPage;
         var (queueContext, queueSource) = CaptureFeedbackContext();
         var index = song is null ? -1 : ctx.CurrentLocation.Offset + ctx.ActiveSongs.IndexOf(song);
         return RunPlaybackActionAsync(async generation =>
@@ -541,16 +536,13 @@ public sealed partial class MusicLibraryController : MusicController
     private async Task<(PlaylistRow[] Rows, long Revision)> FetchPlaylists(CancellationToken token)
     {
         var rows = new List<PlaylistRow>();
-        var ids = new HashSet<string>(StringComparer.Ordinal);
         long revision = -1;
         while (true)
         {
             var reply = await application.ListCollectionsAsync(rows.Count, 100, token);
-            var nextRevision = reply.Revision;
-            if (revision >= 0 && revision != nextRevision) throw new MusicOperationException("REVISION_CONFLICT");
-            revision = nextRevision;
+            if (revision >= 0 && revision != reply.Revision) throw new MusicOperationException("REVISION_CONFLICT");
+            revision = reply.Revision;
             var page = reply.Items.Select(PlaylistRow.FromSummary).ToArray();
-            MusicDto.Require(page.All(row => ids.Add(row.Id)));
             rows.AddRange(page);
             if (page.Length < 100) break;
         }

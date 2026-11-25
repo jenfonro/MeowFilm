@@ -48,12 +48,3 @@ public enum MusicNativeCacheLifecycleEvent: Sendable, Equatable {
     /// Owner shuts down. Cancel pending work, retain disk bytes across restart.
     case closed
 }
-
-/// A media failure is not an account failure. The caller reports the exact
-/// failed candidate and may refresh once per playback attempt, not in a loop.
-/// The owner rechecks the live account/quality grant, conditionally evicts that
-/// URL, and makes at most one provider request. No source/account substitution.
-public protocol MusicNativeAccountURLRefreshing: Sendable {
-    func nativeRefreshAudio(platform: MusicAccountPlatform, nativeID: String,
-                            selection: MusicPlaybackSelection, rejectedURL: URL) async throws -> MusicNativeAudio
-}

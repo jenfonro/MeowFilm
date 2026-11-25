@@ -1,37 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Watchman Web protocol: NeteaseCloudMusicApiEnhanced v4.41.1 register_checktoken_v2 (MIT).
 import { JSDOM, VirtualConsole } from 'jsdom';
-import http from 'node:http';
 import https from 'node:https';
 import { validToken } from './token.js';
 
 const toolURL = 'https://acstatic-dun.126.net/tool.min.js';
 const productNumber = 'YD00000558929251';
 const businessId = 'bd5d2f973ef74cd2a61325a412ae54d9';
-const redirectStatuses = new Set([301, 302, 303, 307, 308]);
-const maxRedirects = 5;
 const failure = code => Object.assign(new Error(code), { code });
 
-// Use Node native HTTP(S) with a fixed 10-second budget across up to 5 redirects.
+// Use Node native HTTPS with a fixed 10-second budget and no redirect following.
 function downloadTool() {
-  const signal = AbortSignal.timeout(10_000);
-  const fetchHop = (target, redirectsLeft) => new Promise((resolve, reject) => {
-    const transport = target.startsWith('http://') ? http : https;
-    const request = transport.get(target, { signal }, response => {
+  return new Promise((resolve, reject) => {
+    const request = https.get(toolURL, { signal: AbortSignal.timeout(10_000) }, response => {
       response.on('error', reject);
-      if (redirectStatuses.has(response.statusCode)) {
-        const location = response.headers.location;
-        response.resume();
-        if (!location || redirectsLeft <= 0) { reject(failure('UPSTREAM_HTTP')); return; }
-        let next;
-        try { next = new URL(location, target); }
-        catch { reject(failure('UPSTREAM_HTTP')); return; }
-        if (next.protocol !== 'https:' && next.protocol !== 'http:') {
-          reject(failure('UPSTREAM_HTTP')); return;
-        }
-        fetchHop(next.href, redirectsLeft - 1).then(resolve, reject);
-        return;
-      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         response.resume(); reject(failure('UPSTREAM_HTTP')); return;
       }
@@ -42,7 +24,6 @@ function downloadTool() {
     });
     request.on('error', reject);
   });
-  return fetchHop(toolURL, maxRedirects);
 }
 
 /** Constructed only inside the disposable worker; JSDOM is not a security sandbox. */

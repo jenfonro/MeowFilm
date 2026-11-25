@@ -4,12 +4,12 @@ using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority
 
 namespace MeowFilm.Capabilities;
 
-internal sealed partial class MusicCatalogBrowseService
+public sealed partial class MusicCatalogController
 {
-    internal async Task LoadCatalogAsync(string route, string query, int pageNumber, JsonElement? continuation,
+    private async Task LoadCatalogAsync(string route, string query, int pageNumber, JsonElement? continuation,
         CancellationToken token, bool refresh = false, string tag = "")
     {
-        if (ctx.Stopping || personal.IsUnsupportedCatalogRoute(route)) return;
+        if (stopping || IsUnsupportedCatalogRoute(route)) return;
         token.ThrowIfCancellationRequested();
         if (MusicCatalogDispatcher.IsCatalogSourceRoute(route) && !settings.CatalogSourceLoaded)
         {
@@ -18,10 +18,10 @@ internal sealed partial class MusicCatalogBrowseService
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch
             {
-                if (!ctx.Stopping && submission == ctx.NavigationSubmission) PublishCatalogSourceUnavailable(route);
+                if (!stopping && submission == ctx.NavigationSubmission) PublishCatalogSourceUnavailable(route);
                 return;
             }
-            if (ctx.Stopping || submission != ctx.NavigationSubmission) return;
+            if (stopping || submission != ctx.NavigationSubmission) return;
         }
         var request = CaptureCatalogLoadRequest(route, query, pageNumber, continuation, refresh, tag);
         if (catalogLoadFlight is { } current && !current.Work.IsCompleted &&
@@ -37,7 +37,7 @@ internal sealed partial class MusicCatalogBrowseService
         var generation = ctx.AdvanceLoadGeneration();
         var stamp = ctx.NextStatusEpoch();
         ctx.LoadCancellation?.Cancel();
-        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime.Token);
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         var flight = new CatalogLoadFlight(request, generation, stamp, cancellation);
         ctx.LoadCancellation = cancellation;
         catalogLoadFlight = flight;
@@ -46,17 +46,17 @@ internal sealed partial class MusicCatalogBrowseService
         if ((ctx.CurrentRoute != route || catalogLoadedPlatform != request.Key.Platform) &&
             !(IsCatalogHome && request.Target?.Private == true && request.Target.Operation is not ("daily" or "playlist")))
         {
-            personal.RetireDailyStyleEditor();
+            RetireDailyStyleEditor();
             ctx.SetLocation(new(route),
                 heading: request.Target?.Title ?? (route.StartsWith("catalog-playlist/", StringComparison.Ordinal) ? "歌单"
                     : route is "catalog-daily" || route.StartsWith("catalog-daily/", StringComparison.Ordinal) ? "每日推荐" : "音乐内容"),
                 clearCatalogSongs: true, clearSelection: true, clearTotal: true);
-            if (request.Target?.Operation == "daily") personal.CatalogDailyBranch = request.Target.Params.Branch ?? "";
+            if (request.Target?.Operation == "daily") CatalogDailyBranch = request.Target.Params.Branch ?? "";
             if (IsChannelLanding) CatalogTagGroups = [];
-            else if (!IsCatalogHome) { utilitySections.Clear(); }
+            else if (!IsCatalogHome) utilitySections.Clear();
             CatalogTags.Clear();
             catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
-            catalogLoadedPlatform = request.Key.Platform; personal.LoadedTarget = request.Target;
+            catalogLoadedPlatform = request.Key.Platform; catalogLoadedTarget = request.Target;
             catalogPage = 1; catalogMore = false; catalogContinuation = null;
             catalogTag = catalogQuery = "";
             catalogArtwork = request.Target?.Artwork ?? "";
@@ -66,7 +66,7 @@ internal sealed partial class MusicCatalogBrowseService
         if (IsChannelLanding && ctx.CurrentRoute == route) SelectChannelPage(route, request.Key.Platform);
         ctx.PublishContentSelection(previousSelection); ctx.RefreshBindings();
         flight.Work = RunCatalogFlightAsync(flight);
-        ctx.LoadDrains.Add(flight.Work);
+        loadDrains.Add(flight.Work);
         _ = ObserveCatalogLoadAsync(flight);
         await SubscribeCatalogLoad(flight, token);
     }
@@ -74,11 +74,11 @@ internal sealed partial class MusicCatalogBrowseService
     private CatalogLoadRequest CaptureCatalogLoadRequest(string route, string query, int number,
         JsonElement? continuation, bool refresh, string tag)
     {
-        var platform = MusicCatalogDispatcher.IsCatalogSourceRoute(route) ? settings.CatalogSourcePlatform : personal.SelectedCatalogPlatform.Key;
-        var kind = search.SearchKindLabel;
+        var platform = MusicCatalogDispatcher.IsCatalogSourceRoute(route) ? settings.CatalogSourcePlatform : SelectedCatalogPlatform.Key;
+        var kind = contentState.SearchKindLabel;
         var routeParts = route.Split('/', 3);
         if (routeParts.Length == 3) platform = routeParts[1];
-        var target = personal.CatalogRouteTarget(route, platform);
+        var target = CatalogRouteTarget(route, platform);
         if (target is not null) platform = target.Platform;
         var cursor = continuation?.Clone();
         var key = new CatalogLoadKey(route, query, number, cursor?.GetRawText() ?? "", refresh, tag,
@@ -113,7 +113,7 @@ internal sealed partial class MusicCatalogBrowseService
                 if (Interlocked.Decrement(ref flight.Subscribers) == 0 &&
                     callerCancelled && !flight.Work.IsCompleted)
                 {
-                    if (RetireCatalogLoad(flight) && !ctx.Disposed)
+                    if (RetireCatalogLoad(flight) && !disposed)
                         ctx.RefreshBindings();
                 }
             }
@@ -123,13 +123,13 @@ internal sealed partial class MusicCatalogBrowseService
     private async Task ObserveCatalogLoadAsync(CatalogLoadFlight flight)
     {
         try { await flight.Work; }
-        catch { /* The active subscriber observes unexpected owner failures. */ }
-        finally { ctx.LoadDrains.Remove(flight.Work); }
+        catch { }
+        finally { loadDrains.Remove(flight.Work); }
     }
 
     private async Task RunCatalogFlightAsync(CatalogLoadFlight flight)
     {
-        await Task.Yield(); // Publish the unique request owner before any port can complete synchronously.
+        await Task.Yield();
         try { await LoadCatalogCoreAsync(flight); }
         finally
         {
@@ -137,10 +137,10 @@ internal sealed partial class MusicCatalogBrowseService
             if (ReferenceEquals(ctx.LoadCancellation, flight.Cancellation))
             {
                 ctx.LoadCancellation = null;
-                if (!ctx.Disposed) ctx.RefreshBindings();
+                if (!disposed) ctx.RefreshBindings();
             }
             flight.Cancellation.Dispose();
-            if (!ctx.Stopping && flight.Published && flight.Generation == ctx.LoadGeneration) StartHomeContinuation();
+            if (!stopping && flight.Published && flight.Generation == ctx.LoadGeneration) StartHomeContinuation();
         }
     }
 
@@ -149,7 +149,7 @@ internal sealed partial class MusicCatalogBrowseService
         long epoch = accounts.AccountEpoch;
         await accounts.EnsureAccountsForRequestAsync(token);
         token.ThrowIfCancellationRequested();
-        if (ctx.Stopping || generation != ctx.LoadGeneration || epoch != accounts.AccountEpoch) throw new OperationCanceledException(token);
+        if (stopping || generation != ctx.LoadGeneration || epoch != accounts.AccountEpoch) throw new OperationCanceledException(token);
     }
 
     private async Task LoadCatalogCoreAsync(CatalogLoadFlight flight)
@@ -170,12 +170,11 @@ internal sealed partial class MusicCatalogBrowseService
         var target = request.Target;
         try
         {
-            MusicDto.Require(personal.CatalogPlatforms.Any(item => item.Key == platform) && number >= 1);
             if (target?.Private == true) await ReadCatalogAccountForRequestAsync(generation, token);
             else if (platform is "wy" or "tx" or "kg") await accounts.EnsureAccountsForRequestAsync(token);
             token.ThrowIfCancellationRequested();
-            if (ctx.Stopping || generation != ctx.LoadGeneration || key.AccountObservation != accounts.PlatformObservation(platform)) return;
-            var accountStamp = personal.CatalogAccountKey(platform);
+            if (stopping || generation != ctx.LoadGeneration || key.AccountObservation != accounts.PlatformObservation(platform)) return;
+            var accountStamp = CatalogAccountKey(platform);
             string operation, title;
             string? routeId = null;
             if (target is not null && target.Operation != "playlist")
@@ -185,7 +184,6 @@ internal sealed partial class MusicCatalogBrowseService
             else if (route.StartsWith("catalog-playlist/", StringComparison.Ordinal) || route.StartsWith("catalog-channel/", StringComparison.Ordinal))
             {
                 var parts = route.Split('/', 3);
-                MusicDto.Require(parts.Length == 3 && personal.CatalogPlatforms.Any(item => item.Key == parts[1]));
                 platform = parts[1];
                 routeId = Uri.UnescapeDataString(parts[2]);
                 operation = parts[0] == "catalog-playlist" ? "playlist" : "channel";
@@ -201,10 +199,10 @@ internal sealed partial class MusicCatalogBrowseService
                 };
             }
             var reply = await MusicCatalogDispatcher.InvokeOperationAsync(
-                ctx.Application, operation, platform, target, routeId, tag, key.PageCode, number, continuation, refresh, token);
+                application, operation, platform, target, routeId, tag, key.PageCode, number, continuation, refresh, token);
             token.ThrowIfCancellationRequested();
-            if (ctx.Stopping || generation != ctx.LoadGeneration || key.AccountObservation != accounts.PlatformObservation(platform)) return;
-            if (accountStamp != personal.CatalogAccountKey(platform)) throw new MusicOperationException("STALE_SESSION");
+            if (stopping || generation != ctx.LoadGeneration || key.AccountObservation != accounts.PlatformObservation(platform)) return;
+            if (accountStamp != CatalogAccountKey(platform)) throw new MusicOperationException("STALE_SESSION");
             var pageSections = MusicCatalogDto.Read(reply, platform, operation, title, kind == "歌单" ? "playlists" : "songs").ToArray();
             var sections = pageSections;
             bool more = MusicCatalogDto.Boolean(reply, "more", false);
@@ -212,11 +210,8 @@ internal sealed partial class MusicCatalogBrowseService
             JsonElement? next = c.ValueKind == JsonValueKind.Object ? c.Clone() : null;
             bool continuationBlocked = more && (next is null ||
                 catalogCursors.Take(number).Any(old => MusicCatalogDto.CursorKey(old) == MusicCatalogDto.CursorKey(next)));
-            if (number > 1)
-            {
-                if (operation is "home" or "channel" or "playlist")
-                    sections = MusicCatalogDispatcher.MergeSections(CatalogSections, pageSections);
-            }
+            if (number > 1 && operation is "home" or "channel" or "playlist")
+                sections = MusicCatalogDispatcher.MergeSections(CatalogSections, pageSections);
             var tags = target?.Operation == "daily" ? Array.Empty<MusicCatalogTag>() : MusicCatalogDto.Tags(reply).ToArray();
             var selected = MusicCatalogDto.Text(reply, "selectedTag");
             var name = MusicCatalogDto.Text(reply, operation is "home" or "channel" or "artistActivity" or "chart" or "charts" ? "title" : "name");
@@ -273,7 +268,7 @@ internal sealed partial class MusicCatalogBrowseService
         catch (OperationCanceledException) { }
         catch (Exception error)
         {
-            if (!ctx.Stopping && generation == ctx.LoadGeneration && stamp == ctx.StatusEpoch &&
+            if (!stopping && generation == ctx.LoadGeneration && stamp == ctx.StatusEpoch &&
                 key.AccountObservation == accounts.PlatformObservation(platform))
             {
                 if (!IsCatalogHome && error is MusicOperationException { Code: "AUTH_REQUIRED" or "AUTH_EXPIRED" or "STALE_SESSION" or "SESSION_CHANGED" })
@@ -291,10 +286,10 @@ internal sealed partial class MusicCatalogBrowseService
                 ctx.Publishing = true;
                 try
                 {
-                    personal.SelectedCatalogPlatform = personal.CatalogPlatforms.FirstOrDefault(p => p.Key == catalogLoadedPlatform) ?? personal.SelectedCatalogPlatform;
-                    search.SearchKindLabel = catalogLoadedKind;
-                    if (catalogPages.TryGetValue(catalogPage, out var previous)) personal.PublishPersonalCatalog(previous);
-                    ctx.NotifyStatusChanged(); catalogBindings();
+                    SelectedCatalogPlatform = CatalogPlatforms.FirstOrDefault(p => p.Key == catalogLoadedPlatform) ?? SelectedCatalogPlatform;
+                    contentState.SearchKindLabel = catalogLoadedKind;
+                    if (catalogPages.TryGetValue(catalogPage, out var previous)) PublishPersonalCatalog(previous);
+                    ctx.NotifyStatusChanged(); CatalogBindings();
                 }
                 finally { ctx.Publishing = false; }
                 if (error is MusicOperationException { Code: "AUTH_REQUIRED" or "AUTH_EXPIRED" })
@@ -316,21 +311,21 @@ internal sealed partial class MusicCatalogBrowseService
         while (target.Count > incoming.Length) target.RemoveAt(target.Count - 1);
     }
 
-    internal async Task<bool> PublishCatalogAsync(string route, string query, string platform, string kind, int number, CatalogPageState state,
+    private async Task<bool> PublishCatalogAsync(string route, string query, string platform, string kind, int number, CatalogPageState state,
         bool append = false, bool initializeEntries = true, CancellationToken token = default,
         Func<bool>? isCurrent = null, Action? beforePublish = null, bool restore = false)
     {
         long generation = ctx.LoadGeneration, submission = ctx.NavigationSubmission;
         long observation = accounts.PlatformObservation(platform);
-        string account = personal.CatalogAccountKey(platform);
+        string account = CatalogAccountKey(platform);
         var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        ctx.LoadDrains.Add(drained.Task);
-        bool Current() => !ctx.Stopping && generation == ctx.LoadGeneration && submission == ctx.NavigationSubmission &&
-            observation == accounts.PlatformObservation(platform) && account == personal.CatalogAccountKey(platform) &&
+        loadDrains.Add(drained.Task);
+        bool Current() => !stopping && generation == ctx.LoadGeneration && submission == ctx.NavigationSubmission &&
+            observation == accounts.PlatformObservation(platform) && account == CatalogAccountKey(platform) &&
             isCurrent?.Invoke() != false;
         try
         {
-            if (!restore) await RefreshCatalogSongsAsync(RepositoryCards(state.Sections), token);
+            if (!restore) await RefreshCatalogSongsAsync(MusicCatalogSection.RepositoryCards(state.Sections), token);
             token.ThrowIfCancellationRequested();
             if (!Current()) return false;
             beforePublish?.Invoke();
@@ -339,10 +334,10 @@ internal sealed partial class MusicCatalogBrowseService
         }
         catch (MusicOperationException error) when (error.Code is "STORAGE_UNAVAILABLE" or "CORRUPT_STORAGE" or "STORAGE")
         {
-            if (Current()) { ctx.SetStatus(MusicCatalogDto.ErrorText(error.Code)); catalogBindings(); }
+            if (Current()) { ctx.SetStatus(MusicCatalogDto.ErrorText(error.Code)); CatalogBindings(); }
             return false;
         }
-        finally { ctx.LoadDrains.Remove(drained.Task); drained.TrySetResult(); }
+        finally { loadDrains.Remove(drained.Task); drained.TrySetResult(); }
 
         void Publish()
         {
@@ -353,15 +348,15 @@ internal sealed partial class MusicCatalogBrowseService
                 ctx.SetLocation(new(route), heading: state.Title, clearCollection: true);
                 if (route.StartsWith("catalog-channel/", StringComparison.Ordinal))
                 { lastChannelRoute = route; channelEntryError = ""; }
-                catalogQuery = query; catalogLoadedPlatform = platform; catalogLoadedKind = kind; search.SearchKindLabel = kind;
+                catalogQuery = query; catalogLoadedPlatform = platform; catalogLoadedKind = kind; contentState.SearchKindLabel = kind;
                 catalogPage = number; catalogMore = state.More && !state.ContinuationBlocked; catalogContinuation = state.Next;
                 catalogTag = state.Tag;
                 catalogArtwork = state.Artwork.Length > 0 ? state.Artwork : state.Target?.Artwork ?? "";
                 catalogSubtitle = state.Target?.Subtitle ?? "";
                 catalogSummaryCount = state.Total; catalogMembersLoaded = true;
-                personal.PublishPersonalCatalog(state);
-                if (state.DailySelection is { } daily) personal.PublishDailyStyleSelection(daily);
-                personal.SelectedCatalogPlatform = personal.CatalogPlatforms.Single(p => p.Key == platform);
+                PublishPersonalCatalog(state);
+                if (state.DailySelection is { } daily) PublishDailyStyleSelection(daily);
+                SelectedCatalogPlatform = CatalogPlatforms.Single(p => p.Key == platform);
                 if (IsChannelLanding) SelectChannelPage(route, platform);
                 var sectionsToPublish = state.Sections;
                 if (!IsCatalogHome)
@@ -425,7 +420,7 @@ internal sealed partial class MusicCatalogBrowseService
             finally { ctx.Publishing = false; }
             state.OptionalReads = optionalReads.Activate(route, platform, state.OptionalReads, initializeEntries);
             if (append) return;
-            _ = ctx.Dispatcher.EnqueueAsync(() => { if (!ctx.Stopping && generation == ctx.LoadGeneration) ctx.RestoreScroll(state.Scroll); }, DispatcherQueuePriority.Low);
+            _ = ctx.Dispatcher.EnqueueAsync(() => { if (!stopping && generation == ctx.LoadGeneration) ctx.RestoreScroll(state.Scroll); }, DispatcherQueuePriority.Low);
         }
     }
 }

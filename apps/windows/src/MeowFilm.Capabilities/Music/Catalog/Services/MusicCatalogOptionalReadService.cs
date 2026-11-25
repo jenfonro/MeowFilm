@@ -80,7 +80,7 @@ internal sealed class MusicCatalogOptionalReadService : IAsyncDisposable
     private void RetireEntry(string key, CatalogOptionalReads scope)
     {
         scope.Retired = true;
-        MusicCatalogBrowseService.CancelCatalogLoad(scope.Cancellation);
+        MusicCatalogController.CancelCatalogLoad(scope.Cancellation);
         if (ReferenceEquals(activeScope, scope)) RetireSurface();
         snapshots.Remove(key);
         var works = scope.Previews.Values.Concat(scope.Collections.Values).Select(read => read.Work).ToArray();

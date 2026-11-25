@@ -1,7 +1,7 @@
 import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { Worker } from 'node:worker_threads';
 import { clone, deferred, fault, requireValue, safeError, ScriptHostError } from './errors.js';
-import { cancel, decodeWorkerPayload, encodeWorkerPayload, errorFromResponse, event, request, response, validateMessage } from './worker-protocol.js';
+import { cancel, decodeWorkerPayload, encodeWorkerPayload, errorFromResponse, event, request, validateMessage } from './worker-protocol.js';
 
 const processedWorkerResult = Symbol('processed-worker-result');
 
@@ -27,9 +27,6 @@ export class WorkerSession {
       pendingAdapterTasks: 0 };
     this.nextId = 1;
     this.pending = new Map();
-    this.adapters = new Map();
-    this.adapterTasks = new Set();
-    this.leases = new Map();
     this.worker = null;
     this.exitCode = null;
     this.statsRequest = null;
@@ -73,7 +70,6 @@ export class WorkerSession {
         revision: this.revision,
         limits: this.limits,
         protocol: 'cat',
-        network: typeof this.input.network === 'function',
         observeScriptErrors: typeof this.input.onScriptError === 'function',
         ...this.startParams,
       };
@@ -105,22 +101,16 @@ export class WorkerSession {
 
   async invoke(value, options = {}) {
     if (!this.live) throw fault('STALE_SESSION');
-    const associationId = `invocation:${this.nextId}`;
     const linked = this.#linkedSignal(options.signal);
-    const lease = { installationId: this.installationId, generation: this.generation,
-      associationId, active: true };
-    this.leases.set(associationId, lease);
     try {
       const response = await this.#call('invoke', {
         installationId: this.installationId,
         request: value,
-        options: { ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }), associationId },
-      }, linked.signal, options.timeoutMs ?? this.limits.requestTimeoutMs,
-        'invocation', { associationId });
+        options: options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
+      }, linked.signal, options.timeoutMs ?? this.limits.requestTimeoutMs, 'invocation');
       return this.#workerResult('invoke', response);
     } finally {
       linked.release();
-      this.#fenceLease(associationId);
     }
   }
 
@@ -178,8 +168,6 @@ export class WorkerSession {
     this.live = false;
     this.lifecycle.abort(reason);
     if (!this.proxyLifecycle.signal.aborted) this.proxyLifecycle.abort(reason);
-    this.#fenceLeases();
-    this.#abortAdapters();
     if (this.#termination) {
       this.stopping = this.#termination.then(result => {
         if (result.error) throw result.error;
@@ -234,8 +222,7 @@ export class WorkerSession {
           if (this.live) this.statsSnapshot = { ...clone(value), live: true };
         }).catch(() => {}).finally(() => { this.statsRequest = null; });
     }
-    return { ...this.statsSnapshot, live: this.live,
-      pendingAdapterTasks: this.adapterTasks.size,
+    return { ...this.statsSnapshot, live: this.live, pendingAdapterTasks: 0,
       ...(this.cleanupError ? { cleanupError: this.cleanupError } : {}) };
   }
 
@@ -252,17 +239,6 @@ export class WorkerSession {
     return cloneJSONValue(value);
   }
 
-  async whenAdaptersIdle() {
-    if (!this.adapterTasks.size) return;
-    await Promise.allSettled([...this.adapterTasks]);
-  }
-
-  adapterRetirement() {
-    return { installationId: this.installationId, generation: this.generation,
-      pendingAdapterTasks: () => this.adapterTasks.size,
-      idle: Promise.allSettled([...this.adapterTasks]).then(() => {}) };
-  }
-
   #rejectStoppedStart() {
     if (this.stopRequested || this.stopping || !this.live) throw fault('STALE_SESSION');
     if (this.input.startSignal?.aborted)
@@ -270,10 +246,10 @@ export class WorkerSession {
   }
 
   async #call(method, params, signal, timeoutMs, phase = null,
-    { awaitProbe = false, associationId = null, awaitCancelled = false } = {}) {
+    { awaitProbe = false, awaitCancelled = false } = {}) {
     if (!this.worker) throw fault('STALE_SESSION');
     const id = this.nextId++;
-    const { entry, pending } = this.#pendingEntry(id, associationId);
+    const { entry, pending } = this.#pendingEntry(id);
     let requestSent = false;
     if (signal) {
       const abort = () => {
@@ -328,7 +304,7 @@ export class WorkerSession {
   async #probeAfterInterruption(phase, reason) {
     if (!this.worker) return;
     const id = this.nextId++;
-    const { entry, pending } = this.#pendingEntry(id, null);
+    const { entry, pending } = this.#pendingEntry(id);
     const timer = setTimeout(() => {
       if (pending.settled) return;
       Promise.resolve(this.#unresponsive(reason, phase)).then(
@@ -345,19 +321,17 @@ export class WorkerSession {
     return entry.promise;
   }
 
-  #pendingEntry(id, associationId) {
+  #pendingEntry(id) {
     const entry = deferred();
     const pending = {
-      id, settled: false, detached: false, timer: null, cleanup: () => {},
-      associationId, settle: null,
+      id, settled: false, detached: false, timer: null, cleanup: () => {}, settle: null,
     };
-    pending.detach = reason => {
+    pending.detach = () => {
       if (pending.detached) return;
       pending.detached = true;
       this.pending.delete(id);
       clearTimeout(pending.timer);
       pending.cleanup();
-      if (pending.associationId) this.#fenceLease(pending.associationId, reason);
       this.#scheduleFailureTermination();
     };
     pending.settle = (error, value) => {
@@ -420,11 +394,6 @@ export class WorkerSession {
       return;
     }
     if (message.kind === 'event') { this.#event(message); return; }
-    if (message.kind === 'request') { this.#adapter(message); return; }
-    if (message.kind === 'cancel') {
-      this.adapters.get(message.id)?.controller.abort(fault(message.code));
-      return;
-    }
     if (message.kind !== 'response') return;
     const pending = this.pending.get(message.id);
     if (!pending || pending.settled) return;
@@ -468,8 +437,6 @@ export class WorkerSession {
         this.stopRequested = true;
         this.lifecycle.abort(this.failure);
         if (!this.proxyLifecycle.signal.aborted) this.proxyLifecycle.abort(this.failure);
-        this.#fenceLeases();
-        this.#abortAdapters();
         this.#completePending(this.failure);
         this.#notifyStopped();
         this.#notifyFailure(this.failure, { ready: value.phase === 'running' });
@@ -484,8 +451,6 @@ export class WorkerSession {
       case 'stopped':
         this.live = false;
         this.stopped = true;
-        this.#fenceLeases();
-        this.#abortAdapters();
         this.#notifyStopped();
         break;
       case 'stats':
@@ -506,92 +471,6 @@ export class WorkerSession {
       endpoints: value.endpoints,
       aggregatePort: value.aggregatePort,
     });
-  }
-
-  #adapter(message) {
-    if (!this.worker || this.stopRequested || !this.live || this.#termination) {
-      this.#sendSafely({ version: 1, kind: 'response', id: message.id, ok: false,
-        code: 'STALE_SESSION' });
-      return;
-    }
-    if (message.method === 'network') {
-      this.#trackAdapter(this.#network(message));
-      return;
-    }
-  }
-
-  #trackAdapter(task) {
-    this.adapterTasks.add(task);
-    const settled = () => this.adapterTasks.delete(task);
-    Promise.resolve(task).then(settled, settled).catch(() => {});
-    return task;
-  }
-
-  async #network(message) {
-    const params = message.params ?? {};
-    const controller = new AbortController();
-    this.adapters.set(message.id, { controller, associationId: params.associationId, network: true });
-    try {
-      if (params.associationId)
-        requireValue(this.leases.get(params.associationId)?.active, 'STALE_SESSION');
-      if (typeof this.input.network !== 'function') throw fault('PERMISSION_DENIED');
-      const result = await this.input.network({
-        url: params.url,
-        options: clone(params.options ?? {}),
-        signal: controller.signal,
-        scope: clone(params.scope ?? {}),
-        validateURL: value => this.#validateURL(value, controller.signal),
-      });
-      const body = result?.body === undefined ? new ArrayBuffer(0)
-        : result.body instanceof ArrayBuffer ? result.body.slice(0)
-          : ArrayBuffer.isView(result.body)
-            ? result.body.buffer.slice(result.body.byteOffset, result.body.byteOffset + result.body.byteLength)
-            : new TextEncoder().encode(String(result.body)).buffer;
-      this.#sendSafely(response(message.id, {
-        statusCode: result?.statusCode, statusMessage: result?.statusMessage,
-        headers: result?.headers, url: result?.url, body,
-      }), [body]);
-    } catch (error) {
-      this.#sendSafely({ version: 1, kind: 'response', id: message.id, ok: false,
-        code: safeError(error, 'NETWORK_ERROR').code });
-    } finally {
-      this.adapters.delete(message.id);
-    }
-  }
-
-  #validateURL(value, signal) {
-    requireValue(this.live && !signal.aborted, 'STALE_SESSION');
-    let url;
-    try { url = new URL(value); } catch { throw fault('INVALID_ARGUMENT'); }
-    requireValue(url.protocol === 'https:' || url.protocol === 'http:');
-    return url.href;
-  }
-
-  #fenceLease(associationId, reason) {
-    const lease = this.leases.get(associationId);
-    if (lease) {
-      lease.active = false;
-      this.leases.delete(associationId);
-      for (const adapter of this.adapters.values()) {
-        if (adapter.associationId !== associationId) continue;
-        // A normally returned Cat call must not abort a still-running network operation;
-        // explicit cancellation retains the pending transport fence.
-        if (adapter.network && !reason) adapter.associationId = undefined;
-        else adapter.controller.abort(reason ?? fault('STALE_SESSION'));
-      }
-    }
-  }
-
-  #fenceLeases() {
-    for (const lease of this.leases.values()) lease.active = false;
-    this.leases.clear();
-  }
-
-  #abortAdapters() {
-    for (const adapter of [...this.adapters.values()]) {
-      try { adapter.controller.abort(fault('CANCELLED')); } catch {}
-    }
-    this.adapters.clear();
   }
 
   #completePending(error) {
@@ -634,8 +513,6 @@ export class WorkerSession {
     if (!this.proxyLifecycle.signal.aborted) this.proxyLifecycle.abort(error);
     this.failure = safeError(error);
     if (wasLive) this.#diagnostic(operation, this.failure.code);
-    this.#fenceLeases();
-    this.#abortAdapters();
     this.#completePending(this.failure);
     if (wasLive) this.#notifyFailure(this.failure, { ready: this.activated });
     this.#notifyStopped();
@@ -687,8 +564,6 @@ export class WorkerSession {
       this.lifecycle.abort(fault('STALE_SESSION'));
       if (!this.proxyLifecycle.signal.aborted)
         this.proxyLifecycle.abort(fault('STALE_SESSION'));
-      this.#fenceLeases();
-      this.#abortAdapters();
       this.#completePending(fault('STALE_SESSION'));
       if (!worker) {
         this.#retireStats();

@@ -128,12 +128,6 @@ public struct SQLiteCursor {
         return value
     }
 
-    public func optionalUUID(_ index: Int32) throws -> UUID? {
-        guard let raw = try optionalText(index) else { return nil }
-        guard let value = UUID(uuidString: raw) else { throw SQLiteStorageError.invalidValue }
-        return value
-    }
-
     public func value(_ index: Int32) throws -> SQLiteValue {
         switch sqlite3_column_type(statement, index) {
         case SQLITE_INTEGER: return .integer(sqlite3_column_int64(statement, index))
@@ -387,12 +381,6 @@ public final class SQLiteConnection {
             ON CONFLICT(owner) DO UPDATE SET revision = excluded.revision
             """, [.text(owner), .integer(nextRevision)])
         return nextRevision
-    }
-
-    @discardableResult
-    public func bumpOwnerRevision(_ owner: String) throws -> Int64 {
-        let current = try ownerRevision(owner)
-        return try commitOwnerRevision(owner, expectedRevision: current)
     }
 
     /// Table/column identifiers are repository constants, never external input.

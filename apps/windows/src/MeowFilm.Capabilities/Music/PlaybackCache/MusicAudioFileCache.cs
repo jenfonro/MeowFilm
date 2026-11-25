@@ -345,12 +345,10 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 foreach (var record in rows)
                 {
                     string id = record.ResourceKey;
-                    if (!LowerHex(id, 64) || !ValidCommittedName(record.FileName) ||
-                        record.FileSize <= 0 || record.FileSize > Capacity || record.ConfirmedAt <= 0 ||
-                        record.Duration is not { } duration || !double.IsFinite(duration) || duration <= 0 ||
-                        !LowerHex(record.Signature, 64))
+                    if (!ValidCommittedName(record.FileName) ||
+                        record.FileSize is <= 0 or > Capacity || record.ConfirmedAt <= 0 ||
+                        record.Duration is not { } duration || !double.IsFinite(duration) || duration <= 0)
                         throw MusicPlaybackCacheDataException.Corrupt();
-                    ValidateInfoRecord(record.Info, id, record.Signature, record.FileSize, duration, decoded: true);
                     entries.Add(id, new Entry(record.FileName, record.FileSize,
                         record.Signature, record.ConfirmedAt, duration, record.Info));
                 }
@@ -358,60 +356,6 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             }, token).ConfigureAwait(false);
         }
         catch (StorageException) { token.ThrowIfCancellationRequested(); return new(StringComparer.Ordinal); }
-    }
-
-    private static string RequireField(string? value, bool allowEmpty = false)
-    {
-        if (value is null || (!allowEmpty && value.Length == 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        return value;
-    }
-
-    private static void ValidateInfoRecord(AudioFileInfoRecord info, string key, string signature, long size,
-        double duration, bool decoded)
-    {
-        bool script = info.Kind == "script";
-        if (!script && info.Kind != "official")
-            throw MusicPlaybackCacheDataException.Corrupt();
-        string platform = RequireField(info.Platform);
-        string song = RequireField(info.SongId);
-        string recording = RequireField(info.SourceKey);
-        string scope = RequireField(info.Scope);
-        if (!(script ? NativeMusicSong.Platforms.Contains(platform) : platform is "wy" or "tx" or "kg") ||
-            Key(scope, song, signature) != key)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (!script && (info.Generation is null || info.Generation <= 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        string quality = RequireField(info.Quality);
-        if (script)
-        {
-            string installation = RequireField(info.InstallationId);
-            _ = RequireField(info.ProviderName, allowEmpty: true);
-            if (!MusicQualityPolicy.LxTypes.Contains(quality) ||
-                ScriptSignature(installation, platform, recording, quality) != signature || scope != "script:" + signature)
-                throw MusicPlaybackCacheDataException.Corrupt();
-        }
-        _ = RequireField(info.RequestedQuality);
-        string actual = RequireField(info.ActualQuality, allowEmpty: true);
-        if (info.QualityVerified is not { } qualityVerified || info.PlaybackVerified is not { } playbackVerified)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (qualityVerified && actual.Length == 0 || playbackVerified)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        string cache = RequireField(info.QualityCacheSignature);
-        if (!script && !LowerHex(RequireField(info.QualityPolicySignature), 64) ||
-            !LowerHex(cache, 64) || cache != signature)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Duration is not { } infoDuration || !double.IsFinite(infoDuration) ||
-            (decoded ? infoDuration <= 0 : infoDuration < 0) || infoDuration != duration)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Size is not { } infoSize || (decoded ? infoSize <= 0 : infoSize < 0) || infoSize != size)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Full is null || decoded && info.Full is not true)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (!script && info.Delivery != platform + "-official")
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.SampleRate is <= 0 || info.BitDepth is < 0 || info.Channels is <= 0 || info.Bitrate is < 0)
-            throw MusicPlaybackCacheDataException.Corrupt();
     }
 
     private async Task SweepStartupOrphansOnceAsync(CancellationToken token)
@@ -661,13 +605,14 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
     {
         long epoch = Interlocked.Read(ref clearEpoch);
         long officialEpoch = Interlocked.Read(ref officialClearEpoch);
-        ValidateReceipt(receipt, scope, song, signature, out long? expires);
+        ValidateIdentity(scope, song, signature);
+        if (!Uri.TryCreate(receipt.Url, UriKind.Absolute, out var mediaUri) || mediaUri.Scheme is not ("http" or "https"))
+            throw MusicPlaybackCacheDataException.Corrupt();
         var info = receipt.Info;
-        double expected = info.Duration!.Value;
-        long expectedSize = info.Size!.Value;
-        bool full = info.Full!.Value;
-        if (expectedSize > Capacity ||
-            expires is { } urlExpiry && urlExpiry <= Now)
+        if (info.Duration is not { } expected || !double.IsFinite(expected) || expected < 0 ||
+            info.Size is not { } expectedSize || expectedSize < 0 || info.Full is not { } full)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (expectedSize > Capacity || receipt.ExpiresAt is { } urlExpiry && urlExpiry <= Now)
             return;
 
         string? fileId = null;
@@ -721,7 +666,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 await using (var output = new FileStream(localPartPath, FileMode.CreateNew, FileAccess.Write,
                     FileShare.Read | FileShare.Delete, 0, FileOptions.Asynchronous))
                 {
-                    long size = await NativeHttpMediaTransfer.CopyCompleteAsync(new Uri(receipt.Url),
+                    long size = await NativeHttpMediaTransfer.CopyCompleteAsync(mediaUri,
                         headers, output, maximum, null, ct,
                         prepared.ReceivedBytes,
                         length => prepared.BeginFile(localPartPath, length)).ConfigureAwait(false);
@@ -1041,30 +986,6 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         info.Kind == "script"
             ? info with { Generation = null, QualityPolicySignature = null, Delivery = null }
             : info with { InstallationId = null, ProviderName = null };
-
-    private static void ValidateReceipt(AudioFileReceipt receipt, string scope, string song,
-        string signature, out long? expires)
-    {
-        ValidateIdentity(scope, song, signature);
-        var info = receipt.Info;
-        bool script = info.Kind == "script";
-        if (!script)
-        {
-            if (!receipt.Ok || receipt.Headers.Count > 0)
-                throw MusicPlaybackCacheDataException.Corrupt();
-        }
-        RequireNonEmpty(receipt.Url);
-        MusicSourceCache.ValidateMediaUrl(receipt.Url, allowUserInfo: script);
-        if (receipt.ExpiresAt is <= 0)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Scope != scope || info.SongId != song || info.QualityCacheSignature != signature)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Duration is not { } duration || !double.IsFinite(duration) || duration < 0 ||
-            info.Size is not { } size || size < 0)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        ValidateInfoRecord(SafeInfo(info), Key(scope, song, signature), signature, size, duration, decoded: false);
-        expires = receipt.ExpiresAt;
-    }
 
     private async Task<long> PruneAsync(long requiredBytes, CancellationToken token)
     {
