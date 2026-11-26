@@ -15,8 +15,7 @@ const integerArray = values => {
   return encodeProtocolJSON(values.map(protocolInteger));
 };
 function idOf(song) { return song.sources[0]?.musicInfo.songmid ?? ''; }
-function wyBatch(c, kind, source, context, extra = {}, algorithms = {}, feedbackSources = {}, defaultSource = '') {
-  const items = source.map(wySong);
+function wyBatch(c, kind, source, context, extra = {}, algorithms = {}, feedbackSources = {}, defaultSource = '', items = source.map(wySong)) {
   return { platform: 'wy', kind, items, count: items.length, empty: items.length === 0,
     context, recommendations: items.map((song, index) => {
       const raw = source[index] ?? {}, nested = first(raw.songInfo, raw.songData, raw.song) ?? {}, id = idOf(song);
@@ -239,19 +238,34 @@ export const wyProvider = {
       {}, {}, branch === 'style' ? '' : 'dailySongRecommend');
     }, branch === 'style' ? 60000 : 600000);
   },
-  async fm(c, { mode = 'default', submode = '', preview = false, ruleId = '', tabTagId = '', unplaySongIds = [] }) {
+  async fm(c, { mode = 'default', submode = '', preview = false, continuation = false, ruleId = '', tabTagId = '', unplaySongIds = [] }) {
+    const isContinuation = !preview && (Boolean(continuation) || unplaySongIds.length > 0);
     if (ruleId || tabTagId) {
-      const params = { ruleType: 1, ruleId, tabTagId, firstSongId: '', firstSongAlg: '', ...(preview ? {} : { limit: 5 }) };
-      const data = await c.wy(preview ? '/api/tag/tab/fm/cover' : '/api/tag/tab/fm/recommends', params, false,
-        { dataStatus: true });
-      return preview ? { platform: 'wy', kind: 'fm-preview', preview: true, cover: image(data?.data?.cover),
-        context: { provider: 'rule', ruleId, tabTagId } } : wyBatch(c, 'fm', array(data?.data), { provider: 'rule', ruleId, tabTagId });
+      const rule = scalar(ruleId), tab = scalar(tabTagId);
+      const load = async fc => {
+        const params = { ruleType: 1, ruleId: rule, tabTagId: tab, firstSongId: '', firstSongAlg: '', ...(preview ? {} : { limit: 5 }) };
+        const data = await fc.wy(preview ? '/api/tag/tab/fm/cover' : '/api/tag/tab/fm/recommends', params, false,
+          { dataStatus: true });
+        if (preview) return { platform: 'wy', kind: 'fm-preview', preview: true, cover: image(data?.data?.cover),
+          context: { provider: 'rule', ruleId: rule, tabTagId: tab } };
+        const rawRows = array(data?.data).map(record);
+        const ids = [...new Set(rawRows.map(row => scalar(row.id)).filter(Boolean))];
+        const byId = new Map((ids.length ? await wyDetails(fc, ids) : []).map(song => [idOf(song), song]));
+        const matched = rawRows.filter(row => byId.has(scalar(row.id)));
+        return wyBatch(fc, 'fm', matched, { provider: 'rule', ruleId: rule, tabTagId: tab },
+          {}, {}, {}, '', matched.map(row => byId.get(scalar(row.id))));
+      };
+      return isContinuation ? load(c) : c.cached(['fm', preview ? 'preview' : 'initial', 'rule', rule, tab], load, 3600000);
     }
     const protocolMode = { default: 'DEFAULT', familiar: 'FAMILIAR', explore: 'EXPLORE', puzzle: 'PUZZLE_MODE_RCMD', scene: 'SCENE_RCMD' }[mode] ?? input(mode);
-    const data = await c.wy('/api/v1/radio/get', { mode: protocolMode, subMode: submode, limit: preview ? '1' : '3',
-      openAidj: 'false', aidjReqTimes: '0', unplaySongIds: integerArray(unplaySongIds) }, false, { dataStatus: true });
-    return wyBatch(c, 'fm', array(Array.isArray(data?.data) ? data.data : data?.data?.songs),
-      { mode: protocolMode, submode, preview }, {}, {}, {}, 'userfm');
+    const sub = text(submode), unplay = integerArray(unplaySongIds);
+    const load = async fc => {
+      const data = await fc.wy('/api/v1/radio/get', { mode: protocolMode, subMode: sub, limit: preview ? '1' : '3',
+        openAidj: 'false', aidjReqTimes: '0', unplaySongIds: unplay }, false, { dataStatus: true });
+      return wyBatch(fc, 'fm', array(Array.isArray(data?.data) ? data.data : data?.data?.songs),
+        { mode: protocolMode, submode: sub, preview }, {}, {}, {}, 'userfm');
+    };
+    return isContinuation ? load(c) : c.cached(['fm', preview ? 'preview' : 'initial', 'mode', protocolMode, sub], load, 3600000);
   },
   async similar(c, { sourceIds, sourceType = 'song', unplaySongIds = [] }) {
     if (!Array.isArray(sourceIds) || !sourceIds.length) fail('INVALID_REQUEST');

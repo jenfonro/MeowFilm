@@ -18,7 +18,7 @@ public sealed partial class MusicRecommendationCoordinator
 
     private static MusicRecommendationSessionRecord? ToSessionRecord(Session? s)
     {
-        if (s is null || !s.Active || s.InitialPending) return null;
+        if (s is null || !s.Active || s.InitialPending || s.Config.Kind == "fm") return null;
         return new MusicRecommendationSessionRecord(
             SessionId: s.Id,
             Kind: s.Config.Kind,
@@ -42,10 +42,6 @@ public sealed partial class MusicRecommendationCoordinator
             HeartbeatFromHome: s.Heartbeat?.FromHome,
             HeartbeatCount: s.Heartbeat?.Count,
             HeartbeatAccountId: s.Heartbeat?.AccountId,
-            FmMode: s.Config.Fm?.Mode.ToString().ToLowerInvariant(),
-            FmSubmode: s.Config.Fm?.Submode,
-            FmRuleId: s.Config.Fm?.RuleId,
-            FmTabTagId: s.Config.Fm?.TabTagId,
             SourceIds: s.Config.SourceIds,
             Attempted: s.Attempted.Order(StringComparer.Ordinal).ToArray());
     }
@@ -71,7 +67,7 @@ public sealed partial class MusicRecommendationCoordinator
     {
         var saved = await queue.ReadRecommendationSessionAsync(cancellationToken).ConfigureAwait(false);
         if (saved is null) return;
-        if (saved.Kind is not ("fm" or "similar" or "heartbeat" or "queue") || saved.Platform != "wy")
+        if (saved.Kind is not ("similar" or "heartbeat" or "queue") || saved.Platform != "wy")
         {
             await queue.SaveRecommendationSessionAsync(null, cancellationToken).ConfigureAwait(false);
             return;
@@ -85,19 +81,6 @@ public sealed partial class MusicRecommendationCoordinator
         string checkpoint = saved.CheckpointId;
         if (checkpoint.Length > 0 && !await queue.HasRecommendationCheckpointAsync(checkpoint, cancellationToken).ConfigureAwait(false))
             checkpoint = "";
-        MusicFmRequest? fm = null;
-        if (saved.Kind == "fm")
-        {
-            var mode = (saved.FmMode ?? "default") switch
-            {
-                "familiar" => MusicFmMode.Familiar,
-                "explore" => MusicFmMode.Explore,
-                "puzzle" => MusicFmMode.Puzzle,
-                "scene" => MusicFmMode.Scene,
-                _ => MusicFmMode.Default
-            };
-            fm = new MusicFmRequest(saved.Platform, mode, saved.FmSubmode ?? "", false, saved.FmRuleId, saved.FmTabTagId);
-        }
         MusicHeartbeatRequest? heartbeatReq = null;
         HeartbeatContext? heartbeatCtx = null;
         if (saved.Kind == "heartbeat")
@@ -123,7 +106,7 @@ public sealed partial class MusicRecommendationCoordinator
         var config = new Configuration(
             saved.Kind,
             saved.Platform,
-            fm,
+            Fm: null,
             saved.SourceIds,
             saved.SourceType,
             heartbeatReq,

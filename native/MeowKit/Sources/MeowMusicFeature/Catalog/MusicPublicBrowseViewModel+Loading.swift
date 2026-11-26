@@ -124,6 +124,13 @@ extension MusicPublicBrowseViewModel {
                 return
             }
         }
+        if isDiscoveryExpired, !closed, visible, displayVisible, !isLoading {
+            await refresh()
+            return
+        }
+        if isHome, loaded, let contentLoadedAt, Date().timeIntervalSince(contentLoadedAt) >= Self.discoveryCacheTTL {
+            homeNeedsRefresh = true
+        }
         if isHome, homeNeedsRefresh, !isLoading, !closed, visible, displayVisible {
             await refresh()
             return
@@ -393,6 +400,7 @@ extension MusicPublicBrowseViewModel {
             notice = result.page.notice
             filters = result.page.filters; selectedFilter = result.page.selectedFilter
             collection = result.collection; total = result.total; remoteSource = result.source; loaded = true
+            if cursor == nil { contentLoadedAt = Date() }
             contentIsCurrent = true
             if case .discovery = request { requiresExplicitNext = false }
             else { requiresExplicitNext = count == 0 && result.page.cursor != nil }

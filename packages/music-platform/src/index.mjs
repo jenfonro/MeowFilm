@@ -24,6 +24,11 @@ const isAccountOperation = operation => typeof operation === 'string' &&
   (operation.startsWith('account.') || operation.startsWith('qr.') ||
     operation.startsWith('sms.') || operation.startsWith('vip.'));
 
+const sessionCacheable = new Set([
+  'daily', 'channels', 'channel-directory', 'channel', 'home',
+  'cube-protocol', 'cube-feed-tags', 'fm', 'charts', 'tags', 'ranks',
+]);
+
 /** Shared request/parse owner. Only anonymous client state and recoverable API results live here.
  * The native account owner publishes an authorized session after its durable save. */
 export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
@@ -33,7 +38,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
   const sessions = new Map(), active = new Set(), flightEntries = new Set(), cache = new Map(), flights = new Map(), activeRefreshes = new Map();
   let cacheBytes = 0, cacheHits = 0, cacheMisses = 0, cacheEvictions = 0, cacheExpiredPurges = 0, refreshSeq = 0, memoryEpoch = 0;
   let closed = false, closing, xeapiState = {};
-  const cacheMaxEntries = 64, cacheMaxBytes = 2 * 1024 * 1024;
+  const cacheMaxEntries = 128, cacheMaxBytes = 4 * 1024 * 1024;
   function erase(key) {
     const entry = cache.get(key);
     if (entry) { cacheBytes -= entry.bytes; cache.delete(key); }
@@ -225,7 +230,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
           fail('SIGNATURE_REQUIRED');
         }
       },
-      async cached(parts, action, ttl = 600000, { shouldCache } = {}) {
+      async cached(parts, action, ttl = 3600000, { shouldCache } = {}) {
         const key = stringifyJSONValue([platform, entry.account?.scope ?? entry.account?.cookie ?? 'anonymous',
           entry.account?.generation ?? 0, parts]);
         assertCurrent();
@@ -285,15 +290,18 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
             .then(result => {
               flightController.signal.throwIfAborted();
               if (!flightEntry.candidate && session !== sessions.get(platform)) fail('STALE_SESSION');
-              // Only public reads and the existing private directory/daily cache are retained.
+              // Public reads and session-scoped browse/recommendation initial caches are retained;
+              // sessionUpdate invalidates the platform's entries and flights on any credential change.
               const canStore = !flight.invalidated && !flight.superseded && flight.memoryEpoch === memoryEpoch &&
                 (isRefresh ? refreshSlot.latestSeq === refreshOrder : flights.get(key) === flight);
-              if (canStore && (!flightEntry.account || ['daily', 'channels', 'channel-directory'].includes(parts[0])) &&
+              if (canStore && (!flightEntry.account || sessionCacheable.has(parts[0])) &&
                   (!shouldCache || shouldCache(result))) {
                 const bytes = Buffer.byteLength(stringifyJSONValue(result));
                 const nowMs = Date.now();
                 const explicitExpiry = typeof result?.expiresAt === 'number' ? result.expiresAt : Infinity;
                 const expires = Math.min(nowMs + ttl, explicitExpiry);
+                if (Array.isArray(result?.sections) && result.expiresAt === undefined)
+                  result = { ...result, expiresAt: expires };
                 if (bytes <= cacheMaxBytes && expires > nowMs) {
                   erase(key);
                   if (cache.size >= cacheMaxEntries || cacheBytes + bytes > cacheMaxBytes) purgeExpired(nowMs);

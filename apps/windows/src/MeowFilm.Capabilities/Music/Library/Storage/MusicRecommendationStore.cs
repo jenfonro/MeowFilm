@@ -170,8 +170,7 @@ internal static class MusicRecommendationStore
             SELECT session_id,kind,platform,source_type,seed,fixed_seed,
                    restore,continue_enabled,exhausted,offset_val,batch,recommendation_started,checkpoint_id,
                    heartbeat_entry,heartbeat_playlist_id,heartbeat_start_music_id,heartbeat_song_id,
-                   heartbeat_from_home,heartbeat_count,heartbeat_account_id,
-                   fm_mode,fm_submode,fm_rule_id,fm_tab_tag_id
+                   heartbeat_from_home,heartbeat_count,heartbeat_account_id
             FROM windows_music_recommendation_sessions
             WHERE scope=$scope
             """,
@@ -196,10 +195,6 @@ internal static class MusicRecommendationStore
                 HeartbeatFromHome: r.GetNullableBool(17),
                 HeartbeatCount: r.GetNullableInt64(18),
                 HeartbeatAccountId: r.GetNullableString(19),
-                FmMode: r.GetNullableString(20),
-                FmSubmode: r.GetNullableString(21),
-                FmRuleId: r.GetNullableString(22),
-                FmTabTagId: r.GetNullableString(23),
                 SourceIds: [],
                 Attempted: []),
             out var header,
@@ -240,13 +235,11 @@ internal static class MusicRecommendationStore
                 scope,session_id,kind,platform,source_type,seed,fixed_seed,
                 restore,continue_enabled,exhausted,offset_val,batch,recommendation_started,checkpoint_id,
                 heartbeat_entry,heartbeat_playlist_id,heartbeat_start_music_id,heartbeat_song_id,
-                heartbeat_from_home,heartbeat_count,heartbeat_account_id,
-                fm_mode,fm_submode,fm_rule_id,fm_tab_tag_id)
+                heartbeat_from_home,heartbeat_count,heartbeat_account_id)
             VALUES(
                 $scope,$sid,$kind,$plat,$stype,$seed,$fseed,
                 $rest,$cont,$exh,$off,$batch,$recst,$cpid,
-                $hentry,$hpl,$hstart,$hsong,$hhome,$hcnt,$hacc,
-                $fmode,$fsub,$frule,$ftab)
+                $hentry,$hpl,$hstart,$hsong,$hhome,$hcnt,$hacc)
             ON CONFLICT(scope) DO UPDATE SET
                 session_id=excluded.session_id,
                 kind=excluded.kind,
@@ -267,11 +260,7 @@ internal static class MusicRecommendationStore
                 heartbeat_song_id=excluded.heartbeat_song_id,
                 heartbeat_from_home=excluded.heartbeat_from_home,
                 heartbeat_count=excluded.heartbeat_count,
-                heartbeat_account_id=excluded.heartbeat_account_id,
-                fm_mode=excluded.fm_mode,
-                fm_submode=excluded.fm_submode,
-                fm_rule_id=excluded.fm_rule_id,
-                fm_tab_tag_id=excluded.fm_tab_tag_id
+                heartbeat_account_id=excluded.heartbeat_account_id
             """,
             ("$scope", scope),
             ("$sid", session.SessionId),
@@ -293,11 +282,7 @@ internal static class MusicRecommendationStore
             ("$hsong", session.HeartbeatSongId),
             ("$hhome", session.HeartbeatFromHome),
             ("$hcnt", session.HeartbeatCount),
-            ("$hacc", session.HeartbeatAccountId),
-            ("$fmode", session.FmMode),
-            ("$fsub", session.FmSubmode),
-            ("$frule", session.FmRuleId),
-            ("$ftab", session.FmTabTagId));
+            ("$hacc", session.HeartbeatAccountId));
 
         db.Execute("DELETE FROM windows_music_recommendation_session_lists WHERE scope=$scope", ("$scope", scope));
         for (int i = 0; i < session.SourceIds.Length; i++)

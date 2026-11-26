@@ -118,7 +118,7 @@ public sealed partial class MusicLibraryOwner
 
     private void Archive(MusicQueueStateRecord previous, MusicLibrarySession doc)
     {
-        if (previous.Entries.Length < 2) return;
+        if (previous.Entries.Length < 2 || previous.Source?.Kind == "fm") return;
         string title = previous.Source?.Title ?? "";
         if (title.Length == 0) title = previous.Entries[0].Context.SourceTitle ?? "";
         if (title.Length == 0) title = previous.Entries[0].Context.Playlist ?? "";

@@ -71,7 +71,7 @@ extension NativeMusicService {
             return item
         }
         guard platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding,
-              similarMode.active == nil, fmPlayback == nil, d.queue.similar == nil, d.queue.fm == nil,
+              similarMode.active == nil, fmPlayback == nil, d.queue.similar == nil,
               d.queue.source?.sourceType == "search-song",
               let seedEntryID = d.queue.source?.seedEntryId,
               let row = d.queue.entries.first(where: { $0.id == seedEntryID }) else { return nil }
