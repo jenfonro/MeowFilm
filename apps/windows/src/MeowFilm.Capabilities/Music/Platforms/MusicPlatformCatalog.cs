@@ -40,7 +40,7 @@ public sealed partial class MusicPlatformCatalog : IDisposable
         Read(p.Platform, "daily", new { branch = p.Branch.ToString().ToLowerInvariant(), p.Refresh }, cancellationToken);
     public Task<JsonElement> FmAsync(MusicFmRequest p, CancellationToken cancellationToken = default) =>
         Read(p.Platform, "fm", new { mode = p.Mode.ToString().ToLowerInvariant(), p.Submode, p.Preview,
-            p.RuleId, p.TabTagId, p.UnplaySongIds }, cancellationToken);
+            p.Continuation, p.RuleId, p.TabTagId, p.UnplaySongIds }, cancellationToken);
     public Task<JsonElement> SimilarAsync(MusicSimilarRequest p, CancellationToken cancellationToken = default) =>
         Read(p.Platform, "similar", new { p.SourceIds, p.SourceType, p.UnplaySongIds }, cancellationToken);
     public Task<JsonElement> HeartbeatAsync(MusicHeartbeatRequest p, CancellationToken cancellationToken = default) =>

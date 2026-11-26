@@ -100,8 +100,19 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     var canLoadDisplayPreviews: Bool { !isHome || (!homeNeedsRefresh && !isLoading) }
     /// Module-local identity for page-owned presentations, never queue authority.
     var actionPageID: UUID { pageEpoch }
+    static let discoveryCacheTTL: TimeInterval = 3600
     var closed = false, visible = false, displayVisible = false
     var contentDay: Date?
+    var contentLoadedAt: Date?
+    var isDiscoveryExpired: Bool {
+        guard loaded, let contentLoadedAt else { return false }
+        switch request {
+        case .discovery(.channel), .discovery(.featured), .discovery(.channels):
+            return Date().timeIntervalSince(contentLoadedAt) >= Self.discoveryCacheTTL
+        default:
+            return false
+        }
+    }
     var isDaily: Bool {
         switch request {
         case .discovery(.daily), .homeAction(.daily, _): return true
@@ -253,6 +264,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             dailyStyle = nil
             contentIsCurrent = false
             contentDay = nil
+            contentLoadedAt = nil
             homeNeedsRefresh = true
             displayedHomeSource = nil
         }

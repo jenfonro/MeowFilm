@@ -32,8 +32,8 @@ struct MusicDomainState: Sendable {
             if q.runID != runID {
                 q.history = []
                 q.failed = []
+                q.runID = runID
             }
-            q.runID = runID
             queue = q
             persisted.insert(.queue)
         } else {
@@ -255,9 +255,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var queueFeedbackOrigins: [String: MusicNativeQueueFeedbackOrigin] = [:]
     var similarMode = MusicNativeSimilarRuntime()
     var fmPlayback: MusicNativeFMSession?
-    var fmRestored = false
-    var fmRestoration: (id: UUID, task: Task<Void, Error>)?
-    var fmRestoreRetryAfter: UInt64 = 0
     var fmPreviews: [MusicHomeAction: MusicNativeFMPreviewEntry] = [:]
     var fmPreviewOrder: [MusicHomeAction] = []
     var fmQueues: [UUID: (MusicHomeAction, MusicQueueAuthorization, MusicNativeFMRead)] = [:]
@@ -339,7 +336,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         }
         publicQueueSources.removeAll()
         clearFMPlayback()
-        fmRestored = false
         clearFMPreviews()
         for (id, value) in fmQueues {
             access.remove(id); value.1.revoke()

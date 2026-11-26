@@ -498,10 +498,6 @@ public sealed record MusicRecommendationSessionRecord(
     bool? HeartbeatFromHome,
     long? HeartbeatCount,
     string? HeartbeatAccountId,
-    string? FmMode,
-    string? FmSubmode,
-    string? FmRuleId,
-    string? FmTabTagId,
     string[] SourceIds,
     string[] Attempted);
 

@@ -83,6 +83,8 @@ public sealed partial class MusicCatalogController
         RetireCatalogLoad();
         if (publishedHomeState is { } published && homePlatform == sourcePlatform)
         {
+            if (!homeRefreshRequired && published.ExpiresAt is { } exp && exp <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+                homeRefreshRequired = true;
             if (!await PublishCatalogAsync("catalog-home", "", homePlatform, "歌曲", homePage, published,
                 initializeEntries: !homeRefreshRequired, token: token, restore: true, beforePublish: () =>
                 {

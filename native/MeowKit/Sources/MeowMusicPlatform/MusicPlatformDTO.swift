@@ -81,12 +81,14 @@ public enum MusicPlatformDTO {
         case .heartbeatSeed: return ("heartbeat.seed", [:])
         }
     }
-    public static func action(_ action: MusicHomeAction, preview: Bool = false) -> (String, RuntimeObject) {
+    public static func action(_ action: MusicHomeAction, preview: Bool = false, continuation: Bool = false) -> (String, RuntimeObject) {
         switch action {
         case .fm(let mode, let submode, _):
-            return ("fm", ["mode": .string(mode.rawValue), "submode": .string(submode), "preview": .bool(preview)])
+            return ("fm", ["mode": .string(mode.rawValue), "submode": .string(submode),
+                           "preview": .bool(preview), "continuation": .bool(continuation)])
         case .ruleFM(let rule, let tab, _):
-            return ("fm", ["ruleId": .string(rule), "tabTagId": .string(tab), "preview": .bool(preview)])
+            return ("fm", ["ruleId": .string(rule), "tabTagId": .string(tab),
+                           "preview": .bool(preview), "continuation": .bool(continuation)])
         case .daily(let branch): return ("daily", ["branch": .string(branch.rawValue)])
         case .heartbeat: return ("heartbeat", ["entry": .string("favorites")])
         case .heartbeatSong(let id): return ("heartbeat", ["songId": .string(id), "entry": .string("favorites")])

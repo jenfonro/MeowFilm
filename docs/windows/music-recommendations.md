@@ -15,7 +15,7 @@ MusicCapability
 - `MusicRecommendationCoordinator` 拥有推荐会话、请求代次、继续条件、反馈来源和未知提交状态。
 - `MusicRecommendationQueuePort` 是覆盖唯一 `MusicLibraryOwner` 的队列准入 lane，不是第二个存储 owner。
 - 固定平台目录通过共同 Node 读取推荐批次；推荐会话、唯一队列 lane 和媒体编排仍由原生拥有，LX 脚本和页面绑定不参与。
-- 推荐会话与返回点（checkpoint）已由 `MusicRecommendationStore` 持久化至永久库 5 张表 `windows_music_recommendation_{checkpoints,checkpoint_entries,checkpoint_lists,sessions,session_lists}`，支持冷启动恢复与离线保护 `returnQueue`；逐曲反馈 live proof 与在途请求状态仍仅属于当前进程。
+- 推荐会话与返回点（checkpoint）由 `MusicRecommendationStore` 持久化至永久库 5 张表 `windows_music_recommendation_{checkpoints,checkpoint_entries,checkpoint_lists,sessions,session_lists}`，仅供 `similar`／`heartbeat`／`queue` 冷启动恢复与离线保护 `returnQueue`；`fm` 队列与活会话仅保留在当前运行内存、不落盘持久化，跨重启仅在 `windows_music_fm_preferences` 保存选择参数，逐曲反馈 live proof 与在途请求状态同样仅属于当前进程。
 
 ## 当前命令与类型
 
@@ -29,7 +29,7 @@ music.recommendations.start / get / choose / continue / retry / return / cancel 
 
 | kind | 参数与提交 |
 | --- | --- |
-| `fm` | `mode=default|familiar|explore|puzzle|scene`、`submode`，或 `ruleId/tabTagId`；同一 FM lineage 的频道切换使用 append + selectIndex |
+| `fm` | `mode=default|familiar|explore|puzzle|scene`、`submode`，或 `ruleId/tabTagId`；首次进入与切换频道／场景均新建会话并执行独立 enter 替换队列 |
 | `similar` | `sourceType=artist|song`、非空 `sourceIds`；实际所需定位交共同 Node 配方，上游拒绝按真实分类返回；始终独立 enter，不捕获 checkpoint |
 | `heartbeat` | `entry=favorites|current`，首页保留真实网易种子，播放器另带 `seedEntryId`；本地融合收藏不传本地歌单 ID。实际喜欢歌单定位和请求由 Node 执行，不以旧完整成员证明准入。捕获 checkpoint；续批沿共同返回 context，以实际尾曲推进 |
 | `queue` | 必须带当前 occurrence 的 `seedEntryId`；`restore=false` 为只读候选，`restore=true` 为主动 enter 并捕获 checkpoint；只要求种子可解析成网易 ID，不要求整队网易身份 |
@@ -65,15 +65,15 @@ sourceType heartbeatPlaylistId mode submode ruleId tabTagId
 - `MaybeBeginLocked` 按共同契约决定何时取歌；同一 `Flight`／generation 防止并发读取，`Attempted` 避免同尾项／游标失败后忙重试。没有计时冷却、队列长度阈值或随机轮次限制。
 - `TryAdvanceAsync` 只在已有候选需要并入时等待本地 CAS，不等待 provider HTTP；随后由唯一队列 owner 执行实际循环与插队优先级。普通续批不带 selectIndex，不抢当前媒体。
 - 搜索候选仅追加时 `started` 仍为 false，队列 source 保持搜索；普通方式不会自动追加候选。唯一队列 writer 真正选择活会话推荐 occurrence 时，在该次选择 CAS 中切换 source，成功回执同步激活推荐，再允许后续普通追加保留会话。显式 choose／主动 enter 同样以实际提交的选择为准，不从持久条目 context 重建活会话。
-- FM 显式换频道的首批相对旧队列不去重，创建新 occurrence 并选择新批真实首项；全部与旧批重复也能进入。正常后续取歌仍按已有录音去重。
+- FM 首次进入与显式换频道均以新会话独立 enter 替换队列并选择新批真实首项；同一未退出的活跃 FM 会话重复点击恢复播放，正常后续队尾取歌传递 `continuation=true` 与 `unplaySongIds` 并按已有录音去重。
 - 关闭 continue 保留候选及 seed；在途读取可完成为候选，但不自动并入。已准入 CAS 等待实际结算，不回滚已提交内容。最后候选消费后才按 hasMore 结束；空批／全部重复同样停止自动链。
 - 心动与主动推荐共用 retainCurrent restore；相似、FM 和搜索候选没有返回 checkpoint。完整心动结果及缺失详情由平台 owner 解析；续批调用同一心动接口并保持原进入上下文。
 
 ## 本机 FM 记忆
 
-`MusicFmPreferences`（位于 `MeowFilm.Capabilities/Music/Recommendations/Storage/`）直接通过强类型 SQL 按 `account_id` 读写 `windows_music_fm_preferences`（`account_id`、`mode`、`submode`、`rule_id`、`tab_tag_id`）。不存凭据、队列或活会话，不进入曲库同步。
+`MusicFmPreferences`（位于 `MeowFilm.Capabilities/Music/Recommendations/Storage/`）直接通过强类型 SQL 按作用域键（已登录网易 `UserId` 或未登录 `"guest"`）读写 `windows_music_fm_preferences`（`account_id`、`mode`、`submode`、`rule_id`、`tab_tag_id`）。不存凭据、队列或活会话，不进入曲库同步。
 
-首页不指定 mode 的 FM start 在账号首次观察后读取该账号选择；无记录使用 default。只有账号 lease 和已提交 FM 配置仍属当前来源时才保存；切换失败、取消、旧响应不能覆盖。未知提交须显式 reconcile，确认成功后才保存真实配置。
+首页不指定 mode 的 FM start 在账号首次观察后读取当前作用域（账号或游客）选择；无记录使用 default。只有对应作用域与已提交 FM 配置仍属当前来源时才保存；切换失败、取消、旧响应不能覆盖。未知提交须显式 reconcile，确认成功后才保存真实配置。
 
 ## 唯一队列 lane
 

@@ -46,12 +46,11 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
     {
         internal readonly string Id = id ?? Guid.NewGuid().ToString("D");
         internal Configuration Config = config;
-        internal Configuration? PreviousConfiguration;
         internal Session? PreviousSession;
         internal readonly Dictionary<string, MusicRecommendationFeedback> Feedback = [];
         internal readonly HashSet<string> Attempted = [];
         internal bool Active = true, Loading, Continue = config.Continue,
-            Play = config.Play, InitialAppend, InitialPending = true, CommittingInitial, Returning, Exhausted, RecommendationStarted;
+            Play = config.Play, InitialPending = true, CommittingInitial, Returning, Exhausted, RecommendationStarted;
         internal string Status = "idle", Error = "", Checkpoint = "", Anchor = "", FixedSeed = "";
         internal int Offset;
         internal int Batch, Generation, Navigation, MediaIntent, Failures, ModeIntent;
@@ -273,7 +272,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
             (kind != "queue" || p.Restore) && p.Continue, p.Play);
     }
 
-    private static bool SameConfiguration(Configuration left, Configuration right) =>
+    private static bool SameTargetConfiguration(Configuration left, Configuration right) =>
         left.Kind == right.Kind &&
         left.Platform == right.Platform &&
         left.Fm == right.Fm &&
@@ -281,8 +280,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         left.SourceType == right.SourceType && left.Restore == right.Restore &&
         left.Heartbeat == right.Heartbeat &&
         left.Seed == right.Seed &&
-        left.Continue == right.Continue &&
-        left.Play == right.Play;
+        left.Continue == right.Continue;
 
     internal Task<MusicRecommendationSnapshot>? TryReuseFmStart(MusicRecommendationStartRequest input, CancellationToken token)
     {
@@ -299,24 +297,33 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                 if (current.InitialPending) return null;
                 config = config with { Fm = current.Config.Fm };
             }
-            return SameConfiguration(current.Config, config) ? StartCoreAsync(config, token) : null;
+            return SameTargetConfiguration(current.Config, config) ? StartCoreAsync(config, token) : null;
         }
     }
 
     private async Task<MusicRecommendationSnapshot> StartCoreAsync(Configuration config, CancellationToken token)
     {
         Session next; Task flight;
+        MusicRecommendationSelection? resumeSelection = null;
         lock (gate)
         {
             GuardLocked(); Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
             var old = session;
-            if (old is { Active: true, Returning: false } && SameConfiguration(old.Config, config))
+            if (old is { Active: true, Returning: false } &&
+                SameTargetConfiguration(old.Config, config) &&
+                (old.Config.Kind == "fm" || old.Config.Play == config.Play))
             {
                 next = old;
                 int intent = old.ModeIntent;
                 if (config.Continue && !old.Continue && !old.InitialPending) intent = ++old.ModeIntent;
                 flight = config.Continue && !old.Continue && !old.InitialPending
                     ? LaunchLocked(() => EnableContinuationAsync(old, intent, token)) : old.Flight;
+                if (config.Play && !old.Play && !old.InitialPending && !old.Loading && old.Queue is { CurrentId.Length: > 0 } q)
+                {
+                    old.Play = true; old.MediaIntent++;
+                    resumeSelection = SelectionLocked(old, q.CurrentId, play: true, automatic: false, restoreOnly: false);
+                    PublishLocked();
+                }
             }
             else
             {
@@ -334,17 +341,9 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                     RetireLocked(old, "replaced");
                     old = null;
                 }
-                bool switchFm = old is { Active: true, InitialPending: false } && old.Config.Kind == "fm" && config.Kind == "fm";
-                next = new(config, switchFm ? old!.Id : null) { QueueEpoch = queue.Epoch, Predecessor = predecessor };
+                next = new(config) { QueueEpoch = queue.Epoch, Predecessor = predecessor };
                 if (old is { Active: true })
                 {
-                    next.InitialAppend = switchFm;
-                    if (switchFm)
-                    {
-                        next.Batch = old.Batch; next.Queue = old.Queue; next.Continue = old.Continue;
-                        next.PreviousConfiguration = old.Config;
-                        foreach (var entry in old.Feedback) next.Feedback.Add(entry.Key, entry.Value);
-                    }
                     if (config.Restore && old.Checkpoint.Length > 0) next.Checkpoint = old.Checkpoint;
                     next.PreviousSession = old;
                     old.Generation++; old.Navigation++; CancelLocked(old.Cancellation);
@@ -355,6 +354,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
             }
         }
         await flight.ConfigureAwait(false);
+        if (resumeSelection is not null) await SelectAsync(next, resumeSelection, token).ConfigureAwait(false);
         lock (gate) return SnapshotLocked(!next.Active && !ReferenceEquals(session, next) ? session : next);
     }
     private bool CurrentLocked(Session s) => !closed && !stopping && ReferenceEquals(session, s) && s.Active;

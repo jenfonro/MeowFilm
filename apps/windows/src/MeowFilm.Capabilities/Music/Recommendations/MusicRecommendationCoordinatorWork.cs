@@ -75,8 +75,7 @@ public sealed partial class MusicRecommendationCoordinator
             // No WaitAsync: cancellation is not evidence that the provider/HTTP physically settled.
             var response = await readAsync(request, token).ConfigureAwait(false);
             Check(s, generation, epoch, token);
-            IEnumerable<string> known = initial && s.InitialAppend && s.Config.Kind == "fm" ? [] :
-                initial && !s.InitialAppend && (s.Config.Kind != "queue" || s.Config.Restore)
+            IEnumerable<string> known = initial && (s.Config.Kind != "queue" || s.Config.Restore)
                 ? before.Entries.Where(e => e.Id == seed).Select(e => NativeId(e.Song))
                 : before.Entries.Select(e => NativeId(e.Song));
             var songs = ParseSongs(response, known).ToArray();
@@ -142,9 +141,9 @@ public sealed partial class MusicRecommendationCoordinator
             }
             if (songs.Length == 0) throw new RecommendationException("EMPTY_RECOMMENDATIONS");
             var operation = new PendingOperation(Guid.NewGuid().ToString("D"),
-                initial && !s.InitialAppend ? "enter" : "append", songs, request, seed,
-                initial && (seed.Length == 0 || s.InitialAppend), automatic, epoch,
-                initial && s.InitialAppend ? 0 : null, hasMore, heartbeat, offset, navigation,
+                initial ? "enter" : "append", songs, request, seed,
+                initial && seed.Length == 0, automatic, epoch,
+                null, hasMore, heartbeat, offset, navigation,
                 !initial ? modeIntent : null);
             bool committed = await CommitBatchAsync(s, operation, before, generation, epoch, token).ConfigureAwait(false);
             MusicRecommendationSelection? selection = null;
@@ -166,8 +165,6 @@ public sealed partial class MusicRecommendationCoordinator
                         s.Error == "EMPTY_RECOMMENDATIONS" ? "empty" : "error";
                     if (s.Pending is null)
                     {
-                        if (s.PreviousConfiguration is { } previousConfig)
-                        { s.Config = previousConfig; s.PreviousConfiguration = null; s.InitialPending = false; }
                         s.Failures++;
                     }
                     if (s.Pending is null && s.PreviousSession is { } previous)
@@ -205,7 +202,11 @@ public sealed partial class MusicRecommendationCoordinator
         snapshot.Entries.Select(e => NativeId(e.Song)).Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
     private static MusicRecommendationRequest Request(Session s, QueueSnapshot snapshot, bool initial)
     {
-        if (s.Config.Kind == "fm") return new(s.Config.Fm! with { UnplaySongIds = initial ? [] : QueueNativeIds(snapshot) });
+        if (s.Config.Kind == "fm") return new(s.Config.Fm! with
+        {
+            Continuation = !initial,
+            UnplaySongIds = initial ? [] : QueueNativeIds(snapshot)
+        });
         if (s.Config.Kind == "similar") return new(new MusicSimilarRequest(s.Config.Platform, s.Config.SourceIds,
             s.Config.SourceType, initial ? [] : QueueNativeIds(snapshot)));
         if (s.Config.Kind == "heartbeat")
@@ -296,7 +297,7 @@ public sealed partial class MusicRecommendationCoordinator
         }
         if (operation.Action == "enter")
             Require(actual.Version == before.Version && actual.CurrentId == before.CurrentId, "STALE_QUEUE");
-        if (operation.Action == "append" && !(s.Config.Kind == "fm" && s.InitialAppend && s.InitialPending))
+        if (operation.Action == "append")
         {
             var known = actual.Entries.Select(entry => NativeId(entry.Song)).ToHashSet(StringComparer.Ordinal);
             string? selected = operation.SelectIndex is { } index ? operation.Songs[index].NativeId : null;
@@ -476,7 +477,7 @@ public sealed partial class MusicRecommendationCoordinator
                 { Context = operation.Songs[i].Context, Metadata = operation.Songs[i].Metadata };
             }
             s.Anchor = ids[^1]; s.Queue = after; s.QueueEpoch = epoch; s.Failures = 0;
-            s.InitialPending = false; s.PreviousConfiguration = null;
+            s.InitialPending = false;
             if (s.Config.Kind == "queue")
             {
                 s.RecommendationStarted |= operation.Action == "enter" || s.Feedback.ContainsKey(after.CurrentId);
@@ -524,11 +525,8 @@ public sealed partial class MusicRecommendationCoordinator
                 var recipient = session is { } current && current.Id == s.Id && CurrentLocked(current) ? current : s;
                 if (result.Applied)
                 {
-                    // A superseded request is never allowed to publish by itself.
-                    // This explicit, physically settled reconciliation instead
-                    // adopts the confirmed facts into the still-live FM lineage.
                     if (pending!.Request?.Fm is { } fm && CurrentLocked(recipient) && queue.Epoch == pending.QueueEpoch)
-                        { recipient.Config = recipient.Config with { Fm = fm }; recipient.PreviousConfiguration = null; }
+                        recipient.Config = recipient.Config with { Fm = fm };
                     ApplyCommitted(recipient, pending!, result, after, pending!.QueueEpoch);
                     if (CurrentLocked(recipient)) recipient.Status = "ready";
                     if (pending.Action == "restore")
@@ -540,8 +538,6 @@ public sealed partial class MusicRecommendationCoordinator
                 else
                 {
                     recipient.Status = "not-applied"; recipient.Returning = false;
-                    if (recipient.PreviousConfiguration is { } previousConfig)
-                    { recipient.Config = previousConfig; recipient.PreviousConfiguration = null; recipient.InitialPending = false; }
                 }
                 if (!result.Applied && recipient.PreviousSession is { } previous)
                 {

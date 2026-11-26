@@ -2,31 +2,37 @@
 import Foundation
 import MeowMusicFeature
 
+private let fmPreviewCacheTTL: TimeInterval = 3600
+
 struct MusicNativeFMPreviewEntry {
     let id: UUID
     let binding: MusicNativeHomeBinding
     let authorization: MusicQueueAuthorization
     let task: Task<MusicNativeFMResponse?, Never>
+    let createdAt = Date()
     var observer: Task<Void, Never>?
     var completed = false
     var value: MusicNativeFMResponse?
 }
 
 /// The source caches its first page; only its existing nextFMBatch call asks
-/// this reader again. Consuming a preview can therefore never repeat batch one.
+/// this reader again, which marks subsequent reads as live continuations.
 actor MusicNativeFMRead {
     var preview: Task<MusicNativeFMResponse?, Never>?
-    let load: @Sendable () async throws -> MusicNativeFMResponse
+    let load: @Sendable (Bool) async throws -> MusicNativeFMResponse
+    var initialConsumed = false
     var closed = false
     var loading: Task<MusicNativeFMResponse, Error>?
     var closing: Task<Void, Never>?
-    init(preview: Task<MusicNativeFMResponse?, Never>?, load: @escaping @Sendable () async throws -> MusicNativeFMResponse) {
+    init(preview: Task<MusicNativeFMResponse?, Never>?, load: @escaping @Sendable (Bool) async throws -> MusicNativeFMResponse) {
         self.preview = preview; self.load = load
     }
     func page(_ cursor: String?) async throws -> MusicNativeTrackPage {
         try musicRequire(cursor == nil, .invalidRequest)
         try musicRequire(!closed, .closed)
         try musicRequire(loading == nil, .busy)
+        let isContinuation = initialConsumed
+        initialConsumed = true
         let preview = self.preview, load = self.load
         self.preview = nil
         let task = Task {
@@ -36,7 +42,7 @@ actor MusicNativeFMRead {
                 guard let result else { throw MusicServiceError.upstreamFailed }
                 return result
             }
-            return try await load()
+            return try await load(isContinuation)
         }
         loading = task
         defer { loading = nil }
@@ -64,7 +70,9 @@ extension NativeMusicService: MusicFMPreviewServing {
         try check(own)
         // Includes failed and in-flight entries. Account changes cannot leak a
         // previous cover or make a previous first batch playable.
-        for (candidate, value) in fmPreviews where value.binding != binding || !value.authorization.isActive {
+        let currentNow = now()
+        for (candidate, value) in fmPreviews where value.binding != binding || !value.authorization.isActive ||
+            currentNow.timeIntervalSince(value.createdAt) >= fmPreviewCacheTTL {
             discardFMPreview(candidate)
         }
         if fmPreviews[key] == nil {
@@ -113,13 +121,13 @@ extension NativeMusicService: MusicFMPreviewServing {
     func clearFMPreviews() {
         for key in Array(fmPreviews.keys) { discardFMPreview(key) }
     }
-    private func loadFM(_ action: MusicHomeAction, preview: Bool, binding: MusicNativeHomeBinding,
-                        epoch own: UUID) async throws -> MusicNativeFMResponse {
+    private func loadFM(_ action: MusicHomeAction, preview: Bool, continuation: Bool = false,
+                        binding: MusicNativeHomeBinding, epoch own: UUID) async throws -> MusicNativeFMResponse {
         try await checkHomeBinding(binding, epoch: own)
         let owner = accounts as? any MusicNativeFMProviding, port = publicPlatforms
         let value = try await work(label: "musicFM", draining: true) {
-            if let owner { return try await owner.nativeFM(action, preview: preview, binding: binding) }
-            return try await port.homeAction(action, preview: preview)
+            if let owner { return try await owner.nativeFM(action, preview: preview, continuation: continuation, binding: binding) }
+            return try await port.homeAction(action, preview: preview, continuation: continuation)
         }
         try await checkHomeBinding(binding, epoch: own)
         return value
@@ -135,6 +143,7 @@ extension NativeMusicService: MusicFMPreviewServing {
         var preview: Task<MusicNativeFMResponse?, Never>?
         if let entry = fmPreviews[key] {
             if case .fm = action, entry.binding == binding, entry.authorization.isActive,
+               now().timeIntervalSince(entry.createdAt) < fmPreviewCacheTTL,
                !entry.completed || entry.value?.tracks.isEmpty == false {
                 preview = entry.task
                 // Transfer the pending first batch, not its display fence.
@@ -142,9 +151,9 @@ extension NativeMusicService: MusicFMPreviewServing {
                 access.remove(entry.id); entry.observer?.cancel(); entry.authorization.revoke()
             } else { discardFMPreview(key) }
         }
-        let reader = MusicNativeFMRead(preview: preview) { [weak self] in
+        let reader = MusicNativeFMRead(preview: preview) { [weak self] continuation in
             guard let self else { throw MusicServiceError.closed }
-            return try await self.loadFM(action, preview: false, binding: binding, epoch: own)
+            return try await self.loadFM(action, preview: false, continuation: continuation, binding: binding, epoch: own)
         }
         access.register(id) { authorization.revoke(); Task { await reader.close() } }
         fmQueues[id] = (key, authorization, reader)

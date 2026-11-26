@@ -24,7 +24,7 @@
 
 成功提交 FM 队列时，将规范化动作写入设备音乐文档 `playback.fmSelections[scope]`。登录 scope 为 `wy-fm:` 加真实网易 UID 的 SHA-256，游客使用独立 guest scope；不存凭据，不借短期账号 revision 作为跨重启身份。首次未保存使用 DEFAULT，存储或解码失败不冒充首次默认值。没有云同步。
 
-`MusicRemoteQueueSource.homeAction` 携带真实入口动作，包括 FM 配置、相似种子和日推分支。已在 FM 内切频道先取得新批，再追加旧队列并选择新批首项，保留当前播放方式；新进入 FM 由 owner 一致设置列表顺序和续播开启。预览仍按既有缓存转移首批，不重复请求已转移批次。
+`MusicRemoteQueueSource.homeAction` 携带真实入口动作，包括 FM 配置、相似种子和日推分支。进入 FM 或切换 FM 频道／场景先取得新批，再创建新会话、替换队列并选择新批首项，由 owner 一致设置列表顺序和续播开启；漫游队列与活会话仅保留在当前运行内存、不落盘持久化，跨重启仅持久化 `playback.fmSelections` 选择参数。预览在 1 小时有效期内按既有缓存转移首批，后续 `nextFMReferences` 标记 `continuation=true` 实时获取新随机批次。
 
 `MusicNodeAccountProvider.fm/homeAction/similarMode` 把实际 FM 配置、preview、歌曲／艺人定位交给共同 Node 操作。Swift 消费返回的歌曲、封面、continuation 和逐曲反馈来源，不重建 radio／规则频道的路径、签名或批次配方。日推／风格日推仍为歌单来源，平台批次参数不是客户端队列长度上限。
 

@@ -490,7 +490,7 @@ extension NativeMusicService: MusicHomeBrowsing {
                 homeDisplay = (load.source, display); homeDisplayPrepared = true
                 if cursor == nil {
                     homeCache = (load.source, load.binding.scope, load.binding.revision,
-                                 now().addingTimeInterval(600), cachedDisplay)
+                                 now().addingTimeInterval(3600), cachedDisplay)
                 }
                 if let store = homeSnapshot {
                     // Storage failure keeps the previous durable success

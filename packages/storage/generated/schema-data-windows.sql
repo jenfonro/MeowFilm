@@ -1630,7 +1630,7 @@ CREATE TABLE windows_music_recommendation_checkpoint_lists (
 CREATE TABLE windows_music_recommendation_sessions (
     scope TEXT PRIMARY KEY NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
     session_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('similar', 'heartbeat', 'queue')),
     platform TEXT NOT NULL,
     source_type TEXT NOT NULL DEFAULT '',
     seed TEXT NOT NULL DEFAULT '',
@@ -1648,11 +1648,7 @@ CREATE TABLE windows_music_recommendation_sessions (
     heartbeat_song_id TEXT,
     heartbeat_from_home INTEGER CHECK (heartbeat_from_home IS NULL OR heartbeat_from_home IN (0, 1)),
     heartbeat_count INTEGER,
-    heartbeat_account_id TEXT,
-    fm_mode TEXT,
-    fm_submode TEXT,
-    fm_rule_id TEXT,
-    fm_tab_tag_id TEXT
+    heartbeat_account_id TEXT
 ) STRICT;
 
 CREATE TABLE windows_music_recommendation_session_lists (

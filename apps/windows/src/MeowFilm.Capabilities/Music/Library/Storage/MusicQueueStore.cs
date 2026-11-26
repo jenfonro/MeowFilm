@@ -47,8 +47,15 @@ internal static class MusicQueueStore
             state.Source, entries, priority);
     }
 
+    private static MusicQueueStateRecord PersistedQueue(MusicQueueStateRecord state) =>
+        state.Source?.Kind == "fm"
+            ? new(null, state.Serial, state.Revision, null, [], [])
+            : state;
+
     internal static bool Save(DatabaseSession db, string scope, MusicQueueStateRecord? previous, MusicQueueStateRecord next)
     {
+        previous = previous is null ? null : PersistedQueue(previous);
+        next = PersistedQueue(next);
         if (previous is null || !next.HeaderEquals(previous))
         {
             var src = next.Source ?? MusicQueueSourceRecord.Empty;
