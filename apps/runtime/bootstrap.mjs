@@ -334,7 +334,7 @@ export function createAppRuntime({ sessionId,
         validate(input) {
           if (input === null || typeof input !== 'object' || Array.isArray(input) ||
               typeof input.block !== 'string' ||
-              !/^[a-z][a-z0-9.]{0,63}$(?![\s\S])/.test(input.block)) invalid();
+              !/^[a-z][a-z0-9.-]{0,63}$(?![\s\S])/.test(input.block)) invalid();
         },
         handler: async input => {
           try {

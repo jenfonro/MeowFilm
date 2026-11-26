@@ -103,6 +103,9 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
     public string Version => "0.1.0";
     public IDebugModuleAdapter DebugAdapter => debugAdapter;
     internal FilmSettingsView DebugSettings => settings;
+    internal FilmSourceService DebugSources => sources;
+    internal FilmMetadataService DebugMetadata => metadata;
+    internal IStorageDatabase DebugStorage => storage;
     internal FilmView DebugView => view;
     internal string DebugRoute => route;
     internal FilmPlaybackSession DebugFilmPlayback => filmPlayback;

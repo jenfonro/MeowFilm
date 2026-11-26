@@ -226,6 +226,7 @@ internal sealed class FFmpegHttpTransport : IDisposable
         private HttpResponseMessage? _response;
         private Stream? _body;
         private long _position;
+        private long _responseStart;
         private long? _responseEnd;
         private bool _rangeSupported;
         private int _abortVersion;
@@ -411,6 +412,7 @@ internal sealed class FFmpegHttpTransport : IDisposable
                             token.ThrowIfCancellationRequested();
                             throw new OperationCanceledException();
                         }
+                        _responseStart = _position;
                         _body = stream;
                     }
                     return;
@@ -446,72 +448,91 @@ internal sealed class FFmpegHttpTransport : IDisposable
 
         private async Task<int> ReadAsync(Memory<byte> destination, CancellationToken token, bool probe = false)
         {
-            _owner._lifetimeToken.ThrowIfCancellationRequested();
-            token.ThrowIfCancellationRequested();
-            if (Volatile.Read(ref _disposed) != 0) throw new PlaybackException(PlaybackError.ReadFailed);
-            if (_end >= 0 && _position == _end || Length == _position) return 0;
-
-            var body = CurrentBody(out int readVersion);
-            if (body is null || _responseEnd is { } end && _position == end)
+            while (true)
             {
-                if (!CanSeek && !_rangeSupported) throw new PlaybackException(PlaybackError.HttpTruncated);
-                Abort();
+                _owner._lifetimeToken.ThrowIfCancellationRequested();
+                token.ThrowIfCancellationRequested();
+                if (Volatile.Read(ref _disposed) != 0) throw new PlaybackException(PlaybackError.ReadFailed);
+                if (_end >= 0 && _position == _end || Length == _position) return 0;
+
+                var body = CurrentBody(out int readVersion);
+                if (body is null || _responseEnd is { } end && _position == end)
+                {
+                    if (!CanSeek && !_rangeSupported) throw new PlaybackException(PlaybackError.HttpTruncated);
+                    Abort();
+                    try
+                    {
+                        await OpenAsync(initial: false, token).ConfigureAwait(false);
+                    }
+                    catch (PlaybackException ex) when (Length is null && ex.Code == PlaybackError.HttpRangeRejected)
+                    {
+                        // Unknown-total 206 stream (e.g. bytes 0-1023/*) reached EOF cleanly.
+                        return 0;
+                    }
+                    body = CurrentBody(out readVersion);
+                    if (body is null)
+                    {
+                        _owner._lifetimeToken.ThrowIfCancellationRequested();
+                        token.ThrowIfCancellationRequested();
+                        throw new OperationCanceledException();
+                    }
+                }
+                int count = destination.Length;
+                if (_responseEnd is { } limit) count = (int)Math.Min(count, limit - _position);
+
+                CancellationToken readToken;
+                CancellationTokenSource? linked = null;
+                if (_progressive && probe)
+                {
+                    readToken = token;
+                }
+                else
+                {
+                    readToken = AcquireDeadline(_owner._options.ReadTimeout, token, readVersion, out linked);
+                }
+
+                int read;
                 try
                 {
-                    await OpenAsync(initial: false, token).ConfigureAwait(false);
+                    read = await body.ReadAsync(destination[..count], readToken).ConfigureAwait(false);
                 }
-                catch (PlaybackException ex) when (Length is null && ex.Code == PlaybackError.HttpRangeRejected)
+                catch (OperationCanceledException) when (token.IsCancellationRequested && !_owner.Cancelled)
                 {
-                    // Unknown-total 206 stream (e.g. bytes 0-1023/*) reached EOF cleanly.
-                    return 0;
+                    if (CanSeek) Abort();
+                    throw;
                 }
-                body = CurrentBody(out readVersion);
-                if (body is null)
+                catch (OperationCanceledException) when (_owner.Cancelled)
                 {
-                    _owner._lifetimeToken.ThrowIfCancellationRequested();
-                    token.ThrowIfCancellationRequested();
-                    throw new OperationCanceledException();
+                    Abort();
+                    throw;
                 }
-            }
-            int count = destination.Length;
-            if (_responseEnd is { } limit) count = (int)Math.Min(count, limit - _position);
+                catch (Exception ex) when (ex is IOException or HttpRequestException &&
+                    CanSeek && !_progressive && _position > _responseStart &&
+                    !_owner.Cancelled && !token.IsCancellationRequested)
+                {
+                    // Upstream Range response closed mid-slice after delivering bytes; continue from new offset.
+                    Abort();
+                    continue;
+                }
+                finally
+                {
+                    linked?.Dispose();
+                    if (linked is null && !(_progressive && probe)) DisarmDeadline();
+                }
 
-            CancellationToken readToken;
-            CancellationTokenSource? linked = null;
-            if (_progressive && probe)
-            {
-                readToken = token;
+                if (read == 0 && _responseEnd is { } expected && _position != expected)
+                {
+                    if (CanSeek && !_progressive && _position > _responseStart &&
+                        !_owner.Cancelled && !token.IsCancellationRequested)
+                    {
+                        Abort();
+                        continue;
+                    }
+                    throw new PlaybackException(PlaybackError.HttpTruncated);
+                }
+                _position += read;
+                return read;
             }
-            else
-            {
-                readToken = AcquireDeadline(_owner._options.ReadTimeout, token, readVersion, out linked);
-            }
-
-            int read;
-            try
-            {
-                read = await body.ReadAsync(destination[..count], readToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested && !_owner.Cancelled)
-            {
-                if (CanSeek) Abort();
-                throw;
-            }
-            catch (OperationCanceledException) when (_owner.Cancelled)
-            {
-                Abort();
-                throw;
-            }
-            finally
-            {
-                linked?.Dispose();
-                if (linked is null && !(_progressive && probe)) DisarmDeadline();
-            }
-
-            if (read == 0 && _responseEnd is { } expected && _position != expected)
-                throw new PlaybackException(PlaybackError.HttpTruncated);
-            _position += read;
-            return read;
         }
 
         internal async Task<long> CopyCompleteAsync(Stream destination, long maximumBytes, CancellationToken token,

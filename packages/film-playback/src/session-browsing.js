@@ -23,13 +23,14 @@ export function createSessionBrowsing(ctx) {
       if (result.attachedDisplayOnly) return false;
       if (!ctx.currentSource(session, result.source)) return false;
       if (isItemBlocked(blocks, session.targetId, result.source.key, result.source.detailId)) return false;
-      if (result.raw?.type_name === '电影') return false;
       if (result.state === 'error' && !result.detail) return false;
       if (result.detail && result.recognitionCache) {
         const hasTvEpisode = result.recognitionCache.candidates.some(c =>
           (!c.share || c.file) && c.episode !== undefined && c.episode > 0);
         const hasPendingShare = result.detail.lines.some(lineHasUnexpandedShare);
         if (!hasTvEpisode && !hasPendingShare) return false;
+      } else if (result.raw?.type_name === '电影' && !(result.seasonHint > 0 || result.remarkMaxEpisode > 1)) {
+        return false;
       }
       return true;
     });
@@ -127,43 +128,65 @@ export function createSessionBrowsing(ctx) {
 
   async function ensureSmartListSeasonPopulated(session, preferredResultId = null, generation = session.browseGeneration) {
     const admitted = () => !ctx.isClosed() && !session.released && session.browseGeneration === generation;
-    const { orderedSeasons, seasonEpisodes, eligible } = smartListSeasons(session);
-    if (!eligible.length) return;
+    const initial = smartListSeasons(session);
+    if (!initial.eligible.length) return;
 
     let targetSeason = session.browsing.season;
-    if (!targetSeason || !orderedSeasons.includes(targetSeason)) {
-      targetSeason = orderedSeasons[0] ?? 1;
+    if (!targetSeason || !initial.orderedSeasons.includes(targetSeason)) {
+      targetSeason = initial.orderedSeasons[0] ?? 1;
       session.browsing.season = targetSeason;
     }
 
     // If a specific raw card site was clicked, load ONLY that site first!
     if (preferredResultId) {
-      const targetResult = eligible.find(r => r.id === preferredResultId);
+      const targetResult = initial.eligible.find(r => r.id === preferredResultId);
       if (targetResult) {
         await expandResultForSmartList(session, targetResult, admitted);
-        return;
+        if (!admitted()) return;
+        const updated = smartListSeasons(session);
+        if (!updated.orderedSeasons.includes(session.browsing.season)) {
+          session.browsing.season = updated.orderedSeasons[0] ?? 1;
+        } else if ((updated.seasonEpisodes.get(session.browsing.season)?.size ?? 0) === 0) {
+          const targetCandSeasons = [...new Set(
+            (targetResult.recognitionCache?.candidates ?? [])
+              .filter(c => (!c.share || c.file) && c.episode > 0)
+              .map(c => c.season > 0 ? c.season : 1),
+          )].sort((a, b) => a - b);
+          if (targetCandSeasons.length) {
+            session.browsing.season = targetCandSeasons[0];
+          }
+        }
+        if ((updated.seasonEpisodes.get(session.browsing.season)?.size ?? 0) > 0) {
+          return;
+        }
       }
     }
 
-    // Otherwise ensure the selected season has at least one expanded result.
-    const currentEpCount = seasonEpisodes.get(targetSeason)?.size ?? 0;
-    if (currentEpCount > 0) return;
+    const populateSeason = async seasonToFill => {
+      const current = smartListSeasons(session);
+      if ((current.seasonEpisodes.get(seasonToFill)?.size ?? 0) > 0) return;
+      const matching = current.eligible.filter(r =>
+        !r.detail && (r.seasonHint === seasonToFill || (seasonToFill === 1 && r.seasonHint === 0)));
+      const candidatesToLoad = (matching.length ? matching : current.eligible.filter(r => !r.detail))
+        .slice(0, SMART_BATCH_SIZE);
+      for (const item of candidatesToLoad) {
+        if (!admitted()) return;
+        await expandResultForSmartList(session, item, admitted);
+        const next = smartListSeasons(session);
+        if ((next.seasonEpisodes.get(seasonToFill)?.size ?? 0) > 0) break;
+      }
+    };
 
-    const matchingSeasonResults = eligible.filter(r =>
-      !r.detail && (r.seasonHint === targetSeason || (targetSeason === 1 && r.seasonHint === 0)));
-    const candidatesToLoad = (matchingSeasonResults.length ? matchingSeasonResults : eligible.filter(r => !r.detail))
-      .slice(0, 2);
-    for (const item of candidatesToLoad) {
-      if (!admitted()) return;
-      await expandResultForSmartList(session, item, admitted);
-      const updated = smartListSeasons(session);
-      if ((updated.seasonEpisodes.get(targetSeason)?.size ?? 0) > 0) break;
-    }
+    await populateSeason(session.browsing.season ?? targetSeason);
+    if (!admitted()) return;
 
-    // Re-sync selected season after actual recognition in case implicit vs explicit shifted seasons.
+    // Re-sync selected season after actual recognition in case hinted results failed or shifted seasons.
     const after = smartListSeasons(session);
     if (after.orderedSeasons.length && !after.orderedSeasons.includes(session.browsing.season)) {
       session.browsing.season = after.orderedSeasons[0];
+      if ((after.seasonEpisodes.get(session.browsing.season)?.size ?? 0) === 0) {
+        await populateSeason(session.browsing.season);
+      }
     }
   }
 

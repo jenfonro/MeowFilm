@@ -739,6 +739,10 @@ export async function runCli(argv = process.argv.slice(2)) {
       } else if (['select_episode', 'select_source', 'select_line', 'select_candidate'].includes(normalized) && posArg !== undefined &&
                  cmdParams.index === undefined && cmdParams.id === undefined) {
         Object.assign(cmdParams, parseIndexOrId(posArg));
+      } else if (normalized === 'select_season' && posArg !== undefined &&
+                 cmdParams.season === undefined && cmdParams.index === undefined && cmdParams.id === undefined) {
+        if (/^(?:[1-9][0-9]*)$/.test(posArg)) cmdParams.season = Number(posArg);
+        else cmdParams.id = posArg;
       } else if (['select_video_track', 'select_audio_track', 'select_subtitle_track'].includes(normalized) &&
                  posArg !== undefined && cmdParams.id === undefined && cmdParams.index === undefined) {
         const lowered = posArg.toLowerCase();

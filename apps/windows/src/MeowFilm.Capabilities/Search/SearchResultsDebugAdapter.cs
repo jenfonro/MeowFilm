@@ -46,12 +46,20 @@ internal sealed class SearchResultsDebugAdapter(SearchResultsPage page) : IDebug
 
         if (page.SelectedTab == "film")
         {
+            var filters = new object[]
+            {
+                new { group = "filter", index = 0, id = "aggregate", title = "聚合列表", selected = !page.RawListMode },
+                new { group = "filter", index = 1, id = "raw", title = "原始列表", selected = page.RawListMode }
+            };
             var rows = page.Cards.Take(maxItems).Select((c, idx) => new
             {
                 index = idx,
                 id = c.Id,
+                targetId = c.SearchContext.Entry.TargetId,
                 title = c.Title,
                 subtitle = c.Score,
+                badge = c.TextBadge,
+                siteLabel = c.Subtitle,
                 selected = false,
                 state = "film",
                 actions = new[] { "open" }
@@ -63,11 +71,12 @@ internal sealed class SearchResultsDebugAdapter(SearchResultsPage page) : IDebug
                 query = page.Query,
                 searchTarget = "film",
                 selectedTab = page.SelectedTab,
+                rawListMode = page.RawListMode,
                 loading = page.FilmLoading,
                 error = string.IsNullOrWhiteSpace(page.Error) ? null : page.Error,
                 metadataStatus = page.MetadataStatus,
                 tabs,
-                filters = Array.Empty<object>(),
+                filters,
                 sections = Array.Empty<object>(),
                 rows,
                 hasMore = page.HasMore,
@@ -158,8 +167,16 @@ internal sealed class SearchResultsDebugAdapter(SearchResultsPage page) : IDebug
 
             case "tab.select":
             {
+                var group = (DebugParams.GetString(parameters, "group") ?? "search-tab").Trim().ToLowerInvariant();
                 var id = DebugParams.GetString(parameters, "id");
                 var idx = DebugParams.GetInt(parameters, "index");
+                if (group is "filter" or "mode" && page.SelectedTab == "film")
+                {
+                    bool wantRaw = idx == 1 || string.Equals(id, "raw", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(id, "原始列表", StringComparison.Ordinal);
+                    page.RawListMode = wantRaw;
+                    return new { group = "filter", selected = wantRaw ? "raw" : "aggregate", rawListMode = page.RawListMode };
+                }
                 string? picked;
                 if (idx is { } i)
                 {
@@ -193,6 +210,7 @@ internal sealed class SearchResultsDebugAdapter(SearchResultsPage page) : IDebug
                     else if (!string.IsNullOrWhiteSpace(id))
                     {
                         card = page.Cards.FirstOrDefault(c => string.Equals(c.Id, id, StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(c.SearchContext.Entry.TargetId, id, StringComparison.OrdinalIgnoreCase) ||
                             string.Equals(c.Title, id, StringComparison.OrdinalIgnoreCase))
                             ?? throw DebugApiException.NotFound($"Film search item '{id}' not found.");
                     }

@@ -107,10 +107,10 @@ export async function syncCatManagement(session, { provider, credentials }, { si
     signal?.throwIfAborted();
     const body = account ? { [field]: clear ? '' : credentials.username, password: clear ? '' : credentials.password }
       : { [field]: clear ? '' : credentials[source[0]] };
-    // Empty fields are an actual clear request. The SDK requires a durable
-    // write receipt before reporting either save or clear as successful.
+    // Empty fields are an actual clear request; match CatPawRunner HTTP management receipt semantics
+    // without blocking on synchronous fs flushes (scripts may short-circuit identical values or debounce writes).
     const response = await session.management(path, body, 'PUT', {
-      requireWrite: true, origin: descriptor[managementOrigin],
+      origin: descriptor[managementOrigin], ...(signal ? { signal } : {}),
     });
     if (!successfulManagement(response) || response.sms || response.status === 'waiting' || response.skipped)
       throw fault('STORAGE_ERROR');

@@ -238,6 +238,52 @@ public extension FilmPlaybackModel {
                 throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_source")
             }
             browseSource(chosen.id)
+        case "select_line":
+            let lines = snapshot?.lineOptions ?? []
+            let chosen: FilmSelectionOption
+            if let idx = params["index"]?.intValue {
+                guard lines.indices.contains(idx) else {
+                    throw DebugAPIError.invalidArgument("Film line index \(idx) out of range (0..<\(lines.count))")
+                }
+                chosen = lines[idx]
+            } else if let id = params["id"]?.stringValue {
+                guard let found = lines.first(where: { $0.id == id || $0.label == id || $0.displayTitle == id }) else {
+                    throw DebugAPIError.notFound("Film line not found: \(id)")
+                }
+                chosen = found
+            } else {
+                throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_line")
+            }
+            browseLine(chosen.id)
+        case "select_season":
+            let seasons = snapshot?.directorySeasons ?? []
+            let chosenSeason: Int
+            if let season = params["season"]?.intValue, season > 0 {
+                chosenSeason = season
+            } else if let idx = params["index"]?.intValue {
+                guard seasons.indices.contains(idx), let s = seasons[idx].season else {
+                    throw DebugAPIError.invalidArgument("Season index \(idx) out of range (0..<\(seasons.count))")
+                }
+                chosenSeason = s
+            } else if let id = params["id"]?.stringValue {
+                guard let found = seasons.first(where: { $0.id == id || $0.label == id }), let s = found.season else {
+                    throw DebugAPIError.notFound("Season not found: \(id)")
+                }
+                chosenSeason = s
+            } else {
+                throw DebugAPIError.invalidArgument("Provide 'season', 'index', or 'id' for select_season")
+            }
+            browseSeason(chosenSeason)
+        case "episodes_more":
+            guard snapshot?.directoryCanLoadMore == true else {
+                throw DebugAPIError.invalidState("Current directory cannot load more episodes")
+            }
+            await loadMoreEpisodes()?.value
+        case "search_more":
+            guard snapshot?.sourceCanLoadMore == true else {
+                throw DebugAPIError.invalidState("Current session cannot search more sources")
+            }
+            await loadMoreSources()?.value
         case "select_video_track", "select_audio_track", "select_subtitle_track":
             guard canControlPlayback else {
                 throw DebugAPIError.invalidState("No active film playback for track selection")
@@ -549,6 +595,14 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
                 actions: ["play", "select"]
             )
         }
+        let seasons = (snap?.directorySeasons ?? []).map { s -> DebugJSONValue in
+            .object([
+                "id": .string(s.id),
+                "season": .optional(s.season),
+                "label": .string(s.label),
+                "selected": .bool(s.season != nil && s.season == snap?.directorySelectedSeason)
+            ])
+        }
         let metrics = DebugUIMetrics.shared.snapshot()
         let detailJSON: DebugJSONValue = .object([
             "id": .string(originalDetail.item.id),
@@ -558,8 +612,12 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
             "noSources": .bool(snap?.noSources == true),
             "sourceSelectedId": .optional(snap?.sourceSelectedID),
             "sourceCanLoadMore": .bool(snap?.sourceCanLoadMore ?? false),
+            "canSearchMore": .bool(snap?.sourceCanLoadMore ?? false),
             "directoryMode": .optional(snap?.directoryMode),
+            "selectedSeason": .optional(snap?.directorySelectedSeason),
+            "seasons": .array(seasons),
             "directoryCanLoadMore": .bool(snap?.directoryCanLoadMore ?? false),
+            "canLoadMoreEpisodes": .bool(snap?.directoryCanLoadMore ?? false),
             "sources": .array(sources),
             "episodesCount": .int(snap?.directoryItems.count ?? 0),
             "episodeListVisible": .bool(episodeListVisible),
@@ -722,21 +780,43 @@ extension FilmSearchResultsContent: DebugPageInspectable, DebugPageActionable {
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
         let rows = lastInputCards.prefix(maxItems).enumerated().compactMap { idx, selection -> DebugContentRow? in
             guard let card = projection[Data(selection.id.utf8)] else { return nil }
+            var meta: [String: DebugJSONValue] = [
+                "targetId": .string(card.selection.entry.targetId),
+                "sourceKind": .string(card.selection.sourceKind)
+            ]
+            if !card.selection.textBadge.isEmpty { meta["badge"] = .string(card.selection.textBadge) }
+            if !card.selection.label.isEmpty { meta["siteLabel"] = .string(card.selection.label) }
             return DebugContentRow(
                 index: idx,
                 id: card.selection.id,
                 title: card.item.title,
                 subtitle: card.label.isEmpty ? nil : card.label,
-                actions: ["open"]
+                actions: ["open"],
+                meta: meta
             )
+        }
+        let filters = [
+            DebugFilterItem(group: "filter", index: 0, id: "aggregate", title: "聚合列表", selected: !debugRawListMode),
+            DebugFilterItem(group: "filter", index: 1, id: "raw", title: "原始列表", selected: debugRawListMode)
+        ]
+        let metadataStatus: String
+        switch session?.snapshot.metadataState {
+        case .loading: metadataStatus = "TMDB 搜索中"
+        case .failed: metadataStatus = "TMDB 请求失败"
+        default: metadataStatus = ""
         }
         return DebugContentSnapshot(
             target: "search",
             kind: "search",
             loading: session?.snapshot.loading == true,
             error: session?.error?.code,
+            filters: filters,
             rows: rows,
-            hasMore: session?.snapshot.hasMore == true
+            hasMore: session?.snapshot.hasMore == true,
+            extra: [
+                "rawListMode": .bool(debugRawListMode),
+                "metadataStatus": .string(metadataStatus)
+            ]
         )
     }
 
@@ -744,13 +824,35 @@ extension FilmSearchResultsContent: DebugPageInspectable, DebugPageActionable {
         switch request.action {
         case "list.item.invoke":
             guard let session else { throw DebugAPIError.invalidState("No active film search session") }
+            if let id = request.params["id"]?.stringValue {
+                guard let selection = lastInputCards.first(where: {
+                    $0.id == id || $0.entry.targetId == id
+                }) else {
+                    throw DebugAPIError.notFound("Film search card not found: \(id)")
+                }
+                onSelect?(session.context(for: selection))
+                return .object(["openedFilmId": .string(selection.id), "targetId": .string(selection.entry.targetId)])
+            }
             let idx = request.params["index"]?.intValue ?? 0
             guard lastInputCards.indices.contains(idx) else {
                 throw DebugAPIError.invalidArgument("Film search index \(idx) out of range")
             }
             let selection = lastInputCards[idx]
             onSelect?(session.context(for: selection))
-            return .object(["openedFilmId": .string(selection.id)])
+            return .object(["openedFilmId": .string(selection.id), "targetId": .string(selection.entry.targetId)])
+        case "tab.select":
+            let group = request.params["group"]?.stringValue ?? "filter"
+            guard group == "filter" else {
+                throw DebugAPIError.invalidArgument("Unsupported tab group '\(group)' on FilmSearchResultsContent")
+            }
+            let id = request.params["id"]?.stringValue?.lowercased()
+            let idx = request.params["index"]?.intValue
+            let rawMode: Bool
+            if id == "raw" || idx == 1 { rawMode = true }
+            else if id == "aggregate" || idx == 0 { rawMode = false }
+            else { throw DebugAPIError.invalidArgument("Expected filter id 'aggregate'|'raw' or index 0|1") }
+            debugSetRawListMode(rawMode)
+            return .object(["group": .string("filter"), "rawListMode": .bool(rawMode)])
         case "list.load_more":
             session?.loadMore()
             return .object(["triggered": .bool(true)])

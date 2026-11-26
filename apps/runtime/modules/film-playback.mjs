@@ -220,6 +220,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, nativeSettings, de
       else if (block === 'cat.sources') await observeProviderChange('cat');
     },
     observesMutation,
+    providerStateChanged: moduleId => observeProviderChange(moduleId),
     accountSaved: ({ installationId, generation, provider }) =>
       invalidate({ kind: 'script-account', installationId, generation, provider }),
     methods: Object.fromEntries(Object.entries(operations).map(([operation, handler]) =>

@@ -211,8 +211,23 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         return true;
     }
 
-    internal Task RefreshDebugSourcesAsync(CancellationToken cancellationToken) =>
-        sources.InitializeAsync(cancellationToken);
+    internal PanAccounts DebugPanAccounts => panAccounts;
+
+    internal void SyncDebugSources()
+    {
+        sourcesLoaded = true;
+        if (Active) SynchronizeSources();
+    }
+
+    internal void SyncDebugMetadata(FilmMetadataSettings value)
+    {
+        if (Active && metadataLoaded) ReplaceMetadata(value);
+    }
+
+    internal void SyncDebugDouban(FilmDoubanSettings value)
+    {
+        if (Active && metadataLoaded) ReplaceDouban(value);
+    }
 
     internal async Task<object> DebugPanAccountLoginAsync(string? platform, bool close, string? mode, CancellationToken cancellationToken)
     {
@@ -260,6 +275,19 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         rulesFailed = RulesFailed,
         sourcesBusy = SourcesBusy,
         sourcesFailed = SourcesFailed,
+        catsCount = sources.Cats.Count,
+        videosCount = sources.Videos.Count,
+        cats = sources.Cats.Select(c => new
+        {
+            installationId = c.InstallationId,
+            name = c.Name,
+            sourceType = c.SourceType,
+            enabled = c.Enabled,
+            state = c.State,
+            generation = c.Generation,
+            error = c.Error,
+            sitesCount = c.Sites.Count
+        }).ToArray(),
         hasMetadataSettings = HasMetadataSettings,
         metadataLoaded = MetadataLoaded,
         panLoginOpen = panAccounts.LoginOpen,

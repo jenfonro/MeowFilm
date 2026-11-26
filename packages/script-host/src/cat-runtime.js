@@ -113,6 +113,7 @@ export class CatRuntime {
     this.failures = new Map();
     this.accountSync = new WeakMap(); this.accountTasks = new Set();
     this.accountSavedListeners = new Set();
+    this.stateChangedListeners = new Set();
   }
   serverClosure(server, timeoutMs = 3000) {
     let state = this.serverClosures.get(server);
@@ -281,6 +282,7 @@ export class CatRuntime {
         this.sessions.delete(session.installationId);
         this.snapshots.delete(session.installationId);
         this.sweepProxies();
+        this.notifyStateChanged();
       },
     });
     this.candidates.set(input.installationId, candidate);
@@ -308,6 +310,7 @@ export class CatRuntime {
     this.candidates.delete(installationId);
     this.sweepProxies();
     this.scheduleAccountSync(candidate);
+    this.notifyStateChanged();
   }
   connectAccounts(accounts) {
     requireValue(!this.accounts && typeof accounts?.read === 'function' &&
@@ -322,6 +325,16 @@ export class CatRuntime {
     this.accountSavedListeners.add(listener);
     return () => this.accountSavedListeners.delete(listener);
   }
+  onStateChanged(listener) {
+    this.stateChangedListeners.add(listener);
+    return () => this.stateChangedListeners.delete(listener);
+  }
+  notifyStateChanged() {
+    if (this.closed) return;
+    for (const listener of this.stateChangedListeners) {
+      try { listener(); } catch { /* Observation cannot change runtime state. */ }
+    }
+  }
   scheduleAccountSync(session, providers = this.accounts?.providers) {
     if (!this.accounts || !providers || this.closed) return;
     for (const provider of providers)
@@ -333,7 +346,7 @@ export class CatRuntime {
     provider = provider === '189' ? 'tianyi' : provider === '139' ? 'yidong' : provider;
     let state = this.accountSync.get(session);
     if (!state) {
-      state = { tail: Promise.resolve(), records: new Map() };
+      state = { tail: Promise.resolve(), records: new Map(), savedRevisions: new Map() };
       this.accountSync.set(session, state);
     }
     const record = { provider, status: 'pending' };
@@ -373,32 +386,80 @@ export class CatRuntime {
         // time. Caller credentials cannot become a second account fact.
         current = account.credentials;
         if (account.revision === 0) {
+          state.savedRevisions.delete(provider);
           if (automatic && state.records.get(provider) === record) state.records.delete(provider);
           else record.status = 'unsupported';
           return { status: 'unsupported' };
         }
       }
       let value;
+      this.debug?.emit({
+        level: 'debug',
+        cat: 'runtime-node',
+        sub: 'cat.accountSync',
+        event: 'account.sync.start',
+        data: {
+          installationId: session.installationId,
+          generation: session.generation,
+          provider,
+          automatic,
+          revision: record.revision ?? null,
+          rowRevision: record.rowRevision ?? null,
+        },
+      });
       try {
         started = true;
         value = await session.request('management.sync', { input: {
           provider, credentials: current,
         } }, { signal: scope.signal, phase: 'invocation', awaitCancelled: true });
       } catch (error) {
-        // A timed-out transport does not prove that its guest PUT handler has
-        // stopped. End that execution and its volume ownership before a later
-        // queued save can run; ordinary failed receipts remain usable.
-        if (['TIMEOUT', 'NETWORK_ERROR', 'SERVICE_CLOSED', 'SERVICE_ERROR'].includes(error?.code)) {
-          this.failures.set(session.installationId, safeError(error).code);
+        const code = safeError(error).code;
+        this.debug?.emit({
+          level: 'warn',
+          cat: 'runtime-node',
+          sub: 'cat.accountSync',
+          event: 'account.sync.error',
+          data: {
+            installationId: session.installationId,
+            generation: session.generation,
+            provider,
+            automatic,
+            code,
+          },
+          error,
+        });
+        if (!session.live) {
+          this.failures.set(session.installationId, code);
           try { await this.stopWorker(session); }
           finally { this.settled.add(session.installationId); }
         }
         throw error;
       }
       assertCurrent();
-      if (value.status === 'saved') this.publishAccountSaved(session, state, record);
+      if (value.status === 'saved') {
+        const previousRevision = state.savedRevisions.get(provider);
+        if (record.revision !== undefined) state.savedRevisions.set(provider, record.revision);
+        if (!this.accounts || previousRevision !== record.revision) {
+          this.publishAccountSaved(session, state, record);
+        }
+      }
       record.status = value.status === 'saved' ? 'saved' : 'unsupported';
       delete record.errorCode;
+      this.debug?.emit({
+        level: 'info',
+        cat: 'runtime-node',
+        sub: 'cat.accountSync',
+        event: 'account.sync.end',
+        data: {
+          installationId: session.installationId,
+          generation: session.generation,
+          provider,
+          automatic,
+          status: record.status,
+          protocol: value.protocol ?? null,
+          revision: record.revision ?? null,
+        },
+      });
       return value;
     }).catch(error => {
       failed(error);
@@ -1384,7 +1445,7 @@ export class CatRuntime {
       this.proxies.clear();
       this.applied.clear(); this.failures.clear();
       this.settled.clear();
-      this.accountSavedListeners.clear(); this.accounts = null;
+      this.accountSavedListeners.clear(); this.stateChangedListeners.clear(); this.accounts = null;
       this.transactions.clear(); this.pending.clear();
       this.initialization = null;
       try { await this.settings?.close(); } catch (error) { failure ??= error; }

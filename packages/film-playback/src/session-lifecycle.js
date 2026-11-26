@@ -285,11 +285,16 @@ export function createSessionLifecycle(ctx) {
               season: rawSeason,
               preferredSmartResultId: clickedResult.id,
             });
-            // Sync episode to first available episode in that season if episode 1 isn't in that season
+            // Sync playIntent season & episode to actual selected season and available episodes
             const { seasonEpisodes } = ctx.browsing.smartListSeasons(session);
-            const eps = [...(seasonEpisodes.get(session.browsing.season)?.keys() ?? [])].sort((a, b) => a - b);
-            if (eps.length && !eps.includes(session.playIntent.episode)) {
-              session.playIntent = { ...session.playIntent, season: session.browsing.season, episode: eps[0] };
+            const activeSeason = session.browsing.season ?? rawSeason;
+            const eps = [...(seasonEpisodes.get(activeSeason)?.keys() ?? [])].sort((a, b) => a - b);
+            if (session.playIntent.season !== activeSeason || (eps.length && !eps.includes(session.playIntent.episode))) {
+              session.playIntent = {
+                ...session.playIntent,
+                season: activeSeason,
+                episode: eps.length && !eps.includes(session.playIntent.episode) ? eps[0] : session.playIntent.episode,
+              };
             }
           } else {
             await ctx.browsing.selectSource(session, clickedResult.id);
@@ -303,9 +308,14 @@ export function createSessionLifecycle(ctx) {
         } else if (ctx.browsing.hasSmartList(session)) {
           await ctx.browsing.selectSource(session, 'smart', { season: session.browsing.season ?? undefined });
           const { seasonEpisodes } = ctx.browsing.smartListSeasons(session);
-          const eps = [...(seasonEpisodes.get(session.browsing.season)?.keys() ?? [])].sort((a, b) => a - b);
-          if (eps.length && !eps.includes(session.playIntent.episode)) {
-            session.playIntent = { ...session.playIntent, season: session.browsing.season, episode: eps[0] };
+          const activeSeason = session.browsing.season ?? 1;
+          const eps = [...(seasonEpisodes.get(activeSeason)?.keys() ?? [])].sort((a, b) => a - b);
+          if (session.playIntent.season !== activeSeason || (eps.length && !eps.includes(session.playIntent.episode))) {
+            session.playIntent = {
+              ...session.playIntent,
+              season: activeSeason,
+              episode: eps.length && !eps.includes(session.playIntent.episode) ? eps[0] : session.playIntent.episode,
+            };
           }
         } else if (session.results.length > 0) {
           await ctx.browsing.selectSource(session, session.results[0].id);
@@ -352,16 +362,7 @@ export function createSessionLifecycle(ctx) {
     requireValue(!ctx.isClosed(), 'CLOSED');
     requireValue(object(input) && ['ios', 'windows'].includes(input.platform));
 
-    // Support clean `entry` object (plus minimal fallback if `target` was passed by standalone callers)
-    const rawEntry = object(input.entry) ? input.entry : (object(input.target) ? {
-      title: input.target.title,
-      kind: input.target.kind === 'movie' ? 'movie' : 'tv',
-      year: input.target.year,
-      season: input.target.season,
-      episode: input.target.episode,
-      ...(input.target.metadataProvider === 'tmdb' ? { tmdb: { kind: input.target.kind, id: Number(input.target.metadataId) } } : {}),
-      ...(input.target.metadataProvider === 'douban' ? { douban: { kind: input.target.kind, id: String(input.target.metadataId) } } : {}),
-    } : null);
+    const rawEntry = input.entry;
     requireValue(object(rawEntry) && text(rawEntry.title));
 
     const capturedRules = searchEntry?.ruleSnapshot ?? await rules.snapshot();
@@ -648,6 +649,7 @@ export function createSessionLifecycle(ctx) {
     const freshSources = await sourceRegistry.liveSources({ explicitSources });
     for (const session of sessions.values()) {
       if (session.released) continue;
+      const wasNoSources = session.noSources;
       session.sources = freshSources;
       for (const src of freshSources) {
         if (!session.search.has(src.key)) {
@@ -658,11 +660,20 @@ export function createSessionLifecycle(ctx) {
       if (session.noSources && session.stage !== 'playing') {
         session.stage = 'unavailable';
         session.error = 'NO_VIDEO_SOURCES';
-      } else if (!session.noSources && session.error === 'NO_VIDEO_SOURCES') {
+        ctx.publish(session);
+      } else if (!session.noSources && (wasNoSources || session.error === 'NO_VIDEO_SOURCES')) {
         session.stage = 'idle';
         session.error = null;
+        ctx.publish(session);
+        if (session.attached && !session.restoreOnly && !session.stopped && !session.current && !session.pending) {
+          const autoPrepare = session.platform === 'ios' && ctx.preferences().iosAutoPrepare;
+          if (session.platform === 'windows' || autoPrepare) {
+            void ctx.selection.start(session, { prepareOnly: autoPrepare });
+          }
+        }
+      } else {
+        ctx.publish(session);
       }
-      ctx.publish(session);
     }
   }
 

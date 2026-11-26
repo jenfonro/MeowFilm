@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
@@ -10,6 +11,11 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     private readonly FilmPlaybackSession? session;
     private readonly FilmLibrary? library;
     private readonly FilmPlaybackSettings? preferences;
+    private readonly ObservableCollection<FilmCardItem> recommendations = [];
+    private readonly ObservableCollection<FilmSelection> sources = [];
+    private readonly ObservableCollection<FilmSelection> metadataSources = [];
+    private readonly ObservableCollection<FilmSelection> lines = [];
+    private readonly ObservableCollection<FilmSelection> seasons = [];
     private FilmPlaybackSnapshot? snapshot;
     private FilmWorkSnapshot? workInfo;
     private bool isListLayout, overviewExpanded, favorite, favoriteBusy, searchMoreBusy, episodesMoreBusy;
@@ -106,11 +112,11 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public FilmEpisodeDirectory EpisodeDirectory { get; } = new();
     public IReadOnlyList<FilmEpisodeItem> Episodes => EpisodeDirectory.Episodes;
     public IReadOnlyList<FilmCandidateItem> Candidates => EpisodeDirectory.Candidates;
-    public IReadOnlyList<FilmCardItem> Recommendations { get; private set; } = [];
-    public IReadOnlyList<FilmSelection> Sources { get; private set; } = [];
-    public IReadOnlyList<FilmSelection> MetadataSources { get; private set; } = [];
-    public IReadOnlyList<FilmSelection> Lines { get; private set; } = [];
-    public IReadOnlyList<FilmSelection> Seasons { get; private set; } = [];
+    public IReadOnlyList<FilmCardItem> Recommendations => recommendations;
+    public IReadOnlyList<FilmSelection> Sources => sources;
+    public IReadOnlyList<FilmSelection> MetadataSources => metadataSources;
+    public IReadOnlyList<FilmSelection> Lines => lines;
+    public IReadOnlyList<FilmSelection> Seasons => seasons;
 
     public string? SourceId => snapshot?.SourceSelectedId;
     public string? LineId => snapshot?.LineSelectedId;
@@ -252,8 +258,6 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             string previousTargetId = TargetId;
             var previous = snapshot;
             var previousWork = workInfo;
-            var previousEpisodes = Episodes;
-            var previousCandidates = Candidates;
 
             snapshot = value;
             workInfo = value.Work;
@@ -264,56 +268,43 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
                 ? !oldWork.SameContent(workInfo)
                 : workInfo is not null);
 
-            if (!Sources.SequenceEqual(value.SourceOptions))
-            {
-                Sources = value.SourceOptions;
-                Changed(nameof(Sources));
-            }
+            if (SynchronizeSelections(sources, value.SourceOptions)) Changed(nameof(Sources));
 
             var nextMetadataSources = value.SourceOptions
                 .Where(opt => opt.Kind is "tmdb" or "douban")
                 .ToArray();
-            if (!MetadataSources.SequenceEqual(nextMetadataSources))
-            {
-                MetadataSources = nextMetadataSources;
-                Changed(nameof(MetadataSources));
-            }
+            if (SynchronizeSelections(metadataSources, nextMetadataSources)) Changed(nameof(MetadataSources));
 
-            if (!Lines.SequenceEqual(value.LineOptions))
-            {
-                Lines = value.LineOptions;
-                Changed(nameof(Lines));
-            }
+            if (SynchronizeSelections(lines, value.LineOptions)) Changed(nameof(Lines));
+            if (SynchronizeSelections(seasons, value.DirectorySeasons)) Changed(nameof(Seasons));
 
-            if (!Seasons.SequenceEqual(value.DirectorySeasons))
-            {
-                Seasons = value.DirectorySeasons;
-                Changed(nameof(Seasons));
-            }
-
+            bool directoryChanged = false;
             bool keepExistingWhileRefreshing = value.DirectoryLoading && value.DirectoryRefreshing &&
                 (Episodes.Count > 0 || Candidates.Count > 0) &&
                 value.DirectoryItems.ValueKind == JsonValueKind.Array &&
                 value.DirectoryItems.GetArrayLength() == 0;
             if (!keepExistingWhileRefreshing)
             {
-                EpisodeDirectory.Apply(value.DirectoryMode, value.DirectoryItems, Poster, Overview);
+                directoryChanged = EpisodeDirectory.Apply(value.DirectoryMode, value.DirectoryItems, Poster, Overview);
             }
 
             if (metadataChanged)
             {
                 var related = value.Work.RelatedCards;
-                if (!Recommendations.Select(c => (c.Id, c.Title, c.Poster, c.Score))
+                if (!recommendations.Select(c => (c.Id, c.Title, c.Poster, c.Score))
                     .SequenceEqual(related.Select(c => (c.Id, c.Title, c.Poster, c.Score))))
                 {
-                    Recommendations = related;
+                    SynchronizeCards(recommendations, related);
                     Changed(nameof(Recommendations));
                 }
                 foreach (string property in MetadataProperties) Changed(property);
             }
 
-            if (!ReferenceEquals(previousEpisodes, Episodes)) Changed(nameof(Episodes));
-            if (!ReferenceEquals(previousCandidates, Candidates)) Changed(nameof(Candidates));
+            if (directoryChanged)
+            {
+                Changed(nameof(Episodes));
+                Changed(nameof(Candidates));
+            }
             foreach (string property in SnapshotProperties) Changed(property);
             NotifyPlayback();
         }
@@ -507,6 +498,64 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             favoriteBusy = false;
             Changed(nameof(CanFavorite));
             Changed(nameof(IsFavorite));
+        }
+    }
+
+    private static bool SynchronizeSelections(ObservableCollection<FilmSelection> target, IReadOnlyList<FilmSelection> next)
+    {
+        if (target.SequenceEqual(next)) return false;
+        var keep = next.Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
+        for (int i = target.Count - 1; i >= 0; i--)
+        {
+            if (!keep.Contains(target[i].Id)) target.RemoveAt(i);
+        }
+        for (int index = 0; index < next.Count; index++)
+        {
+            var value = next[index];
+            if (index < target.Count && target[index] == value) continue;
+            int existingIndex = -1;
+            for (int j = index; j < target.Count; j++)
+            {
+                if (string.Equals(target[j].Id, value.Id, StringComparison.Ordinal)) { existingIndex = j; break; }
+            }
+            if (existingIndex >= 0)
+            {
+                if (existingIndex != index) target.Move(existingIndex, index);
+                if (target[index] != value) target[index] = value;
+            }
+            else
+            {
+                target.Insert(index, value);
+            }
+        }
+        return true;
+    }
+
+    private static void SynchronizeCards(ObservableCollection<FilmCardItem> target, IReadOnlyList<FilmCardItem> next)
+    {
+        var keep = next.Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
+        for (int i = target.Count - 1; i >= 0; i--)
+        {
+            if (!keep.Contains(target[i].Id)) target.RemoveAt(i);
+        }
+        for (int index = 0; index < next.Count; index++)
+        {
+            var value = next[index];
+            int existingIndex = -1;
+            for (int j = index; j < target.Count; j++)
+            {
+                if (string.Equals(target[j].Id, value.Id, StringComparison.Ordinal)) { existingIndex = j; break; }
+            }
+            if (existingIndex >= 0)
+            {
+                if (existingIndex != index) target.Move(existingIndex, index);
+                if ((target[index].Title, target[index].Poster, target[index].Score) != (value.Title, value.Poster, value.Score))
+                    target[index] = value;
+            }
+            else
+            {
+                target.Insert(index, value);
+            }
         }
     }
 

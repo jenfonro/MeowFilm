@@ -478,8 +478,8 @@ export function createSessionSelection(ctx) {
       // Stage 3: Smart Search (Lightweight Pre-Sorted Results -> Progressive Site Search)
       // =========================================================================
       session.stage = 'searching'; ctx.publish(session);
-      const targetSeason = session.playIntent.season ?? 0;
-      const targetEpisode = session.playIntent.episode ?? 0;
+      let targetSeason = session.playIntent.season ?? 0;
+      let targetEpisode = session.playIntent.episode ?? 0;
 
       const trySortedResults = async candidatesList => {
         const sorted = ctx.candidates.sortResultsForSmartSearch(session, candidatesList, targetSeason, targetEpisode);
@@ -495,6 +495,22 @@ export function createSessionSelection(ctx) {
       };
 
       if (await trySortedResults(session.results)) return;
+
+      if (session.kind === 'tv' && !ctx.metadata.playbackMetadata(session) && ctx.browsing.hasSmartList(session)) {
+        const { orderedSeasons, seasonEpisodes } = ctx.browsing.smartListSeasons(session);
+        if (orderedSeasons.length > 0 && !orderedSeasons.includes(targetSeason)) {
+          const nextSeason = orderedSeasons[0];
+          const eps = [...(seasonEpisodes.get(nextSeason)?.keys() ?? [])].sort((a, b) => a - b);
+          const nextEpisode = eps.length && !eps.includes(targetEpisode) ? eps[0] : (targetEpisode || 1);
+          session.browsing.season = nextSeason;
+          session.playIntent = { ...session.playIntent, season: nextSeason, episode: nextEpisode };
+          targetSeason = nextSeason;
+          targetEpisode = nextEpisode;
+          ctx.publish(session);
+          if (await tryCandidate(session, generation)) return;
+          if (await trySortedResults(session.results)) return;
+        }
+      }
 
       for (const source of session.sources) {
         if (!ctx.valid(session, generation)) return;

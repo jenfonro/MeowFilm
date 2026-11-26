@@ -338,8 +338,7 @@ internal static class FilmJson
     }
 }
 
-public sealed record FilmSelection(string Id, string Label, string Kind = "", string Subtitle = "",
-    int? Season = null, string? Provider = null, string? State = null, string? Error = null);
+public sealed record FilmSelection(string Id, string Label, string Kind = "", int? Season = null, string? Provider = null);
 
 internal sealed record FilmWorkSnapshot(
     string TargetId,
@@ -523,10 +522,7 @@ internal sealed class FilmPlaybackSnapshot
         SourceOptions = FilmJson.Array(sm, "options").Select(opt => new FilmSelection(
             FilmJson.RequiredText(opt, "id"),
             FilmJson.Text(opt, "label"),
-            Kind: FilmJson.Text(opt, "kind"),
-            Subtitle: FilmJson.Text(opt, "subtitle"),
-            State: FilmJson.Text(opt, "state"),
-            Error: FilmJson.Text(opt, "error") is { Length: > 0 } oe ? oe : null)).ToArray();
+            Kind: FilmJson.Text(opt, "kind"))).ToArray();
 
         var lm = FilmJson.Member(Raw, "lineMenu");
         LineVisible = FilmJson.Bool(lm, "visible");

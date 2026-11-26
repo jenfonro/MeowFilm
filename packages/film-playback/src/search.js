@@ -441,7 +441,7 @@ export function createFilmSearchService({ data, rules, catalog, sourceRegistry, 
     if (!object(reference) || !text(reference.sessionId)) return null;
     const session = sessions.get(reference.sessionId);
     if (!session || session.released) return null;
-    const cardId = text(reference.cardId ?? reference.selectionId);
+    const cardId = text(reference.cardId);
     if (!cardId) return null;
     const selected = session.selections.get(cardId) ?? session.selections.get(displayIdentity(cardId));
     if (!selected) return null;

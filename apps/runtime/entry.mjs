@@ -38,7 +38,9 @@ function connectMusicPlatform(modules, options) {
 /** Assembly connects invalidation explicitly; provider modules do not import film business. */
 function connectFilmPlayback(modules, options) {
   const film = createFilmPlaybackModule({ ...options, modules });
-  modules.find(module => module.id === 'cat')?.onAccountSaved?.(input => film.accountSaved(input));
+  const cat = modules.find(module => module.id === 'cat');
+  cat?.onAccountSaved?.(input => film.accountSaved(input));
+  cat?.onStateChanged?.(() => { void film.providerStateChanged('cat').catch(() => {}); });
   for (const module of modules) {
     const prefix = { cat: 'cat.script.', source: 'source.runtime.', pan: 'pan.',
       tmdb: 'tmdb.data.', douban: 'douban.data.' }[module.id];

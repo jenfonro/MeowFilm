@@ -325,7 +325,8 @@ function businessCode(payload) {
     typeof payload.code === 'string' && /^-?[0-9]+$/.test(payload.code.trim()) ? Number(payload.code) : 0;
 }
 function requiresInteraction(payload) {
-  const message = [payload.msg, payload.localized_message, payload.error].filter(value => typeof value === 'string').join(' ');
+  const message = [payload.msg, payload.localized_message, payload.error, payload.error_info]
+    .filter(value => typeof value === 'string').join(' ');
   const code = businessCode(payload);
   return code === 103 || code === 401 ||
     /(?:need[_ ]login|login[_ ]required|captcha|verify[_ ]required|verification[_ ]required|需要登录|请先登录|验证码|安全验证)/i.test(message);
@@ -333,7 +334,9 @@ function requiresInteraction(payload) {
 function businessError(payload) {
   requireValue(!requiresInteraction(payload), 'WEB_INTERACTION_REQUIRED');
   const msg = typeof payload.msg === 'string' ? payload.msg.trim() : '';
-  requireValue(!businessCode(payload) && !payload.error && !/^(?:permission_denied|forbidden|rate_limit(?:ed)?|invalid_request)$/i.test(msg),
+  const errorInfo = typeof payload.error_info === 'string' ? payload.error_info.trim() : '';
+  requireValue(!businessCode(payload) && !payload.error && !errorInfo &&
+    !/^(?:permission_denied|forbidden|rate_limit(?:ed)?|invalid_request)$/i.test(msg),
     'UPSTREAM_HTTP');
 }
 

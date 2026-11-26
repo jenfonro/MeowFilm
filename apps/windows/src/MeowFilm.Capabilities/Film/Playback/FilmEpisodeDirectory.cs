@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Text.Json;
 
@@ -6,6 +7,8 @@ namespace MeowFilm.Capabilities;
 /// <summary>Presentation projection of the runtime-normalized directory snapshot.</summary>
 public sealed class FilmEpisodeDirectory : INotifyPropertyChanged
 {
+    private readonly ObservableCollection<FilmEpisodeItem> episodes = [];
+    private readonly ObservableCollection<FilmCandidateItem> candidates = [];
     private string mode = "";
     private JsonElement rows;
     private string currentPoster = "";
@@ -13,27 +16,28 @@ public sealed class FilmEpisodeDirectory : INotifyPropertyChanged
     private FilmEpisodeItem? selectedEpisode;
     private FilmCandidateItem? selectedCandidate;
 
-    public IReadOnlyList<FilmEpisodeItem> Episodes { get; private set; } = [];
-    public IReadOnlyList<FilmCandidateItem> Candidates { get; private set; } = [];
+    public IReadOnlyList<FilmEpisodeItem> Episodes => episodes;
+    public IReadOnlyList<FilmCandidateItem> Candidates => candidates;
     public double HorizontalOffset { get; set; }
     internal double VerticalOffset { get; set; }
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    internal void Apply(string nextMode, JsonElement nextRows, string poster, string overview)
+    internal bool Apply(string nextMode, JsonElement nextRows, string poster, string overview)
     {
         bool sameInputs = mode == nextMode && currentPoster == poster &&
             currentOverview == overview && FilmJson.Equal(rows, nextRows);
-        if (sameInputs) return;
+        if (sameInputs) return false;
 
         mode = nextMode;
         currentPoster = poster;
         currentOverview = overview;
         rows = FilmJson.Copy(nextRows);
+        bool structureChanged = false;
 
         if (nextMode == "movies")
         {
             var duplicates = new Dictionary<string, int>(StringComparer.Ordinal);
-            var previousChoices = Candidates.ToDictionary(item => item.Id, StringComparer.Ordinal);
+            var previousChoices = candidates.ToDictionary(item => item.Id, StringComparer.Ordinal);
             var nextChoices = FilmJson.Array(rows).Select(row =>
             {
                 var candidate = FilmCandidateItem.Read(row, poster, overview);
@@ -47,24 +51,25 @@ public sealed class FilmEpisodeDirectory : INotifyPropertyChanged
             }).ToArray();
 
             selectedCandidate = nextChoices.FirstOrDefault(c => c.IsSelected);
-            if (!Candidates.SequenceEqual(nextChoices, ReferenceEqualityComparer.Instance))
+            if (Synchronize(candidates, nextChoices, item => item.Id))
             {
-                Candidates = nextChoices;
+                structureChanged = true;
                 PropertyChanged?.Invoke(this, new(nameof(Candidates)));
             }
-            if (Episodes.Count > 0)
+            if (episodes.Count > 0)
             {
                 selectedEpisode?.Select(false);
                 selectedEpisode = null;
-                Episodes = [];
+                ClearItems(episodes);
+                structureChanged = true;
                 PropertyChanged?.Invoke(this, new(nameof(Episodes)));
             }
-            return;
+            return structureChanged;
         }
 
         if (nextMode is "episodes" or "files")
         {
-            var previous = Episodes.ToDictionary(item => item.Identity, StringComparer.Ordinal);
+            var previous = episodes.ToDictionary(item => item.Identity, StringComparer.Ordinal);
             var next = FilmJson.Array(rows).Select(row =>
             {
                 string identity = FilmJson.RequiredText(row, "id");
@@ -74,35 +79,76 @@ public sealed class FilmEpisodeDirectory : INotifyPropertyChanged
             }).ToArray();
 
             selectedEpisode = next.FirstOrDefault(e => e.IsSelected);
-            if (!Episodes.SequenceEqual(next, ReferenceEqualityComparer.Instance))
+            if (Synchronize(episodes, next, item => item.Identity))
             {
-                Episodes = next;
+                structureChanged = true;
                 PropertyChanged?.Invoke(this, new(nameof(Episodes)));
             }
-            if (Candidates.Count > 0)
+            if (candidates.Count > 0)
             {
                 selectedCandidate?.Select(false);
                 selectedCandidate = null;
-                Candidates = [];
+                ClearItems(candidates);
+                structureChanged = true;
                 PropertyChanged?.Invoke(this, new(nameof(Candidates)));
             }
-            return;
+            return structureChanged;
         }
 
-        if (Episodes.Count > 0)
+        if (episodes.Count > 0)
         {
             selectedEpisode?.Select(false);
             selectedEpisode = null;
-            Episodes = [];
+            ClearItems(episodes);
+            structureChanged = true;
             PropertyChanged?.Invoke(this, new(nameof(Episodes)));
         }
-        if (Candidates.Count > 0)
+        if (candidates.Count > 0)
         {
             selectedCandidate?.Select(false);
             selectedCandidate = null;
-            Candidates = [];
+            ClearItems(candidates);
+            structureChanged = true;
             PropertyChanged?.Invoke(this, new(nameof(Candidates)));
         }
+        return structureChanged;
+    }
+
+    private static void ClearItems<T>(ObservableCollection<T> target)
+    {
+        for (int i = target.Count - 1; i >= 0; i--) target.RemoveAt(i);
+    }
+
+    private static bool Synchronize<T>(ObservableCollection<T> target, IReadOnlyList<T> next, Func<T, string> keyOf)
+        where T : class
+    {
+        if (target.SequenceEqual(next, ReferenceEqualityComparer.Instance)) return false;
+        var keep = next.Select(keyOf).ToHashSet(StringComparer.Ordinal);
+        for (int i = target.Count - 1; i >= 0; i--)
+        {
+            if (!keep.Contains(keyOf(target[i]))) target.RemoveAt(i);
+        }
+        for (int index = 0; index < next.Count; index++)
+        {
+            var item = next[index];
+            if (index < target.Count && ReferenceEquals(target[index], item)) continue;
+            string key = keyOf(item);
+            int existingIndex = -1;
+            for (int j = index; j < target.Count; j++)
+            {
+                if (string.Equals(keyOf(target[j]), key, StringComparison.Ordinal)) { existingIndex = j; break; }
+            }
+            if (existingIndex >= 0)
+            {
+                if (!ReferenceEquals(target[existingIndex], item)) target[existingIndex] = item;
+                if (existingIndex != index) target.Move(existingIndex, index);
+            }
+            else
+            {
+                target.Insert(index, item);
+            }
+        }
+        return true;
     }
 }
 

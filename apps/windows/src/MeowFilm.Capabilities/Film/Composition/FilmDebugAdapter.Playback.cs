@@ -23,7 +23,14 @@ internal sealed partial class FilmDebugAdapter
             hasMore = false,
             detail = playback is null ? null : new
             {
+                targetId = playback.TargetId,
                 title = playback.Title,
+                selectedSeason = playback.Season,
+                directoryLoading = playback.ListLoading,
+                canLoadMoreEpisodes = playback.CanLoadMoreEpisodes,
+                canSearchMore = playback.CanSearchMore,
+                metadataSources = playback.MetadataSources.Select((m, i) => new { index = i, id = m.Id, label = m.Label, kind = m.Kind }).ToArray(),
+                seasons = playback.Seasons.Select((s, i) => new { index = i, id = s.Id, season = s.Season, label = s.Label, selected = playback.Season == s.Season }).ToArray(),
                 sources = playback.Sources.Select((s, i) => new { index = i, id = s.Id, label = s.Label, selected = ReferenceEquals(s, playback.SelectedSource) }).ToArray(),
                 lines = playback.Lines.Select((l, i) => new { index = i, id = l.Id, label = l.Label, selected = ReferenceEquals(l, playback.SelectedLine) }).ToArray(),
                 episodes = playback.Episodes.Take(maxItems).Select((e, i) => new { index = i, id = e.Identity, title = e.Title, number = e.Number, selected = e.IsSelected }).ToArray()
@@ -190,7 +197,8 @@ internal sealed partial class FilmDebugAdapter
                     throw DebugApiException.InvalidState("No active film output or playable film page.");
                 return BuildFilmPlayerSnapshot();
             case "stop":
-                await capability.StopPlaybackAsync();
+                if (filmPlayback.HasSession || filmPlayback.HasOutput)
+                    await capability.StopPlaybackAsync();
                 return BuildFilmPlayerSnapshot();
             case "next":
                 await capability.StepAsync(true);
@@ -456,6 +464,37 @@ internal sealed partial class FilmDebugAdapter
                 var page = capability.Playback ?? throw DebugApiException.InvalidState("No active film playback page.");
                 await page.ToggleFavoriteAsync();
                 return new { favorite = page.IsFavorite, title = page.Title };
+            }
+            case "select_season":
+            {
+                var page = capability.Playback ?? throw DebugApiException.InvalidState("No active film playback page.");
+                FilmSelection seasonSel;
+                if (DebugParams.GetInt(parameters, "season") is { } seasonNum)
+                {
+                    seasonSel = page.Seasons.FirstOrDefault(s => s.Season == seasonNum)
+                        ?? throw DebugApiException.NotFound($"Season {seasonNum} not found.");
+                }
+                else if (DebugParams.GetInt(parameters, "index") is { } idx)
+                {
+                    if (idx < 0 || idx >= page.Seasons.Count)
+                        throw DebugApiException.InvalidArgument($"Season index {idx} out of range.");
+                    seasonSel = page.Seasons[idx];
+                }
+                else throw DebugApiException.InvalidArgument("select_season requires 'season' or 'index'.");
+                await page.BrowseSeasonAsync(seasonSel);
+                return BuildFilmPlayerSnapshot();
+            }
+            case "episodes_more":
+            {
+                var page = capability.Playback ?? throw DebugApiException.InvalidState("No active film playback page.");
+                await page.LoadMoreEpisodesAsync();
+                return BuildFilmPlayerSnapshot();
+            }
+            case "search_more":
+            {
+                var page = capability.Playback ?? throw DebugApiException.InvalidState("No active film playback page.");
+                await page.SearchMoreSourcesAsync();
+                return BuildFilmPlayerSnapshot();
             }
             default:
                 return null;

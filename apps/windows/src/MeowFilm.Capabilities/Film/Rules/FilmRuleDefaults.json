@@ -58,7 +58,7 @@
         "flags": "i"
       },
       {
-        "pattern": "^\\s*(.*(?:[^A-Za-z0-9\\s]|\\s))\\s*0*([1-9]\\d?)\\s*$",
+        "pattern": "^\\s*(.*[\\u4e00-\\u9fffA-Za-z])\\s*0*([1-9])\\s*$",
         "replace": "S$2",
         "flags": "i"
       }
@@ -123,7 +123,7 @@
         "flags": "i"
       },
       {
-        "pattern": "^\\s*(.*(?:[^A-Za-z0-9\\s]|\\s))\\s*0*([1-9]\\d?)\\s*$",
+        "pattern": "^\\s*(.*[\\u4e00-\\u9fffA-Za-z])\\s*0*([1-9])\\s*$",
         "replace": "S$2",
         "flags": "i"
       }

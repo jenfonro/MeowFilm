@@ -266,5 +266,6 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
       return work;
     },
     onAccountSaved: listener => get().onAccountSaved(listener),
+    onStateChanged: listener => get().onStateChanged(listener),
     methods, upload, close };
 }

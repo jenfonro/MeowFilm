@@ -11,11 +11,22 @@ export function createFilmSourceRegistry({ modules, nativeSettings } = {}) {
   function readConfiguredVideoSources() {
     if (!nativeSettings) return null;
     const document = nativeSettings.read('film.video-sources');
-    if (document === null) return [];
+    if (document === null) return null;
     if (!object(document) || document.version !== 1 || !Array.isArray(document.sources)) {
       throw fail('CORRUPT_STORAGE');
     }
     return document.sources;
+  }
+
+  function readConfiguredCatEnabledMap() {
+    if (!nativeSettings) return null;
+    const document = nativeSettings.read('cat.sources');
+    if (!object(document) || !Array.isArray(document.scripts)) return null;
+    const map = new Map();
+    for (const row of document.scripts) {
+      if (object(row) && text(row.installationId)) map.set(row.installationId, row.enabled !== false);
+    }
+    return map;
   }
 
   function readPanMappings() {
@@ -75,6 +86,7 @@ export function createFilmSourceRegistry({ modules, nativeSettings } = {}) {
         const inst = catByInstall.get(row.installationId);
         const site = inst?.sites?.find(item => item?.key === row.siteKey);
         if (!inst || !site) continue;
+        const siteHasSearch = Array.isArray(site.actions) ? site.actions.includes('search') : site.searchable !== false;
         const source = checkSource({
           engine: 'cat',
           installationId: row.installationId,
@@ -82,7 +94,7 @@ export function createFilmSourceRegistry({ modules, nativeSettings } = {}) {
           generation: inst.generation,
           name: text(row.name) || text(site.name) || row.siteKey,
           enabled: row.enabled !== false,
-          searchable: row.searchEnabled !== false,
+          searchable: row.searchEnabled !== false && siteHasSearch,
           smartSkip: row.smartSkip === true,
           aggregateImages: row.aggregateImages === true,
           order: resolved.length,
@@ -94,12 +106,16 @@ export function createFilmSourceRegistry({ modules, nativeSettings } = {}) {
       return resolved;
     }
 
-    // Standalone non-nativeSettings fallback: enumerate ready instances directly.
+    // Uninitialized `film.video-sources` (revision === 0) or standalone non-nativeSettings fallback:
+    // enumerate ready enabled instances directly using default options.
+    const catEnabled = readConfiguredCatEnabledMap();
     const resolved = [];
     for (const inst of catInstances) {
       if (inst?.state !== 'ready' || !Number.isSafeInteger(inst.generation) || inst.generation <= 0) continue;
+      if (catEnabled && catEnabled.get(inst.installationId) === false) continue;
       for (const site of inst.sites ?? []) {
         if (!text(site?.key)) continue;
+        const siteHasSearch = Array.isArray(site.actions) ? site.actions.includes('search') : site.searchable !== false;
         resolved.push(checkSource({
           engine: 'cat',
           installationId: inst.installationId,
@@ -107,7 +123,7 @@ export function createFilmSourceRegistry({ modules, nativeSettings } = {}) {
           generation: inst.generation,
           name: text(site.name) || site.key,
           enabled: true,
-          searchable: site.searchable !== false,
+          searchable: siteHasSearch,
           aggregateImages: false,
           order: resolved.length,
         }));

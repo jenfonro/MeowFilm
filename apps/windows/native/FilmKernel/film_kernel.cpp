@@ -635,7 +635,7 @@ struct Owner {
                     audio_anchor_pending = false;
                 }
                 if (out_audio && !audio_started && !paused.load() && !seeking &&
-                    !audio_buffering_paused && time <= clock_locked() + 0.002) {
+                    state != MFK_BUFFERING && !audio_buffering_paused && time <= clock_locked() + 0.002) {
                     audio_started = true;
                     audio_handed_off = false;
                     should_start_audio = true;
@@ -656,7 +656,7 @@ struct Owner {
                     audio = created;
                     out_audio = created;
                     if (!audio_started && !paused.load() && !seeking &&
-                        !audio_buffering_paused && time <= clock_locked() + 0.002) {
+                        state != MFK_BUFFERING && !audio_buffering_paused && time <= clock_locked() + 0.002) {
                         audio_started = true;
                         audio_handed_off = false;
                         should_start_audio = true;
@@ -1440,7 +1440,7 @@ struct Owner {
                         wall_base = position;
                         wall_time = Clock::now();
                         state = MFK_PLAYING;
-                        if (audio_buffering_paused && audio) {
+                        if ((audio_buffering_paused || audio_started) && audio) {
                             audio_buffering_paused = false;
                             audio_to_resume = audio;
                         }

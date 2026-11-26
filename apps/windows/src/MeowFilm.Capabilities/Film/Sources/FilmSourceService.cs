@@ -243,14 +243,17 @@ public sealed partial class FilmSourceService : IAsyncDisposable
         token => settings.EnableAsync(installationId, enabled, token), cancellationToken);
 
     public Task DeleteCatAsync(string installationId, CancellationToken cancellationToken = default) =>
-        RunAsync(token => InStateAsync(async ct =>
+        RunAsync(async token =>
         {
-            await LoadAsync(ct).ConfigureAwait(false);
-            var configured = await settings.RemoveAsync(installationId, ct)
-                .ConfigureAwait(false);
-            ApplyConfiguration(configured);
-            ConfigurationChanged();
-        }, token), cancellationToken);
+            await InStateAsync(async ct =>
+            {
+                await LoadAsync(ct).ConfigureAwait(false);
+                var configured = await settings.RemoveAsync(installationId, ct)
+                    .ConfigureAwait(false);
+                ApplyConfiguration(configured);
+            }, token).ConfigureAwait(false);
+            await NotifyAndConvergeCatConfigurationAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
 
     public Task DeleteVideoAsync(FilmSourceKey key, CancellationToken cancellationToken = default) =>
         RunAsync(token => InStateAsync(async ct =>
