@@ -617,4 +617,358 @@ public actor FilmSourceService {
         guard let source = String(data: bytes, encoding: .utf8) else { throw FilmSourceError(code: "INVALID_SOURCE") }
         return source
     }
+
+    public func exportSettings() async throws -> (cat: ExportedFilmCatSettings, videoSources: ExportedFilmVideoSources) {
+        try await run {
+            try await self.exportSettingsCore()
+        }
+    }
+
+    public func replaceImportedCatSettings(
+        port: Int?,
+        providers: [String: Bool]?,
+        mappings: [ExportedFilmCatMapping]?,
+        scripts: [ExportedFilmCatScript]?
+    ) async throws {
+        try await run {
+            try await self.managed {
+                try await self.replaceImportedCatSettingsCore(
+                    port: port,
+                    providers: providers,
+                    mappings: mappings,
+                    scripts: scripts
+                )
+            }
+        }
+    }
+
+    public func replaceImportedVideoSources(
+        probes importedProbes: [ExportedFilmProbe]?,
+        videos importedVideos: [FilmVideoSource]?,
+        deleted importedDeleted: [FilmSourceKey]?
+    ) async throws {
+        try await run {
+            try await self.managed {
+                try await self.replaceImportedVideoSourcesCore(
+                    probes: importedProbes,
+                    videos: importedVideos,
+                    deleted: importedDeleted
+                )
+            }
+        }
+    }
+
+    private func exportSettingsCore() async throws -> (cat: ExportedFilmCatSettings, videoSources: ExportedFilmVideoSources) {
+        let catRecord = try await settingsRepository.readCatSources().value ?? .empty
+        let interception = try await settings.readPanInterception()
+        var providersMap: [String: Bool] = [:]
+        for (provider, enabled) in interception {
+            providersMap[provider.rawValue] = enabled
+        }
+        let networkScripts = catRecord.scripts.compactMap { s -> ExportedFilmCatScript? in
+            guard s.sourceType == "network", let url = s.sourceUrl, !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            return ExportedFilmCatScript(
+                installationId: s.installationId,
+                name: s.name,
+                sourceUrl: url,
+                enabled: s.enabled,
+                inputRevision: max(1, s.inputRevision)
+            )
+        }
+        let networkIDs = Set(networkScripts.map(\.installationId))
+        let cat = ExportedFilmCatSettings(
+            port: catRecord.port,
+            providers: providersMap,
+            mappings: catRecord.mappings.map { ExportedFilmCatMapping(provider: $0.provider, aliases: $0.aliases) },
+            scripts: networkScripts
+        )
+
+        let (loaded, _) = try await repository.load()
+        let probes = loaded.cats.filter { networkIDs.contains($0.installationId) }.map { c in
+            ExportedFilmProbe(
+                installationId: c.installationId,
+                importedAt: c.importedAt,
+                updatedAt: c.updatedAt,
+                updateState: c.updateState,
+                updateError: c.updateError,
+                sourceHash: c.sourceHash,
+                inputRevision: max(1, c.inputRevision),
+                sites: c.sites
+            )
+        }
+        let videos = loaded.videos
+            .filter { networkIDs.contains($0.key.installationId) }
+            .sorted { $0.order < $1.order }
+        let deleted = loaded.deleted.filter { networkIDs.contains($0.installationId) }
+        return (cat, ExportedFilmVideoSources(probes: probes, videos: videos, deleted: deleted))
+    }
+
+    private func replaceImportedCatSettingsCore(
+        port: Int?,
+        providers: [String: Bool]?,
+        mappings: [ExportedFilmCatMapping]?,
+        scripts: [ExportedFilmCatScript]?
+    ) async throws {
+        let saved = try await settingsRepository.updateCatSources { current in
+            var next = current ?? .empty
+            if let port, (0...65535).contains(port) {
+                next.port = port
+            }
+            if let providers {
+                next.providers = PanProviderID.allCases.map { id in
+                    FilmCatProviderRecord(provider: id.rawValue, enabled: providers[id.rawValue] ?? true)
+                }
+            }
+            if let mappings {
+                var validMappings: [FilmCatMappingRecord] = []
+                for m in mappings where PanProviderID(rawValue: m.provider) != nil {
+                    var seen = Set<String>()
+                    let aliases = m.aliases
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty && !Self.hasControl($0) && seen.insert($0).inserted }
+                    validMappings.append(FilmCatMappingRecord(provider: m.provider, aliases: aliases))
+                }
+                next.mappings = validMappings
+            }
+            if let scripts {
+                var seenIDs = Set<Data>()
+                var normalized: [FilmCatScriptRecord] = []
+                for item in scripts {
+                    let name = CatSourceSettings.trim(item.name)
+                    let url = CatSourceSettings.trim(item.sourceUrl)
+                    guard (try? CatSourceSettings.validateSource(name: name, type: "network", url: url)) != nil else {
+                        continue
+                    }
+                    let id: String
+                    if Self.isValidCatID(item.installationId), seenIDs.insert(Data(item.installationId.utf8)).inserted {
+                        id = item.installationId
+                    } else {
+                        let fresh = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                        seenIDs.insert(Data(fresh.utf8))
+                        id = fresh
+                    }
+                    let rev = (1...9_007_199_254_740_991).contains(item.inputRevision) ? item.inputRevision : 1
+                    normalized.append(FilmCatScriptRecord(
+                        installationId: id,
+                        name: name,
+                        sourceType: "network",
+                        sourceUrl: url,
+                        localPath: nil,
+                        localHash: nil,
+                        enabled: item.enabled,
+                        inputRevision: rev
+                    ))
+                }
+                next.scripts = normalized
+            }
+            return next
+        }
+        let configured = saved.value.scripts.map(CatSourceConfiguration.init)
+        configurationEpoch = UUID()
+        cancelDetections()
+        applyConfiguration(configured, received: snapshot.cats)
+        observeStartedRuntime()
+    }
+
+    private func replaceImportedVideoSourcesCore(
+        probes importedProbes: [ExportedFilmProbe]?,
+        videos importedVideos: [FilmVideoSource]?,
+        deleted importedDeleted: [FilmSourceKey]?
+    ) async throws {
+        let configured = try await settings.read()
+        let validIDs = Set(configured.map(\.installationId))
+        let (loaded, _) = try await repository.load()
+
+        let deletedSet: Set<FilmSourceKey>
+        if let importedDeleted {
+            deletedSet = Set(importedDeleted.filter {
+                validIDs.contains($0.installationId) && !$0.siteKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                    !Self.hasControl($0.siteKey)
+            })
+        } else {
+            deletedSet = Set(loaded.deleted.filter { validIDs.contains($0.installationId) })
+        }
+
+        let nextCats: [FilmCatSource]
+        if let importedProbes {
+            let configuredByID = Dictionary(uniqueKeysWithValues: configured.map { ($0.installationId, $0) })
+            var probeByID: [String: StoredFilmCat] = [:]
+            for p in importedProbes where validIDs.contains(p.installationId) && probeByID[p.installationId] == nil {
+                guard let input = configuredByID[p.installationId] else { continue }
+                var seenKeys = Set<Data>()
+                let sites = p.sites.filter { s in
+                    !s.key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                        !Self.hasControl(s.key) &&
+                        !s.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                        !s.api.isEmpty &&
+                        seenKeys.insert(Data(s.key.utf8)).inserted
+                }
+                let updateState = ["idle", "updating", "updated", "failed"].contains(p.updateState) ? p.updateState : "idle"
+                let inputRev = (1...9_007_199_254_740_991).contains(p.inputRevision) ? p.inputRevision : 1
+                probeByID[p.installationId] = StoredFilmCat(FilmCatSource(
+                    installationId: p.installationId,
+                    name: input.name,
+                    sourceType: input.sourceType,
+                    sourceUrl: input.sourceUrl,
+                    enabled: input.enabled,
+                    importedAt: p.importedAt,
+                    updatedAt: p.updatedAt,
+                    updateState: updateState,
+                    updateError: p.updateError,
+                    sourceHash: p.sourceHash,
+                    sites: sites,
+                    inputRevision: inputRev
+                ))
+            }
+            nextCats = configured.map { input in
+                if let stored = probeByID[input.installationId] {
+                    return stored.snapshot(input)
+                }
+                return FilmCatSource(
+                    installationId: input.installationId,
+                    name: input.name,
+                    sourceType: input.sourceType,
+                    sourceUrl: input.sourceUrl,
+                    enabled: input.enabled,
+                    state: input.enabled ? "stopped" : "disabled",
+                    inputRevision: input.inputRevision
+                )
+            }
+        } else {
+            nextCats = snapshot.cats
+        }
+
+        let nextVideos: [FilmVideoSource]
+        if let importedVideos {
+            var seenKeys = Set<FilmSourceKey>()
+            var normalized: [FilmVideoSource] = []
+            var hasAggregate = false
+            for (idx, v) in importedVideos.enumerated() {
+                guard validIDs.contains(v.key.installationId),
+                      !deletedSet.contains(v.key),
+                      !v.key.siteKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !Self.hasControl(v.key.siteKey),
+                      !v.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !v.api.isEmpty,
+                      seenKeys.insert(v.key).inserted else {
+                    continue
+                }
+                let agg = v.options.aggregateImages && !hasAggregate
+                if agg { hasAggregate = true }
+                var opts = v.options
+                opts.aggregateImages = agg
+                var seenAct = Set<String>()
+                let actions = v.actions.filter { !$0.isEmpty && seenAct.insert($0).inserted }
+                let methods = v.methods.filter { !$0.key.isEmpty }
+                let order = v.order >= 0 ? v.order : idx
+                normalized.append(FilmVideoSource(
+                    key: v.key,
+                    name: v.name,
+                    api: v.api,
+                    actions: actions,
+                    methods: methods,
+                    options: opts,
+                    order: order,
+                    detection: v.detection
+                ))
+            }
+            nextVideos = normalized.sorted { $0.order < $1.order }
+        } else {
+            nextVideos = snapshot.videos.filter { validIDs.contains($0.key.installationId) && !deletedSet.contains($0.key) }
+        }
+
+        cancelDetections()
+        try await commit(cats: nextCats, videos: nextVideos, deleted: deletedSet)
+        observeStartedRuntime()
+    }
+
+    private static func hasControl(_ value: String) -> Bool {
+        value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
+    }
+
+    private static func isValidCatID(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        func alphanumeric(_ byte: UInt8) -> Bool {
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+        }
+        guard let first = bytes.first, bytes.count <= 128, alphanumeric(first) else { return false }
+        return bytes.allSatisfy { alphanumeric($0) || [45, 46, 95].contains($0) }
+    }
+}
+
+public struct ExportedFilmCatScript: Equatable, Sendable {
+    public let installationId: String
+    public let name: String
+    public let sourceUrl: String
+    public let enabled: Bool
+    public let inputRevision: Int64
+
+    public init(installationId: String, name: String, sourceUrl: String, enabled: Bool, inputRevision: Int64) {
+        self.installationId = installationId
+        self.name = name
+        self.sourceUrl = sourceUrl
+        self.enabled = enabled
+        self.inputRevision = inputRevision
+    }
+}
+
+public struct ExportedFilmCatMapping: Equatable, Sendable {
+    public let provider: String
+    public let aliases: [String]
+
+    public init(provider: String, aliases: [String]) {
+        self.provider = provider
+        self.aliases = aliases
+    }
+}
+
+public struct ExportedFilmCatSettings: Equatable, Sendable {
+    public let port: Int
+    public let providers: [String: Bool]
+    public let mappings: [ExportedFilmCatMapping]
+    public let scripts: [ExportedFilmCatScript]
+
+    public init(port: Int, providers: [String: Bool], mappings: [ExportedFilmCatMapping], scripts: [ExportedFilmCatScript]) {
+        self.port = port
+        self.providers = providers
+        self.mappings = mappings
+        self.scripts = scripts
+    }
+}
+
+public struct ExportedFilmProbe: Equatable, Sendable {
+    public let installationId: String
+    public let importedAt: Int64?
+    public let updatedAt: Int64?
+    public let updateState: String
+    public let updateError: String?
+    public let sourceHash: String?
+    public let inputRevision: Int64
+    public let sites: [FilmSourceSite]
+
+    public init(installationId: String, importedAt: Int64?, updatedAt: Int64?, updateState: String,
+                updateError: String?, sourceHash: String?, inputRevision: Int64, sites: [FilmSourceSite]) {
+        self.installationId = installationId
+        self.importedAt = importedAt
+        self.updatedAt = updatedAt
+        self.updateState = updateState
+        self.updateError = updateError
+        self.sourceHash = sourceHash
+        self.inputRevision = inputRevision
+        self.sites = sites
+    }
+}
+
+public struct ExportedFilmVideoSources: Equatable, Sendable {
+    public let probes: [ExportedFilmProbe]
+    public let videos: [FilmVideoSource]
+    public let deleted: [FilmSourceKey]
+
+    public init(probes: [ExportedFilmProbe], videos: [FilmVideoSource], deleted: [FilmSourceKey]) {
+        self.probes = probes
+        self.videos = videos
+        self.deleted = deleted
+    }
 }

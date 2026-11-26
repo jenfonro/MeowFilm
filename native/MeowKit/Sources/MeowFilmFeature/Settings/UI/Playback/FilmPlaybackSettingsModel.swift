@@ -24,6 +24,12 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
         try await reloadPreferences()
     }
 
+    public func reloadAfterImport() async {
+        guard !preferencesBusy else { return }
+        draft = nil
+        try? await loadPreferences()
+    }
+
     func reloadPreferences() async throws {
         let record = try await settingsRepository.readPreferences().value
         let value = try record.map(FilmPlaybackPreferences.init(record:)) ?? .defaults

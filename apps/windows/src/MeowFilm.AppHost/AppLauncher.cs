@@ -28,7 +28,8 @@ public static class AppLauncher
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
         Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null,
         Func<Task>? stopPlayback = null,
-        DebugLaunchOptions? debugOptions = null)
+        DebugLaunchOptions? debugOptions = null,
+        Func<IStorageDatabase, AppAppearance, AppClosePreferences, AppMediaControlSettings, IReadOnlyList<IDesktopModule>, IDesktopDataManagement>? createDataManagement = null)
     {
         var paths = AppDataPaths.Resolve(debugOptions);
         var startup = new AppStartup();
@@ -203,6 +204,7 @@ public static class AppLauncher
             AppAppearance? appearance = null;
             AppMediaControlSettings? mediaControls = null;
             AppClosePreferences? closePreferences = null;
+            IDesktopDataManagement? dataManagement = null;
             var modules = new List<IDesktopModule>();
             IAsyncDisposable? windowAttachment = null;
             ShellWindow? shell = null;
@@ -229,7 +231,7 @@ public static class AppLauncher
                     new(() => runtime?.DisposeAsync() ?? ValueTask.CompletedTask, InterruptsPendingOperations: true),
                     new(() => cacheStore?.DisposeAsync() ?? ValueTask.CompletedTask),
                     new(() => dataStore?.DisposeAsync() ?? ValueTask.CompletedTask)
-                ], sharedParticipants: new IAsyncDisposable?[] { mediaControls, appearance, closePreferences }
+                ], sharedParticipants: new IAsyncDisposable?[] { dataManagement as IAsyncDisposable, mediaControls, appearance, closePreferences }
                     .OfType<IAsyncDisposable>());
             }
             try
@@ -279,6 +281,7 @@ public static class AppLauncher
                 await mediaControls.LoadAsync();
                 ValidateModuleComposition(modules);
                 await PrepareModulesAsync(modules, cancellationToken);
+                dataManagement = createDataManagement?.Invoke(dataStore, appearance, closePreferences, mediaControls, modules);
                 // The shared runtime starts with the App; starting it executes no script.
                 runtime.Start();
                 var lifecycle = Lifecycle();
@@ -287,7 +290,7 @@ public static class AppLauncher
                 shell = new ShellWindow(modules, createPages?.Invoke(modules) ?? [],
                     () => replacing ? lifecycle.CloseAsync() : exiting ??= CloseProcessAsync(),
                     appearance, closePreferences, mediaControls: mediaControls,
-                    resetUserData: reset.ResetAsync) { Title = AppIdentity.Name };
+                    resetUserData: reset.ResetAsync, dataManagement: dataManagement) { Title = AppIdentity.Name };
                 Volatile.Write(ref activeShell, shell);
                 artwork = new ArtworkService(readTrusted: async (reference, token) =>
                 {

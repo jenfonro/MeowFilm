@@ -467,4 +467,17 @@ public sealed partial class MusicCapability :
         ctx.Lifetime.Dispose();
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
+
+    public MusicNativeApplication Application => ctx.Application;
+
+    public Task<IReadOnlyList<Accounts.MusicOfflineAccountRecord>> ExportOfflineAccountsAsync(CancellationToken token = default) =>
+        ctx.Application.Accounts.ExportOfflineAccountsAsync(token);
+
+    public Task ReplaceOfflineAccountsAsync(
+        IReadOnlyDictionary<string, Accounts.MusicOfflineAccountRecord?> targets,
+        CancellationToken token = default) =>
+        ctx.Application.Accounts.ReplaceOfflineAccountsAsync(targets, token);
+
+    public Task RefreshSettingsAfterImportAsync(CancellationToken token = default) =>
+        Settings.RefreshAfterExternalImportAsync(token);
 }

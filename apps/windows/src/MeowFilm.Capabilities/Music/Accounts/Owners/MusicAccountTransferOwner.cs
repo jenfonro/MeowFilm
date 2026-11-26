@@ -2,6 +2,14 @@
 
 namespace MeowFilm.Capabilities.Accounts;
 
+public sealed record MusicOfflineAccountRecord(
+    string Platform,
+    string UserId,
+    string DisplayName,
+    string? Avatar,
+    string Cookie,
+    IReadOnlyDictionary<string, string> Credentials);
+
 public sealed partial class MusicAccountOwner
 {
     private readonly CancellationTokenSource transferLifetime = new();
@@ -170,4 +178,179 @@ public sealed partial class MusicAccountOwner
         Notify(platform);
         return committed;
     }, token);
+
+    public async Task<IReadOnlyList<MusicOfflineAccountRecord>> ExportOfflineAccountsAsync(CancellationToken token = default)
+    {
+        Enter();
+        try
+        {
+            return await DiskAsync(async () =>
+            {
+                var snapshot = await ReadSnapshot(token).ConfigureAwait(false);
+                var items = new List<MusicOfflineAccountRecord>(AccountRules.Platforms.Length);
+                foreach (string platform in AccountRules.Platforms)
+                {
+                    var account = snapshot.Get(platform);
+                    lock (gate)
+                    {
+                        AccountRules.Require(!closed, "CLOSED");
+                        token.ThrowIfCancellationRequested();
+                        if (states[platform].Revoked || account.Cookie is null || account.Profile is null) continue;
+                    }
+                    var parsed = new Dictionary<string, string>(StringComparer.Ordinal);
+                    try
+                    {
+                        var rawParts = AccountRules.Cookies(account.Cookie);
+                        foreach (string allowed in MusicAccountTransferCredentials.Allowed(platform))
+                            if (rawParts.TryGetValue(allowed, out var val))
+                                parsed[allowed] = val;
+                        if (parsed.Count == 0)
+                            foreach (var (k, v) in rawParts)
+                                parsed[k] = v;
+                    }
+                    catch { /* Preserve raw stored cookie string if non-canonical. */ }
+                    items.Add(new MusicOfflineAccountRecord(
+                        platform,
+                        account.Profile.UserId,
+                        account.Profile.DisplayName,
+                        account.Profile.Avatar,
+                        account.Cookie,
+                        parsed));
+                }
+                return (IReadOnlyList<MusicOfflineAccountRecord>)items;
+            }, token).ConfigureAwait(false);
+        }
+        finally { Leave(); }
+    }
+
+    public Task ReplaceOfflineAccountsAsync(
+        IReadOnlyDictionary<string, MusicOfflineAccountRecord?> targets,
+        CancellationToken cancellationToken = default) =>
+        RunAccountOperationAsync(async token =>
+        {
+            foreach (string platform in AccountRules.Platforms)
+            {
+                if (!targets.TryGetValue(platform, out var target)) continue;
+                if (target is null)
+                {
+                    await Logout(platform, token).ConfigureAwait(false);
+                    continue;
+                }
+                var normalized = TryNormalizeOfflineImport(platform, target);
+                if (normalized is null) continue;
+                await CommitOfflineAsync(platform, normalized.Value.Cookie, normalized.Value.Profile, token).ConfigureAwait(false);
+            }
+            return true;
+        }, cancellationToken);
+
+    private async Task CommitOfflineAsync(string platform, string cookie, MusicAccountProfile profile, CancellationToken token)
+    {
+        using var op = Start(platform, token);
+        try
+        {
+            var before = await Load(platform, op.Token).WaitAsync(op.Token).ConfigureAwait(false);
+            Guard(op);
+            AccountRules.Require(before.Generation < AccountRules.MaxInteger, "LIMIT");
+            var next = new StoredAccount
+            {
+                Generation = before.Generation + 1,
+                Cookie = cookie,
+                Profile = profile,
+                Scope = Guid.NewGuid().ToString("D"),
+                ValidatedAt = clock.GetUtcNow().ToUnixTimeMilliseconds()
+            };
+            await DiskAsync(async () =>
+            {
+                Guard(op);
+                op.Token.ThrowIfCancellationRequested();
+                var snapshot = await ReadSnapshot(op.Token, platform).ConfigureAwait(false);
+                Guard(op);
+                var current = snapshot.Get(platform);
+                AccountRules.Require(current.Generation == before.Generation &&
+                    current.Scope == before.Scope &&
+                    current.Profile?.UserId == before.Profile?.UserId, "STORAGE_CONFLICT");
+                var (saved, _) = await store.ReplaceAsync(platform, before, next, snapshot.Revision, CancellationToken.None).ConfigureAwait(false);
+                return saved;
+            }, op.Token).WaitAsync(op.Token).ConfigureAwait(false);
+
+            lock (gate)
+            {
+                Guard(op);
+                var state = states[platform];
+                state.Revoked = false;
+                state.Current = null;
+                state.Verified = null;
+            }
+            await DeleteDetailsCacheAsync(platform).ConfigureAwait(false);
+            Guard(op);
+            Notify(platform);
+        }
+        finally { Finish(op); }
+    }
+
+    private static (string Cookie, MusicAccountProfile Profile)? TryNormalizeOfflineImport(
+        string platform, MusicOfflineAccountRecord input)
+    {
+        var pairs = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (rawKey, rawVal) in input.Credentials)
+        {
+            string key = (rawKey ?? "").Trim();
+            string val = (rawVal ?? "").Trim();
+            if (IsValidCookiePair(key, val))
+                pairs[key] = val;
+        }
+        if (pairs.Count == 0 && !string.IsNullOrWhiteSpace(input.Cookie))
+        {
+            foreach (string part in input.Cookie.Split(';'))
+            {
+                string trimmed = part.Trim();
+                int eq = trimmed.IndexOf('=');
+                if (eq <= 0) continue;
+                string key = trimmed[..eq].Trim();
+                string val = trimmed[(eq + 1)..].Trim();
+                if (IsValidCookiePair(key, val))
+                    pairs.TryAdd(key, val);
+            }
+        }
+        if (pairs.Count == 0) return null;
+
+        string userId = CleanText(input.UserId, 128);
+        if (platform == "tx")
+        {
+            string cookieUid = pairs.GetValueOrDefault("musicid") ?? pairs.GetValueOrDefault("str_musicid") ?? "";
+            if (userId.Length == 0) userId = cookieUid;
+            if (userId.Length > 0 && cookieUid.Length == 0) pairs["musicid"] = userId;
+        }
+        else if (platform == "kg")
+        {
+            string cookieUid = pairs.GetValueOrDefault("userid") ?? "";
+            if (userId.Length == 0) userId = cookieUid;
+            if (userId.Length > 0 && cookieUid.Length == 0) pairs["userid"] = userId;
+        }
+        if (userId.Length == 0) userId = platform + "-imported";
+
+        string cookie = string.Join("; ", pairs.Select(p => p.Key + "=" + p.Value));
+        try { _ = AccountRules.Cookies(cookie); }
+        catch { return null; }
+
+        string displayName = CleanText(input.DisplayName, 128);
+        string? avatar = CleanText(input.Avatar, 1024);
+        if (string.IsNullOrEmpty(avatar)) avatar = null;
+        return (cookie, new MusicAccountProfile(platform, userId, displayName, avatar));
+    }
+
+    private static bool IsValidCookiePair(string key, string value) =>
+        key.Length is >= 1 and <= 80 &&
+        key.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-') &&
+        key is not ("__proto__" or "prototype" or "constructor") &&
+        key.ToLowerInvariant() is not ("domain" or "path" or "expires" or "max-age" or "secure" or "httponly" or "samesite" or "priority") &&
+        value.Length > 0 &&
+        value.All(c => c is >= '!' and <= '~' && c is not (';' or '"' or '\\') && (c != ',' || key == "_ntes_nnid"));
+
+    private static string CleanText(string? raw, int maxLen)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        var chars = raw.Trim().Where(c => c >= ' ' && c != '\u007f').Take(maxLen).ToArray();
+        return new string(chars);
+    }
 }

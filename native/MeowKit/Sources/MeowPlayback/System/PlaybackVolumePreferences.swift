@@ -25,6 +25,13 @@ import MeowStorage
 
     public func volume(for owner: String) -> Double { values[owner] ?? 1 }
 
+    public func exportedVolumes() -> [String: Double] {
+        [
+            "music": volume(for: "music"),
+            "film": volume(for: "film"),
+        ]
+    }
+
     public func saveVolume(_ volume: Double, for owner: String) {
         guard !closed, !owner.isEmpty, owner.utf8.count <= 128, volume.isFinite, (0...1).contains(volume),
               values[owner] != volume, values[owner] != nil || values.count < 128 else { return }

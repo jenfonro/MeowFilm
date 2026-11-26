@@ -212,6 +212,20 @@ import Combine
         await edit { $0.colorMode = .fixed; $0.colorPalette = palette }
     }
 
+    @discardableResult public func applyImportedPreferences(
+        _ change: @escaping @Sendable (inout MusicAppearancePreferences) -> Void
+    ) async -> Bool {
+        await edit(change)
+    }
+
+    public static func encodePalette(_ palette: PagePalette) -> String {
+        MusicAppearanceRepository.encodePalette(palette)
+    }
+
+    public static func decodePalette(_ text: String) -> PagePalette? {
+        try? MusicAppearanceRepository.decodePalette(text)
+    }
+
     public func previewFixedColor(_ rgb: UInt32) {
         previewPalette = .custom(rgb)
         publishPalette(animated: false)

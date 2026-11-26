@@ -20,13 +20,15 @@ public sealed partial class ShellWindow
     };
     private bool _updatingSettingsTabs;
 
-    private void InitializeGeneralSettings(IDesktopAppearance? appearance, IDesktopClosePreferences? closePreferences)
+    private void InitializeGeneralSettings(IDesktopAppearance? appearance, IDesktopClosePreferences? closePreferences,
+        IDesktopDataManagement? dataManagement = null)
     {
         if (appearance is null) return;
         _generalSettingsHost.Content = new GeneralSettingsView(appearance,
             Sessions.Select(session => session.Module).OfType<IDesktopGeneralSettingsSource>(),
             closePreferences, mediaControls: MediaControls,
-            resetUserData: _resetUserData is null ? null : ConfirmUserDataReset);
+            resetUserData: _resetUserData is null ? null : ConfirmUserDataReset,
+            dataManagement: dataManagement);
         ContentDeck.Children.Add(_generalSettingsHost);
         string? appliedColor = null;
         void Apply(bool refreshAccessibility)

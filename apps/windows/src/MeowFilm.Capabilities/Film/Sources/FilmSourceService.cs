@@ -1,8 +1,56 @@
+using System.Collections.ObjectModel;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
+
+public sealed record ExportedPanAccount(
+    string Provider,
+    string? Cookie,
+    string? Username,
+    string? Password,
+    string? Authorization,
+    long? RefreshedAtMs);
+
+public sealed record ExportedCatScript(
+    string InstallationId,
+    string Name,
+    string SourceUrl,
+    bool Enabled,
+    long InputRevision);
+
+public sealed record ExportedCatMapping(string Provider, IReadOnlyList<string> Aliases);
+
+public sealed record ExportedCatSettings(
+    int Port,
+    IReadOnlyDictionary<string, bool> Providers,
+    IReadOnlyList<ExportedCatMapping> Mappings,
+    IReadOnlyList<ExportedCatScript> Scripts);
+
+public sealed record ExportedFilmProbe(
+    string InstallationId,
+    long? ImportedAt,
+    long? UpdatedAt,
+    string UpdateState,
+    string? UpdateError,
+    string? SourceHash,
+    long InputRevision,
+    IReadOnlyList<FilmSourceSite> Sites);
+
+public sealed record ExportedFilmVideoSources(
+    IReadOnlyList<ExportedFilmProbe> Probes,
+    IReadOnlyList<FilmVideoSource> Videos,
+    IReadOnlyList<FilmSourceKey> Deleted);
+
+public sealed record ExportedFilmPreferences(
+    string[] RuleOrder,
+    string[] PanOrder,
+    string[] Keywords,
+    string[] SiteCleanKeywords,
+    bool IosAutoPrepare,
+    string MetadataViewProvider);
 
 public sealed partial class FilmSourceService : IAsyncDisposable
 {
@@ -469,4 +517,195 @@ public sealed partial class FilmSourceService : IAsyncDisposable
     }
 
     private sealed record Snapshot(IReadOnlyList<FilmCatSource> Cats, IReadOnlyList<FilmVideoSource> Videos);
+
+    public Task<(ExportedCatSettings Cat, ExportedFilmVideoSources VideoSources)> ExportSettingsAsync(
+        CancellationToken cancellationToken = default) =>
+        RunAsync(async token =>
+        {
+            ExportedCatSettings cat = null!;
+            ExportedFilmVideoSources videoSources = null!;
+            await InStateAsync(async ct =>
+            {
+                await LoadAsync(ct).ConfigureAwait(false);
+                var catState = await CatSourceSettingsStore.ReadOrEmptyAsync(database, ct).ConfigureAwait(false);
+                var providers = await settings.ReadPanInterceptionAsync(ct).ConfigureAwait(false);
+                var networkScripts = catState.Scripts
+                    .Where(s => s.SourceType == "network" && !string.IsNullOrWhiteSpace(s.SourceUrl))
+                    .Select(s => new ExportedCatScript(s.InstallationId, s.Name, s.SourceUrl!, s.Enabled, s.InputRevision))
+                    .ToArray();
+                var networkIds = networkScripts.Select(s => s.InstallationId).ToHashSet(StringComparer.Ordinal);
+                cat = new ExportedCatSettings(
+                    catState.Port,
+                    providers,
+                    catState.Mappings.Select(m => new ExportedCatMapping(m.Provider, m.Aliases.ToArray())).ToArray(),
+                    networkScripts);
+
+                var probesList = document.Cats
+                    .Where(c => networkIds.Contains(c.InstallationId))
+                    .Select(c => new ExportedFilmProbe(
+                        c.InstallationId,
+                        c.ImportedAt,
+                        c.UpdatedAt,
+                        c.UpdateState,
+                        c.UpdateError,
+                        c.SourceHash,
+                        c.InputRevision,
+                        c.Sites.ToArray()))
+                    .ToArray();
+                var videos = document.Videos
+                    .Where(v => networkIds.Contains(v.Key.InstallationId))
+                    .OrderBy(v => v.Order)
+                    .ToArray();
+                var deleted = document.Deleted
+                    .Where(k => networkIds.Contains(k.InstallationId))
+                    .ToArray();
+                videoSources = new ExportedFilmVideoSources(probesList, videos, deleted);
+            }, token).ConfigureAwait(false);
+            return (cat, videoSources);
+        }, cancellationToken);
+
+    public Task ReplaceCatSettingsAsync(
+        int? port,
+        IReadOnlyDictionary<string, bool>? providers,
+        IReadOnlyList<ExportedCatMapping>? mappings,
+        IReadOnlyList<ExportedCatScript>? scripts,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(token => InStateAsync(async ct =>
+        {
+            await LoadAsync(ct).ConfigureAwait(false);
+            var saved = await CatSourceSettingsStore.UpdateAsync(database, current =>
+            {
+                int nextPort = port is >= 0 and <= 65535 ? port.Value : current.Port;
+
+                IReadOnlyList<(string Provider, bool Enabled)> nextProviders = current.Providers;
+                if (providers is not null)
+                {
+                    var list = new List<(string Provider, bool Enabled)>();
+                    foreach (var descriptor in PanSettingsStore.Providers)
+                    {
+                        bool enabled = !providers.TryGetValue(descriptor.Provider, out bool flag) || flag;
+                        list.Add((descriptor.Provider, enabled));
+                    }
+                    nextProviders = list;
+                }
+
+                IReadOnlyList<CatProviderMapping> nextMappings = current.Mappings;
+                if (mappings is not null)
+                {
+                    var validMappings = new List<CatProviderMapping>();
+                    foreach (var m in mappings)
+                    {
+                        if (PanSettingsStore.FindProvider(m.Provider) is null) continue;
+                        var aliases = m.Aliases
+                            .Where(a => !string.IsNullOrWhiteSpace(a) && !a.Any(char.IsControl))
+                            .Select(a => a.Trim())
+                            .Distinct(StringComparer.Ordinal)
+                            .ToArray();
+                        validMappings.Add(new CatProviderMapping(m.Provider, aliases));
+                    }
+                    nextMappings = validMappings;
+                }
+
+                IReadOnlyList<CatSourceConfiguration> nextScripts = current.Scripts;
+                if (scripts is not null)
+                {
+                    var seenIds = new HashSet<string>(StringComparer.Ordinal);
+                    var normalizedScripts = new List<CatSourceConfiguration>();
+                    foreach (var item in scripts)
+                    {
+                        string name = (item.Name ?? "").Trim();
+                        string url = (item.SourceUrl ?? "").Trim();
+                        if (name.Length == 0 || name.Any(char.IsControl)) continue;
+                        if (url.Length == 0 || url.Any(char.IsControl) ||
+                            !Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+                            uri.Scheme is not ("http" or "https"))
+                            continue;
+                        string id = !string.IsNullOrWhiteSpace(item.InstallationId) &&
+                                    Regex.IsMatch(item.InstallationId, @"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z") &&
+                                    !seenIds.Contains(item.InstallationId)
+                            ? item.InstallationId
+                            : Guid.NewGuid().ToString("N");
+                        seenIds.Add(id);
+                        long rev = item.InputRevision is >= 1 and <= BridgeCodec.MaximumSafeInteger ? item.InputRevision : 1;
+                        normalizedScripts.Add(new CatSourceConfiguration(id, name, "network", url, null, null, item.Enabled, rev));
+                    }
+                    nextScripts = normalizedScripts;
+                }
+
+                return new CatSettingsState(nextPort, nextProviders, nextMappings, nextScripts);
+            }, ct).ConfigureAwait(false);
+
+            foreach (var key in probes.Keys.ToArray()) InvalidateProbe(key);
+            ApplyConfiguration(saved.Scripts);
+            ConfigurationChanged();
+        }, token), cancellationToken);
+
+    public Task ReplaceVideoSourcesAsync(
+        IReadOnlyList<ExportedFilmProbe>? importedProbes,
+        IReadOnlyList<FilmVideoSource>? importedVideos,
+        IReadOnlyList<FilmSourceKey>? importedDeleted,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(token => InStateAsync(async ct =>
+        {
+            await LoadAsync(ct).ConfigureAwait(false);
+            var configured = await settings.ReadAsync(ct).ConfigureAwait(false);
+            var validIds = configured.Select(c => c.InstallationId).ToHashSet(StringComparer.Ordinal);
+
+            var deletedSet = importedDeleted is not null
+                ? importedDeleted
+                    .Where(k => validIds.Contains(k.InstallationId) && !string.IsNullOrWhiteSpace(k.SiteKey) && !k.SiteKey.Any(char.IsControl))
+                    .ToHashSet()
+                : document.Deleted.Where(k => validIds.Contains(k.InstallationId)).ToHashSet();
+
+            IEnumerable<FilmCatSource> nextCats = Cats;
+            if (importedProbes is not null)
+            {
+                var probeById = new Dictionary<string, StoredFilmCat>(StringComparer.Ordinal);
+                foreach (var p in importedProbes)
+                {
+                    if (!validIds.Contains(p.InstallationId) || probeById.ContainsKey(p.InstallationId)) continue;
+                    var seenSiteKeys = new HashSet<string>(StringComparer.Ordinal);
+                    var sites = p.Sites
+                        .Where(s => !string.IsNullOrWhiteSpace(s.Key) && !s.Key.Any(char.IsControl) &&
+                                    !string.IsNullOrWhiteSpace(s.Name) && s.Api is not null && seenSiteKeys.Add(s.Key))
+                        .Select(FreezeSite)
+                        .ToArray();
+                    string updateState = string.IsNullOrEmpty(p.UpdateState) ? "idle" : p.UpdateState;
+                    long inputRev = p.InputRevision is >= 1 and <= BridgeCodec.MaximumSafeInteger ? p.InputRevision : 1;
+                    probeById[p.InstallationId] = new StoredFilmCat(
+                        p.InstallationId, p.ImportedAt, p.UpdatedAt, updateState, p.UpdateError, p.SourceHash, sites, inputRev);
+                }
+                var configuredById = configured.ToDictionary(c => c.InstallationId, StringComparer.Ordinal);
+                nextCats = ConfiguredCats(configured, probeById.Values.Select(p => p.ToConfigured(configuredById[p.InstallationId])));
+            }
+
+            IEnumerable<FilmVideoSource> nextVideos = Videos.Where(v => validIds.Contains(v.Key.InstallationId) && !deletedSet.Contains(v.Key));
+            if (importedVideos is not null)
+            {
+                var seenKeys = new HashSet<FilmSourceKey>();
+                var normalized = new List<FilmVideoSource>();
+                bool hasAggregate = false;
+                int index = 0;
+                foreach (var v in importedVideos)
+                {
+                    if (!validIds.Contains(v.Key.InstallationId) || deletedSet.Contains(v.Key) ||
+                        string.IsNullOrWhiteSpace(v.Key.SiteKey) || v.Key.SiteKey.Any(char.IsControl) ||
+                        string.IsNullOrWhiteSpace(v.Name) || v.Api is null || !seenKeys.Add(v.Key))
+                        continue;
+                    bool agg = v.Options.AggregateImages && !hasAggregate;
+                    if (agg) hasAggregate = true;
+                    var opts = v.Options with { AggregateImages = agg };
+                    var actions = v.Actions.Where(a => !string.IsNullOrWhiteSpace(a)).Distinct(StringComparer.Ordinal).ToArray();
+                    var methods = new ReadOnlyDictionary<string, string>(
+                        v.Methods.Where(kv => !string.IsNullOrWhiteSpace(kv.Key) && kv.Value is not null)
+                            .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal));
+                    normalized.Add(FreezeVideo(new FilmVideoSource(
+                        v.Key, v.Name, v.Api, actions, methods, opts, v.Order >= 0 ? v.Order : index, v.Detection)));
+                    index++;
+                }
+                nextVideos = Sorted(normalized);
+            }
+
+            await CommitAsync(nextCats, nextVideos, deletedSet, ct).ConfigureAwait(false);
+        }, token), cancellationToken);
 }

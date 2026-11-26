@@ -243,4 +243,90 @@ public struct NovelSourceClient: Sendable {
         try Task.checkCancellation()
         return try result.get()
     }
+    public func exportAllDefinitions() async throws -> [ExportedNovelSourceItem] {
+        let current = try await list()
+        var exported: [ExportedNovelSourceItem] = []
+        for s in current {
+            try Task.checkCancellation()
+            guard let (detail, defText) = try? await definition(s) else { continue }
+            exported.append(ExportedNovelSourceItem(
+                installationId: detail.installationId,
+                name: detail.name,
+                sourceUrl: detail.sourceUrl,
+                group: detail.group,
+                order: detail.order,
+                enabled: detail.enabled,
+                enabledExplore: detail.enabledExplore,
+                protocol: detail.protocol,
+                definition: defText
+            ))
+        }
+        return exported
+    }
+    public func replaceAllDefinitions(_ items: [ExportedNovelSourceItem]) async throws {
+        let existing = try await list()
+        for src in existing {
+            try Task.checkCancellation()
+            try? await remove(src)
+        }
+        var seenUrls = Set<String>()
+        for (idx, item) in items.enumerated() {
+            try Task.checkCancellation()
+            let defTrimmed = item.definition.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !defTrimmed.isEmpty else { continue }
+            if !item.sourceUrl.isEmpty, !seenUrls.insert(item.sourceUrl).inserted {
+                continue
+            }
+            guard let receipt = try? await importSources(text: defTrimmed, fileName: "meowfilm-settings.json"),
+                  let imported = receipt.sources.first else {
+                continue
+            }
+            var patch: RuntimeObject = [:]
+            if !item.name.isEmpty, item.name != imported.name { patch["name"] = .string(item.name) }
+            if item.group != imported.group { patch["group"] = .string(item.group) }
+            let targetOrder = item.order.isFinite ? item.order : Double(idx)
+            if targetOrder != imported.order { patch["order"] = .number(targetOrder) }
+            if item.enabled != imported.enabled { patch["enabled"] = .bool(item.enabled) }
+            if item.enabledExplore != imported.enabledExplore { patch["enabledExplore"] = .bool(item.enabledExplore) }
+            if !patch.isEmpty {
+                try? await update(imported, patch: patch)
+            }
+        }
+    }
+    public func exportCookies() async -> RuntimeValue {
+        do {
+            let value = try await runtime.call("library.exportCookies", .object([:]))
+            if case .array = value["items"] { return value["items"] }
+        } catch {}
+        return .array([])
+    }
+    public func replaceCookies(_ items: RuntimeValue) async {
+        guard case .array = items else { return }
+        _ = try? await runtime.call("library.replaceCookies", .object(["items": items]))
+    }
+}
+
+public struct ExportedNovelSourceItem: Sendable {
+    public let installationId: String
+    public let name: String
+    public let sourceUrl: String
+    public let group: String
+    public let order: Double
+    public let enabled: Bool
+    public let enabledExplore: Bool
+    public let `protocol`: String
+    public let definition: String
+
+    public init(installationId: String, name: String, sourceUrl: String, group: String,
+                order: Double, enabled: Bool, enabledExplore: Bool, protocol proto: String, definition: String) {
+        self.installationId = installationId
+        self.name = name
+        self.sourceUrl = sourceUrl
+        self.group = group
+        self.order = order
+        self.enabled = enabled
+        self.enabledExplore = enabledExplore
+        self.protocol = proto
+        self.definition = definition
+    }
 }

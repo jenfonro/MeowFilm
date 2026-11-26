@@ -20,3 +20,13 @@ public interface IDesktopGeneralSettingsSource
     FrameworkElement? HomeSourceSettingsView => null;
     FrameworkElement? CacheSettingsView => null;
 }
+
+/// <summary>App-owned plaintext settings import/export coordinator for General → Data Management.</summary>
+public interface IDesktopDataManagement
+{
+    bool IsBusy { get; }
+    Task<bool> ExportAsync(FrameworkElement owner);
+    Task<bool> ImportAsync(FrameworkElement owner);
+    Task ExportToFileAsync(string path, CancellationToken cancellationToken = default);
+    Task ImportFromFileAsync(string path, CancellationToken cancellationToken = default);
+}

@@ -37,6 +37,7 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
     private readonly FilmPlayback nativeFilmPlayback;
     private readonly FilmLibrary library;
     private readonly FilmPlaybackSettings business;
+    private readonly IStorageDatabase storage;
     private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
     private Task? favoriteRefresh;
     private bool favoriteDirty;
@@ -68,6 +69,7 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         this.rules = rules;
         this.sources = sources;
         this.metadata = metadata;
+        this.storage = storage;
         search = new FilmSearchService(capture, sources);
         nativeFilmPlayback = playback;
         filmPlayback = new FilmPlaybackSession(playback,
@@ -268,4 +270,105 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
 
     private void Changed([CallerMemberName] string? property = null) =>
         PropertyChanged?.Invoke(this, new(property));
+
+    public FilmMetadataService Metadata => metadata;
+    public FilmRuleService Rules => rules;
+    public FilmSourceService Sources => sources;
+
+    public async Task<ExportedFilmPreferences> ExportPreferencesAsync(CancellationToken token = default)
+    {
+        var prefs = await business.ReadPreferencesAsync(token).ConfigureAwait(false);
+        return new ExportedFilmPreferences(
+            prefs.RuleOrder,
+            prefs.PanOrder,
+            prefs.Keywords,
+            prefs.SiteCleanKeywords,
+            prefs.IosAutoPrepare,
+            prefs.MetadataViewProvider);
+    }
+
+    public async Task SaveImportedPreferencesAsync(
+        string[]? ruleOrder,
+        string[]? panOrder,
+        string[]? keywords,
+        string[]? siteCleanKeywords,
+        bool? iosAutoPrepare,
+        string? metadataViewProvider,
+        CancellationToken token = default)
+    {
+        var current = await business.ReadPreferencesAsync(token).ConfigureAwait(false);
+        string[] nextRuleOrder = current.RuleOrder;
+        if (ruleOrder is not null)
+        {
+            try { nextRuleOrder = FilmPreferences.NormalizeRuleOrder(ruleOrder); } catch { }
+        }
+        string[] nextPanOrder = current.PanOrder;
+        if (panOrder is not null)
+        {
+            try { nextPanOrder = FilmPreferences.NormalizePanOrder(panOrder); } catch { }
+        }
+        string[] nextKeywords = current.Keywords;
+        if (keywords is not null)
+        {
+            var cleaned = keywords.Where(k => !string.IsNullOrWhiteSpace(k)).Select(k => k.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            try { nextKeywords = FilmPreferences.NormalizeList(cleaned); } catch { }
+        }
+        string[] nextClean = current.SiteCleanKeywords;
+        if (siteCleanKeywords is not null)
+        {
+            var cleaned = siteCleanKeywords.Where(k => !string.IsNullOrWhiteSpace(k)).Select(k => k.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            try { nextClean = FilmPreferences.NormalizeList(cleaned); } catch { }
+        }
+        bool nextAutoPrepare = iosAutoPrepare ?? current.IosAutoPrepare;
+        string nextProvider = metadataViewProvider is "tmdb" or "douban" ? metadataViewProvider : current.MetadataViewProvider;
+
+        var merged = new FilmPreferences(nextRuleOrder, nextPanOrder, nextKeywords, nextClean, nextAutoPrepare, nextProvider);
+        if (!current.ContentEquals(merged))
+            await business.SavePreferencesAsync(merged).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<ExportedPanAccount>> ExportPanAccountsAsync(CancellationToken token = default)
+    {
+        var repo = new PanCredentialRepository(storage);
+        var (rows, revision) = await repo.ReadAllAsync(token).ConfigureAwait(false);
+        if (revision == 0) return [];
+        return rows.Select(r => new ExportedPanAccount(
+            r.Provider, r.Cookie, r.Username, r.Password, r.Authorization, r.RefreshedAtMs)).ToArray();
+    }
+
+    public async Task ReplacePanAccountsAsync(
+        IReadOnlyDictionary<string, ExportedPanAccount?> accounts,
+        CancellationToken token = default)
+    {
+        var panStore = new PanSettingsStore(sources.Runtime, storage);
+        foreach (var descriptor in PanSettingsStore.Providers)
+        {
+            token.ThrowIfCancellationRequested();
+            string provider = descriptor.Provider;
+            if (!accounts.TryGetValue(provider, out var entry) || entry is null)
+            {
+                try { await panStore.ClearAsync(provider, token).ConfigureAwait(false); } catch { }
+                continue;
+            }
+            var dict = new Dictionary<string, object>(StringComparer.Ordinal);
+            if (descriptor.HasField("cookie") && !string.IsNullOrEmpty(entry.Cookie) &&
+                !entry.Cookie.Contains('\0') && entry.Cookie.IndexOfAny(['\r', '\n']) < 0)
+                dict["cookie"] = entry.Cookie;
+            if (descriptor.HasField("username") && !string.IsNullOrEmpty(entry.Username) &&
+                !entry.Username.Contains('\0') && entry.Username.IndexOfAny(['\r', '\n']) < 0)
+                dict["username"] = entry.Username;
+            if (descriptor.HasField("password") && !string.IsNullOrEmpty(entry.Password) &&
+                !entry.Password.Contains('\0'))
+                dict["password"] = entry.Password;
+            if (descriptor.HasField("authorization") && !string.IsNullOrEmpty(entry.Authorization) &&
+                !entry.Authorization.Contains('\0') && entry.Authorization.IndexOfAny(['\r', '\n']) < 0)
+                dict["authorization"] = entry.Authorization;
+            if (descriptor.HasField("refreshedAt") && entry.RefreshedAtMs is >= 0 and <= BridgeCodec.MaximumSafeInteger)
+                dict["refreshedAt"] = entry.RefreshedAtMs.Value;
+
+            try { await panStore.SaveAsync(provider, dict, token).ConfigureAwait(false); } catch { }
+        }
+    }
+
+    public Task RefreshSettingsAfterImportAsync() => settings.RefreshAfterExternalImportAsync();
 }

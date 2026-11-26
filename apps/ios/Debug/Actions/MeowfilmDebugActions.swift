@@ -266,9 +266,27 @@ extension MeowfilmDebugNavigator {
         if action == "setting.action" {
             let cmd = params["command"]?.stringValue ?? ""
             if domain == "general" && cmd == "reset_user_data" {
+                guard params["confirm"]?.stringValue == "RESET_ALL_USER_DATA" else {
+                    throw DebugAPIError.invalidState("reset_user_data requires confirm == 'RESET_ALL_USER_DATA'")
+                }
                 guard let appDelegate else { throw DebugAPIError.invalidState("AppDelegate unavailable") }
                 try await appDelegate.requestUserDataReset()
                 return .object(["requested": .bool(true)])
+            }
+            if domain == "general" && cmd == "export_settings" {
+                guard let resources = assembly.resources else { throw DebugAPIError.invalidState("Settings transfer unavailable") }
+                let defaultPath = resources.tempRoot.appendingPathComponent("meowfilm-settings.json").path
+                let path = params["path"]?.stringValue ?? defaultPath
+                let saved = try await assembly.settingsTransfer.exportToFile(path: path)
+                return .object(["executed": .bool(true), "command": .string(cmd), "path": .string(saved.path)])
+            }
+            if domain == "general" && cmd == "import_settings" {
+                guard assembly.resources != nil else { throw DebugAPIError.invalidState("Settings transfer unavailable") }
+                guard let path = params["path"]?.stringValue, !path.isEmpty else {
+                    throw DebugAPIError.invalidArgument("import_settings requires 'path'")
+                }
+                try await assembly.settingsTransfer.importFromFile(path: path)
+                return .object(["executed": .bool(true), "command": .string(cmd)])
             }
             if domain == "novel" && cmd == "refresh_sources" {
                 guard let novel = assembly.novel else { throw DebugAPIError.invalidState("Novel feature unavailable") }

@@ -105,6 +105,20 @@ internal sealed partial class ShellDebugAdapter
                     await loader.ClearDiskAsync(cancellationToken);
                     outcome = new { executed = true, command = cmd, stats = loader.GetStats() };
                 }
+                else if (string.Equals(cmd, "export_settings", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(cmd, "import_settings", StringComparison.OrdinalIgnoreCase))
+                {
+                    var path = DebugParams.GetString(parameters, "path");
+                    if (string.IsNullOrWhiteSpace(path))
+                        throw DebugApiException.InvalidArgument($"'{cmd}' requires non-empty 'path'.");
+                    if (shell.GeneralSettingsHost.Content is not GeneralSettingsView gv || gv.DataManagement is not { } dm)
+                        throw DebugApiException.InvalidState("Data management is not attached.");
+                    if (string.Equals(cmd, "export_settings", StringComparison.OrdinalIgnoreCase))
+                        await dm.ExportToFileAsync(path, cancellationToken);
+                    else
+                        await dm.ImportFromFileAsync(path, cancellationToken);
+                    outcome = new { executed = true, command = cmd, path };
+                }
                 else throw DebugApiException.InvalidArgument($"Unsupported general settings command '{cmd}'.");
             }
             else if (normalized is not ("setting.set" or "setting.action") &&

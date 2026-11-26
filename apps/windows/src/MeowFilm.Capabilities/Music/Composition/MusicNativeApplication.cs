@@ -29,11 +29,11 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     private readonly CatalogSessions sessions;
     private readonly IStorageDatabase dataDatabase;
     private readonly IStorageDatabase cacheDatabase;
-    internal MusicLibraryOwner Library => library;
+    public MusicLibraryOwner Library => library;
     internal MusicAccountOwner Accounts => accounts;
     internal MusicNativeCatalogOwner Catalog => nativeCatalog;
     internal MusicVipPageOwner VipPage => vipPage;
-    internal MusicScriptOwner Scripts => scripts;
+    public MusicScriptOwner Scripts => scripts;
     internal MusicLyricApplication Lyrics => lyrics;
     internal MusicSearchCoordinator Search => searchCoordinator;
     internal NativeMusicSearchDiscovery Discovery => discovery;

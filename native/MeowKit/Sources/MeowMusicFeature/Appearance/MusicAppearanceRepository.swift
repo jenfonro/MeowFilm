@@ -141,7 +141,7 @@ enum MusicAppearanceRepository {
         }
     }
 
-    private static func decodePalette(_ text: String) throws -> PagePalette {
+    static func decodePalette(_ text: String) throws -> PagePalette {
         if let preset = PageColorway(rawValue: text) { return .preset(preset) }
         if text.count == 7, text.first == "#", let rgb = UInt32(text.dropFirst(), radix: 16) {
             return .custom(rgb)
@@ -149,7 +149,7 @@ enum MusicAppearanceRepository {
         throw SQLiteStorageError.invalidValue
     }
 
-    private static func encodePalette(_ palette: PagePalette) -> String {
+    static func encodePalette(_ palette: PagePalette) -> String {
         switch palette {
         case .preset(let value): return value.rawValue
         case .custom(let rgb): return String(format: "#%06X", rgb & 0xffffff)

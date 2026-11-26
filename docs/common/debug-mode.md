@@ -377,7 +377,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | | `library.film` | `{ section?: "favorites"\|"history" }` | — | Primary `.library` 影视子页（`FilmPersonalLibraryViewController` / 二级网格） |
 | | `library.novel` | `{ section?: "favorites"\|"history" }` | — | Primary `.library` 小说子页（`NovelPersonalLibraryViewController` / 二级网格） |
 | **搜索** | `search` | `{ query?, target?: "music"\|"film"\|"novel", tab? }` | `SearchResultsPage`（若提供 `query` 同时触发提交） | `MeowfilmCoordinator.showSearch()` + 可选提交与切 Tab |
-| **通用设置** | `settings.general` | `{ section?: "appearance"\|"sources"\|"cache"\|"window"\|"shortcuts" }` | `ShellWindow` 通用设置 + 对应区域 Tab | `MeowfilmSettingsViewController`（`appearance`→外观设置，`cache`→缓存管理；`window`/`shortcuts` 返 `UNSUPPORTED_ON_PLATFORM`） |
+| **通用设置** | `settings.general` | `{ section?: "appearance"\|"sources"\|"cache"\|"data"\|"window"\|"shortcuts" }` | `ShellWindow` 通用设置 + 对应区域 Tab | `MeowfilmSettingsViewController`（`appearance`→外观设置，`cache`→缓存管理，`data`→数据管理；`window`/`shortcuts` 返 `UNSUPPORTED_ON_PLATFORM`） |
 | **音乐设置** | `settings.music` | `{ section?: "accounts"\|"sources"\|"exclusions"\|"search"\|"quality"\|"playback"\|"metadata"\|"home-source"\|"cache" }` | `MusicSettingsView` 对应锚点/子区（`home-source`/`cache` 切到通用设置对应区或子面板） | `MusicSettingsViewController` + 对应子页面（`.aggregation`/`.sources`/`.exclusions`/`.search`/`.playback`/`.metadata`） |
 | **影视设置** | `settings.film` | `{ section?: "rules"\|"search-rules"\|"cats"\|"videos"\|"metadata"\|"pan"\|"pan-routing"\|"preferences"\|"player"\|"cache" }` | `FilmSettingsView` 对应分段锚点（`cache`→缓存子页） | `FilmSettingsViewController` + 对应子页面（`.matching`/`.search`/`.cats`/`.videos`/`.dataSources`/`.pan`/`.panInterception`/`.preferences`/`.player`/缓存页） |
 | **小说设置** | `settings.novel` | `{ section?: "sources"\|"rules"\|"appearance" }` | `NovelSettingsView`（`sources`/`rules` Tab；`appearance`→阅读排版面板） | `NovelSettingsViewController` + 对应子页（书源/净化/阅读排版） |
@@ -468,7 +468,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `search.submit` | `{ query, target?: "music"\|"film"\|"novel", tab? }` | 打开或复用搜索页并提交查询 |
 | `dialog.action` | `{ action: "confirm"\|"cancel"\|"dismiss"\|"button", index?, label? }` | 操作当前活动弹窗/Dialog/Sheet |
 | `setting.set` | `{ domain: "general"\|"music"\|"film"\|"novel", section?, key, value }` | 修改指定设置项并走真实保存/回执链路 |
-| `setting.action` | `{ domain, section?, command, params? }` | 触发设置页业务动作（如刷新来源、切换猫源/视频源/书源启停、检测/探测、清缓存、数据重置） |
+| `setting.action` | `{ domain, section?, command, params? }` | 触发设置页业务动作（如刷新来源、切换猫源/视频源/书源启停、检测/探测、清缓存、`export_settings`/`import_settings`、数据重置） |
 
 各端可在 `capabilities.actions` 中声明平台扩展语义动作（例如 Windows 端支持的 `window.close_request`、`search.scope.*`、`dropdown.*`、`nonclient.refresh` 等，具体见对应端侧文档）。
 
