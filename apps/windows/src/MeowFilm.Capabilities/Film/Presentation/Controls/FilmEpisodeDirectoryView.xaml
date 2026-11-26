@@ -19,7 +19,7 @@
           <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}" />
          </StackPanel>
         </Border>
-        <Border Background="#B8000000" CornerRadius="5" Padding="7,3" Margin="10" HorizontalAlignment="Right" VerticalAlignment="Bottom">
+        <Border Background="#B8000000" CornerRadius="5" Padding="7,3" Margin="10" HorizontalAlignment="Right" VerticalAlignment="Bottom" Visibility="{x:Bind HasDuration, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
          <TextBlock Text="{x:Bind Duration, Mode=OneWay}" Foreground="White" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" />
         </Border>
        </Grid>
@@ -65,7 +65,7 @@
     </DataTemplate>
    </ItemsControl.ItemTemplate>
   </ItemsControl>
-  <local:Shelf x:Name="EpisodeShelf" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" MinimumCardWidth="240" HorizontalOffset="{x:Bind Directory.HorizontalOffset, Mode=TwoWay}" NavigationButtonStyle="{StaticResource Film.ShelfArrow}" Visibility="{x:Bind Page.ShowEpisodeCards, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" CardTemplate="{StaticResource Film.EpisodeCard}" AutomationProperties.Name="横向选集列表" />
+  <local:Shelf x:Name="EpisodeShelf" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" MinimumCardWidth="240" HorizontalOffset="{x:Bind Directory.HorizontalOffset, Mode=TwoWay}" NavigationButtonStyle="{StaticResource Capability.ShelfArrow}" Visibility="{x:Bind Page.ShowEpisodeCards, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" CardTemplate="{StaticResource Film.EpisodeCard}" AutomationProperties.Name="横向选集列表" />
   <ListView x:Name="EpisodeList" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" AutomationProperties.Name="逐集列表" Visibility="{x:Bind Page.ShowEpisodeList, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" SelectionMode="None" IsItemClickEnabled="False" HorizontalContentAlignment="Stretch">
    <ListView.ItemsPanel>
     <ItemsPanelTemplate>
@@ -95,7 +95,7 @@
        </Grid>
        <StackPanel Grid.Column="2" VerticalAlignment="Center">
         <TextBlock Text="{x:Bind Label, Mode=OneWay}" FontSize="15" TextWrapping="Wrap" Style="{StaticResource Film.EpisodeLabel}" />
-        <TextBlock Text="{x:Bind Duration, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0,5,0,0" />
+        <TextBlock Text="{x:Bind Duration, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0,5,0,0" Visibility="{x:Bind HasDuration, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
         <TextBlock Text="{x:Bind Overview, Mode=OneWay}" TextWrapping="Wrap" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" MaxHeight="63" Margin="0,7,0,0" TextTrimming="CharacterEllipsis" />
        </StackPanel>
       </Grid>
@@ -103,5 +103,6 @@
     </DataTemplate>
    </ListView.ItemTemplate>
   </ListView>
+  <Button x:Name="LoadMoreEpisodesButton" Content="{x:Bind Page.LoadMoreEpisodesText, Mode=OneWay}" IsEnabled="{x:Bind Page.CanLoadMoreEpisodes, Mode=OneWay, FallbackValue=False}" Visibility="{x:Bind Page.ShowLoadMoreEpisodes, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Click="LoadMoreEpisodes_Click" Style="{StaticResource Film.PlaybackAction}" HorizontalAlignment="Center" Margin="0,12,0,0" AutomationProperties.Name="加载更多选集" />
  </StackPanel>
 </UserControl>

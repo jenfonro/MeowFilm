@@ -13,7 +13,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities;
 
 public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopGeneralSettingsSource,
-    IDebugModuleAdapterSource, IRuntimeRecoveryScope
+    IDebugModuleAdapterSource, IRuntimeRecoveryScope, ICatalogBrowseController
 {
     internal const string HomeRoute = "film-home";
     internal const string DataRoute = "film-data";
@@ -71,8 +71,7 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         search = new FilmSearchService(capture, sources);
         nativeFilmPlayback = playback;
         filmPlayback = new FilmPlaybackSession(playback,
-            (page, parameters, reconnect, token) =>
-                PreparePlaybackOpenAsync(sources, capture, page, parameters, reconnect, token));
+            (reconnect, token) => ConnectPlaybackRuntimeAsync(sources, capture, reconnect, token));
         library = new FilmLibrary(storage);
         business = new FilmPlaybackSettings(runtime, storage);
 
@@ -81,7 +80,6 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         filmPlayback.OperationFailed += PlaybackFailed;
         filmPlayback.MediaStateChanged += PlaybackMediaChanged;
         library.Changed += FavoritesChanged;
-        sources.Changed += PlaybackSourcesChanged;
         (runtime as IRuntimeRecovery)?.RegisterRecoveryScope(this);
 
         Sections = FilmSectionDefinition.Home.Select(definition => new FilmHomeSection(definition)).ToArray();
@@ -94,7 +92,7 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
             new(PlaybackRoute, "播放页", "\uE8B2", ShowInSidebar: false)
         ];
         view = new(this);
-        settings = new FilmSettingsView(rules, sources, storage, business, () => Playback?.ActiveTarget, metadata);
+        settings = new FilmSettingsView(rules, sources, storage, business, () => Playback?.TargetId, metadata);
         debugAdapter = new(this);
     }
 
@@ -124,7 +122,20 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         filmPlayback.Position, filmPlayback.Duration);
     public bool IsHome => route == HomeRoute;
     public bool IsData => route == DataRoute;
+    public bool IsBrowse => route is HomeRoute or DataRoute;
     public bool IsPlayback => route == PlaybackRoute;
+    System.Collections.IEnumerable ICatalogBrowseController.BrowseSections => Sections;
+    bool ICatalogBrowseController.HasSections => true;
+    bool ICatalogBrowseController.ShowHomeLoading => false;
+    bool ICatalogBrowseController.ShowHomeStatus => false;
+    string ICatalogBrowseController.HomeStatusText => "";
+    bool ICatalogBrowseController.CanRetryHome => false;
+    bool ICatalogBrowseController.CanImportHome => false;
+    public CatalogDataSection BrowseActiveData => ActiveData;
+    string ICatalogBrowseController.DataRefreshAutomationName => "刷新影片数据";
+    string ICatalogBrowseController.DataListAutomationName => "影片列表";
+    string ICatalogBrowseController.DataRetryAutomationName => "重试加载影片数据";
+    string ICatalogBrowseController.DataMoreAutomationName => "加载更多影片";
     public string Heading => route switch
     {
         HomeRoute => "影视",
@@ -246,7 +257,6 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         if (disposed) return;
         foreach (var page in playbackPages.Values) page.Release();
         playbackPages.Clear();
-        sources.Changed -= PlaybackSourcesChanged;
         filmPlayback.OperationFailed -= PlaybackFailed;
         filmPlayback.MediaStateChanged -= PlaybackMediaChanged;
         library.Changed -= FavoritesChanged;

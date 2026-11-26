@@ -6,19 +6,22 @@ import MeowUI
 // MARK: - NovelHomeViewController
 
 extension NovelHomeViewController: DebugPageInspectable, DebugPageActionable, DebugPageRefreshable {
-    public func debugApplyFilter(sourceId: String?, channelIndex: Int?, kindUrl: String?, kindIndex: Int?) {
-        if let sourceId, !sourceId.isEmpty {
-            discovery.selectSource(id: sourceId)
+    public func debugCategoryModel(category: String?, sectionIndex: Int?) -> NovelCategoryModel? {
+        if let sectionIndex {
+            guard discovery.sections.indices.contains(sectionIndex) else { return nil }
+            return discovery.categoryModel(sectionID: discovery.sections[sectionIndex].id)
         }
-        if let channelIndex, discovery.channels.indices.contains(channelIndex) {
-            discovery.selectChannel(id: discovery.channels[channelIndex].id)
+        if let category, !category.isEmpty {
+            if let direct = discovery.categoryModel(sectionID: category) { return direct }
+            if let matched = discovery.sections.first(where: { $0.id == category || $0.title == category }) {
+                return discovery.categoryModel(sectionID: matched.id)
+            }
+            return nil
         }
-        let items = discovery.selectedChannel?.items ?? []
-        if let kindUrl, let matched = items.first(where: { $0.url == kindUrl || $0.id == kindUrl }) {
-            discovery.selectKind(id: matched.id)
-        } else if let kindIndex, items.indices.contains(kindIndex) {
-            discovery.selectKind(id: items[kindIndex].id)
+        for sec in discovery.sections {
+            if let model = discovery.categoryModel(sectionID: sec.id) { return model }
         }
+        return nil
     }
 
     public var debugPageStatus: DebugPageStatus {
@@ -34,31 +37,40 @@ extension NovelHomeViewController: DebugPageInspectable, DebugPageActionable, De
     }
 
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        let tabs = discovery.channels.enumerated().map { idx, ch in
-            DebugTabItem(group: "channel", index: idx, id: ch.id, title: ch.title, selected: ch.id == discovery.selectedChannelID)
-        }
-        let filters = (discovery.selectedChannel?.items ?? []).enumerated().map { idx, item in
-            DebugFilterItem(group: "category", index: idx, id: item.id, title: item.title, selected: item.id == discovery.selectedKindID)
-        }
-        let rows = renderedBooks.prefix(maxItems).enumerated().map { idx, book in
-            DebugContentRow(
-                index: idx,
-                id: book.id,
-                title: book.name,
-                subtitle: [book.author, book.latestChapterTitle].filter { !$0.isEmpty }.joined(separator: " · "),
-                actions: ["open"],
-                meta: ["installationId": .string(book.installationId), "bookUrl": .string(book.bookUrl)]
+        var remaining = maxItems
+        let projectedSections = discovery.sections.enumerated().map { sIdx, sec -> DebugContentSection in
+            let take = min(remaining, sec.books.count)
+            remaining = max(0, remaining - take)
+            let items = sec.books.prefix(take).enumerated().map { iIdx, book in
+                DebugContentItem(
+                    index: iIdx,
+                    id: book.id,
+                    kind: "novel",
+                    title: book.name,
+                    subtitle: book.author.isEmpty ? nil : book.author,
+                    badge: book.latestChapterTitle.isEmpty ? nil : book.latestChapterTitle,
+                    coverUrl: book.coverUrl.isEmpty ? nil : book.coverUrl,
+                    actions: ["open"],
+                    meta: ["installationId": .string(book.installationId), "bookUrl": .string(book.bookUrl)]
+                )
+            }
+            return DebugContentSection(
+                index: sIdx,
+                id: sec.id,
+                title: sec.title,
+                kind: "novel",
+                layout: "rail",
+                hasMore: !sec.options.isEmpty,
+                itemCount: sec.books.count,
+                items: items
             )
         }
         return DebugContentSnapshot(
             target: "novel.home",
-            kind: "list",
+            kind: projectedSections.isEmpty ? "empty" : "sections",
             loading: discovery.loading,
             error: discovery.error,
-            tabs: tabs,
-            filters: filters,
-            rows: rows,
-            hasMore: discovery.canLoadMore,
+            sections: projectedSections,
             extra: [
                 "selectedSource": discovery.selectedSource.map { .object(["id": .string($0.id), "name": .string($0.name)]) } ?? .null
             ]
@@ -67,63 +79,179 @@ extension NovelHomeViewController: DebugPageInspectable, DebugPageActionable, De
 
     public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
         switch request.action {
-        case "tab.select":
-            let group = request.params["group"]?.stringValue ?? "channel"
-            if group == "channel" {
-                if let idx = request.params["index"]?.intValue, discovery.channels.indices.contains(idx) {
-                    discovery.selectChannel(id: discovery.channels[idx].id)
-                    return .object(["selectedChannelId": .string(discovery.channels[idx].id)])
-                }
-                if let id = request.params["id"]?.stringValue {
-                    guard discovery.channels.contains(where: { $0.id == id }) else {
-                        throw DebugAPIError.notFound("Novel channel not found: \(id)")
-                    }
-                    discovery.selectChannel(id: id)
-                    return .object(["selectedChannelId": .string(id)])
-                }
-                throw DebugAPIError.invalidArgument("Invalid channel selection")
-            } else {
-                let items = discovery.selectedChannel?.items ?? []
-                if let idx = request.params["index"]?.intValue, items.indices.contains(idx) {
-                    discovery.selectKind(id: items[idx].id)
-                    return .object(["selectedKindId": .string(items[idx].id)])
-                }
-                if let id = request.params["id"]?.stringValue {
-                    guard items.contains(where: { $0.id == id }) else {
-                        throw DebugAPIError.notFound("Novel category not found: \(id)")
-                    }
-                    discovery.selectKind(id: id)
-                    return .object(["selectedKindId": .string(id)])
-                }
-                throw DebugAPIError.invalidArgument("Invalid category selection")
-            }
-        case "list.item.invoke":
+        case "section.item.invoke":
+            let sec = try resolveSection(request.params)
             let book: NovelBook
-            if let idx = request.params["index"]?.intValue {
-                guard renderedBooks.indices.contains(idx) else {
-                    throw DebugAPIError.invalidArgument("Book index \(idx) out of range (0..<\(renderedBooks.count))")
+            if let iIdx = request.params["itemIndex"]?.intValue {
+                guard sec.books.indices.contains(iIdx) else {
+                    throw DebugAPIError.invalidArgument("itemIndex \(iIdx) out of range (0..<\(sec.books.count))")
                 }
-                book = renderedBooks[idx]
-            } else if let id = request.params["id"]?.stringValue {
-                guard let found = renderedBooks.first(where: { $0.id == id || $0.bookUrl == id }) else {
+                book = sec.books[iIdx]
+            } else if let id = request.params["itemId"]?.stringValue {
+                guard let found = sec.books.first(where: { $0.id == id || $0.bookUrl == id || $0.name == id }) else {
                     throw DebugAPIError.notFound("Novel book not found: \(id)")
                 }
                 book = found
+            } else if let first = sec.books.first {
+                book = first
             } else {
-                throw DebugAPIError.invalidArgument("Provide 'index' or 'id'")
+                throw DebugAPIError.invalidState("Target novel section has no items")
             }
             onSelect?(book)
             return .object(["openedBookId": .string(book.id), "name": .string(book.name)])
-        case "list.load_more":
-            discovery.loadMore()
-            return .object(["triggered": .bool(true)])
+
+        case "section.more":
+            let sec = try resolveSection(request.params)
+            guard let catModel = discovery.categoryModel(sectionID: sec.id) else {
+                throw DebugAPIError.invalidState("Novel section does not have a category view")
+            }
+            onSelectCategory?(catModel)
+            return .object(["openedSection": .string(catModel.sectionID), "title": .string(catModel.title)])
+
         default:
             throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on NovelHomeViewController")
         }
     }
 
+    private func resolveSection(_ params: [String: DebugJSONValue]) throws -> NovelHomeSection {
+        if let sId = params["sectionId"]?.stringValue {
+            guard let found = discovery.sections.first(where: { $0.id == sId || $0.title == sId }) else {
+                throw DebugAPIError.notFound("Novel section not found: \(sId)")
+            }
+            return found
+        }
+        let sIdx = params["sectionIndex"]?.intValue ?? 0
+        guard discovery.sections.indices.contains(sIdx) else {
+            throw DebugAPIError.invalidArgument("sectionIndex \(sIdx) out of range (0..<\(discovery.sections.count))")
+        }
+        return discovery.sections[sIdx]
+    }
+
     public func debugRefresh() {
         discovery.refresh()
+    }
+}
+
+// MARK: - NovelCategoryViewController
+
+extension NovelCategoryViewController: DebugPageInspectable, DebugPageActionable, DebugPageRefreshable {
+    public var debugBooks: [NovelBook] { renderedBooks }
+
+    public var debugPageStatus: DebugPageStatus {
+        DebugPageStatus(
+            target: "novel.data",
+            moduleId: "novel",
+            route: "novel/data/\(model.sectionID)",
+            title: model.title,
+            isBusy: model.isLoading,
+            isError: model.error != nil,
+            errorText: model.error
+        )
+    }
+
+    public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
+        let filters: [DebugFilterItem] = model.options.count > 1
+            ? model.options.enumerated().map { idx, opt in
+                DebugFilterItem(
+                    group: "category",
+                    index: idx,
+                    id: opt.id,
+                    title: opt.title,
+                    selected: opt.id == model.selectedOptionID
+                )
+            }
+            : []
+        let items = renderedBooks.prefix(maxItems).enumerated().map { idx, book in
+            DebugContentItem(
+                index: idx,
+                id: book.id,
+                kind: "novel",
+                title: book.name,
+                subtitle: book.author.isEmpty ? nil : book.author,
+                badge: book.latestChapterTitle.isEmpty ? nil : book.latestChapterTitle,
+                coverUrl: book.coverUrl.isEmpty ? nil : book.coverUrl,
+                actions: ["open"],
+                meta: ["installationId": .string(book.installationId), "bookUrl": .string(book.bookUrl)]
+            )
+        }
+        let sec = DebugContentSection(
+            index: 0,
+            id: model.sectionID,
+            title: model.title,
+            kind: "novel",
+            layout: "grid",
+            hasMore: model.hasMore,
+            itemCount: renderedBooks.count,
+            items: items
+        )
+        return DebugContentSnapshot(
+            target: "novel.data",
+            kind: "sections",
+            loading: model.isLoading,
+            error: model.error,
+            filters: filters,
+            sections: [sec],
+            hasMore: model.hasMore,
+            extra: [
+                "selectedSource": .object(["id": .string(model.source.id), "name": .string(model.source.name)])
+            ]
+        )
+    }
+
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        switch request.action {
+        case "section.item.invoke", "list.item.invoke":
+            let book: NovelBook
+            if let idx = (request.params["itemIndex"] ?? request.params["index"])?.intValue {
+                guard renderedBooks.indices.contains(idx) else {
+                    throw DebugAPIError.invalidArgument("Novel item index \(idx) out of range (0..<\(renderedBooks.count))")
+                }
+                book = renderedBooks[idx]
+            } else if let id = (request.params["itemId"] ?? request.params["id"])?.stringValue {
+                guard let found = renderedBooks.first(where: { $0.id == id || $0.bookUrl == id || $0.name == id }) else {
+                    throw DebugAPIError.notFound("Novel book not found: \(id)")
+                }
+                book = found
+            } else if let first = renderedBooks.first {
+                book = first
+            } else {
+                throw DebugAPIError.invalidState("Novel category list is empty")
+            }
+            onSelectItem?(book)
+            return .object(["openedBookId": .string(book.id), "name": .string(book.name)])
+
+        case "tab.select":
+            guard model.options.count > 1 else {
+                throw DebugAPIError.invalidState("Current novel section has no selectable sub-category filters")
+            }
+            let value: String
+            if let id = request.params["id"]?.stringValue {
+                guard let found = model.options.first(where: { $0.id == id || $0.title == id || $0.url == id }) else {
+                    throw DebugAPIError.notFound("Novel filter option not found: \(id)")
+                }
+                value = found.id
+            } else if let idx = request.params["index"]?.intValue {
+                guard model.options.indices.contains(idx) else {
+                    throw DebugAPIError.invalidArgument("Filter index \(idx) out of range (0..<\(model.options.count))")
+                }
+                value = model.options[idx].id
+            } else {
+                throw DebugAPIError.invalidArgument("Provide 'id' or 'index'")
+            }
+            _ = model.selectOption(value)
+            return .object(["group": .string("category"), "selected": .string(value)])
+
+        case "list.load_more":
+            _ = model.loadMore()
+            return .object(["triggered": .bool(true)])
+
+        default:
+            throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on NovelCategoryViewController")
+        }
+    }
+
+    public func debugRefresh() {
+        _ = model.refresh()
     }
 }
 

@@ -283,9 +283,10 @@ final class MeowfilmAssembly: ObservableObject {
     func clearAllMusicCaches() async throws {
         guard let resources else { throw MusicServiceError.unavailable }
         musicImages.debugClearMemoryCache()
-        await music?.debugClearMemoryCaches()
+        await service?.clearCachedHome()
         try await resources.clearMusicCaches()
         try await appearance.clearSongPalettes()
+        await music?.debugClearMemoryCaches()
     }
 
     func shutdown() {

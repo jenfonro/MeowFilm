@@ -1,125 +1,260 @@
-import { compareCandidates } from './policy.js';
-import { clone, fields } from './identity.js';
-import { publicCandidate, publicSource, publicTarget } from './session-helpers.js';
+import { isItemBlocked } from './policy.js';
+import { providerFamily, qualityKey } from './rules.js';
+import { clone, text } from './identity.js';
+import { formatQualityBadge, panDisplayLabel } from './session-helpers.js';
+
+const QUALITY_ORDER = ['8k', '4k_hdr', '4k_fps', '4k', '1080p', '720p'];
+const PAN_ORDER = ['yidong', 'tianyi', 'quark', 'uc', 'baidu'];
+
+function normalizeQualityKey(raw) {
+  if (typeof raw === 'string' && raw.trim().toLowerCase() === '8k') return '8k';
+  return qualityKey(raw);
+}
+
+function formatEpisodeLabel(intent, candidate) {
+  const season = candidate?.season ?? intent?.season;
+  const episode = candidate?.episode ?? intent?.episode;
+  if (episode > 0) {
+    return season > 1 ? `第${season}季 第${String(episode).padStart(2, '0')}集` : `第${String(episode).padStart(2, '0')}集`;
+  }
+  return text(candidate?.fileName ?? candidate?.name);
+}
+
+function formatSourceLabel(candidate) {
+  if (!candidate) return '';
+  const siteName = text(candidate.source?.name) || text(candidate.source?.key);
+  const lineLabel = text(candidate.lineLabel);
+  if (siteName && lineLabel && lineLabel !== siteName) return `${siteName} · ${lineLabel}`;
+  return siteName || lineLabel;
+}
 
 export function createSessionSnapshot(ctx) {
-  const { catalog, browsingProjections } = ctx;
+  const { library } = ctx;
 
-  function searchComplete(session) {
-    return session.selectionKind === 'source' || session.sources.filter(source => ctx.sourceAllowed(session, source))
-      .every(source => session.search.get(source.key).completed);
+  function buildSourceMenu(session) {
+    // Requirement 1.1: When no video sources & no manual shares exist, source dropdown
+    // must display "暂无可用视频源" and be disabled — metadata items must NOT masquerade as video sources!
+    if (session.noSources) {
+      return {
+        selectedId: null,
+        placeholder: '暂无可用视频源',
+        disabled: true,
+        canLoadMore: false,
+        loadingMore: false,
+        options: [],
+      };
+    }
+
+    const options = [];
+    for (const row of session.metadataSources) {
+      options.push({
+        id: row.id,
+        kind: row.provider,
+        label: row.provider === 'tmdb' ? 'TMDB' : '豆瓣',
+        subtitle: row.title,
+        state: 'ready',
+        error: null,
+      });
+    }
+
+    if (ctx.browsing.hasSmartList(session)) {
+      options.push({
+        id: 'smart',
+        kind: 'smart',
+        label: '智能列表',
+        subtitle: '',
+        state: session.browsing.sourceId === 'smart' && session.browsing.loading ? 'loading' : 'ready',
+        error: null,
+      });
+    }
+
+    const blocks = library.read().blocks;
+    for (const result of session.results) {
+      if (!ctx.currentSource(session, result.source)) continue;
+      if (isItemBlocked(blocks, session.targetId, result.source.key, result.source.detailId)) continue;
+      const isManual = result.source.engine === 'pan' || Boolean(result.manualId);
+      const siteName = text(result.source.name) || result.source.key;
+      const itemTitle = text(result.rawTitle || result.title);
+      const label = itemTitle && itemTitle !== session.keyword
+        ? `${siteName} · ${itemTitle}`
+        : siteName;
+      options.push({
+        id: result.id,
+        kind: isManual ? 'manual' : 'site',
+        label,
+        subtitle: text(result.remark),
+        state: result.state,
+        error: result.error ?? null,
+      });
+    }
+
+    const loadingMore = [...session.search.values()].some(st => st.loading);
+    const canLoadMore = ctx.browsing.canLoadMoreSources(session);
+    const selectedId = options.some(opt => opt.id === session.browsing.sourceId)
+      ? session.browsing.sourceId
+      : (options[0]?.id ?? null);
+
+    return {
+      selectedId,
+      placeholder: options.length === 0 && loadingMore ? '正在搜索站点源…' : '选择站点源',
+      disabled: options.length === 0 && !canLoadMore && !loadingMore,
+      canLoadMore,
+      loadingMore,
+      options,
+    };
+  }
+
+  function buildLineMenu(session) {
+    const selectedId = session.browsing.sourceId;
+    if (!selectedId || selectedId === 'smart' || selectedId.startsWith('meta:')) {
+      return { visible: false, selectedId: null, options: [] };
+    }
+    const result = session.results.find(r => r.id === selectedId);
+    const lines = result?.detail?.lines ?? [];
+    if (!lines.length) {
+      return { visible: false, selectedId: null, options: [] };
+    }
+    const activeLine = lines.find(l => String(l.id) === String(session.browsing.lineId)) ?? lines[0];
+    return {
+      visible: true,
+      selectedId: String(activeLine.id),
+      options: lines.map(line => ({
+        id: String(line.id),
+        label: text(line.label) || String(line.id),
+        provider: providerFamily(line.provider) ?? null,
+      })),
+    };
+  }
+
+  function buildPlayerState(session, work) {
+    const activeAttempt = session.current && !session.current.resourceReleased ? session.current
+      : (session.pending && !session.pending.resourceReleased ? session.pending : null);
+    const activeCand = activeAttempt?.candidate ?? null;
+    const activeQuality = normalizeQualityKey(activeCand?.quality);
+    const activePan = providerFamily(activeCand?.panProvider ?? activeCand?.provider) ?? '';
+
+    const qualitySet = new Set();
+    const panSet = new Set();
+    for (const cand of session.candidates.values()) {
+      if (cand.share && !cand.file) continue;
+      if (session.kind === 'tv' && session.playIntent.episode > 0) {
+        if (cand.episode !== session.playIntent.episode) continue;
+        if (session.playIntent.season > 0 && cand.season !== session.playIntent.season) continue;
+      }
+      const qk = normalizeQualityKey(cand.quality);
+      if (qk) qualitySet.add(qk);
+      const pf = providerFamily(cand.panProvider ?? cand.provider);
+      if (pf) panSet.add(pf);
+    }
+
+    const availableQualities = QUALITY_ORDER
+      .filter(key => qualitySet.has(key))
+      .map(key => ({
+        key,
+        label: formatQualityBadge(key),
+        active: session.constraint.action === 'quality'
+          ? normalizeQualityKey(session.constraint.quality) === key
+          : activeQuality === key,
+      }));
+
+    const availablePans = PAN_ORDER
+      .filter(provider => panSet.has(provider))
+      .map(provider => ({
+        provider,
+        label: panDisplayLabel(provider),
+        active: session.constraint.action === 'pan'
+          ? providerFamily(session.constraint.provider) === provider
+          : activePan === provider,
+      }));
+
+    const canPrevious = !session.noSources && Boolean(ctx.selection.adjacent(session, -1));
+    const canNext = !session.noSources && Boolean(ctx.selection.adjacent(session, 1));
+    const hasActiveMedia = Boolean(activeAttempt);
+
+    return {
+      shortVideo: session.shortVideo,
+      canPrevious,
+      canNext,
+      canSwitchSource: hasActiveMedia && !session.noSources,
+      canBlockSource: hasActiveMedia && !session.noSources,
+      activeSourceLabel: formatSourceLabel(activeCand),
+      activeEpisodeLabel: formatEpisodeLabel(session.playIntent, activeCand),
+      activeQuality,
+      activePan,
+      constraint: clone(session.constraint),
+      availableQualities,
+      availablePans,
+      preferences: clone(ctx.preferences()),
+      attempt: session.pending && !session.pending.resourceReleased ? {
+        id: session.pending.id,
+        candidateId: session.pending.candidate.id,
+        prepareOnly: session.pending.prepareOnly,
+        position: session.pending.position,
+        paused: session.pending.paused,
+        title: work.title,
+        season: session.pending.intent?.season ?? session.pending.candidate.season ?? null,
+        episode: session.pending.intent?.episode ?? session.pending.candidate.episode ?? null,
+        globalEpisode: session.pending.intent?.globalEpisode ?? session.pending.candidate.globalEpisode ?? null,
+        episodeLabel: formatEpisodeLabel(session.pending.intent, session.pending.candidate),
+        sourceLabel: formatSourceLabel(session.pending.candidate),
+        quality: formatQualityBadge(session.pending.candidate.quality),
+        provider: providerFamily(session.pending.candidate.panProvider ?? session.pending.candidate.provider) ?? null,
+      } : null,
+      current: session.current && !session.current.resourceReleased ? {
+        attemptId: session.current.id,
+        candidateId: session.current.candidate.id,
+        position: session.position,
+        duration: session.duration,
+        paused: session.paused,
+        title: work.title,
+        season: session.current.intent?.season ?? session.current.candidate.season ?? null,
+        episode: session.current.intent?.episode ?? session.current.candidate.episode ?? null,
+        globalEpisode: session.current.intent?.globalEpisode ?? session.current.candidate.globalEpisode ?? null,
+        episodeLabel: formatEpisodeLabel(session.current.intent, session.current.candidate),
+        sourceLabel: formatSourceLabel(session.current.candidate),
+        quality: formatQualityBadge(session.current.candidate.quality),
+        provider: providerFamily(session.current.candidate.panProvider ?? session.current.candidate.provider) ?? null,
+      } : null,
+      prefetch: [...session.prefetch.values()].map(val => ({
+        label: formatEpisodeLabel(val.intent, val.candidate),
+        state: val.state,
+        bytes: val.bytes ?? 0,
+        error: val.error ?? null,
+      })),
+    };
   }
 
   function build(session) {
     const retry = session.pending ?? session.current ?? session.lastFailed;
-    const retryMediaAttemptId = !session.stopped && !session.initializationError && retry &&
+    const retryMediaAttemptId = !session.stopped && !session.noSources && retry &&
       ctx.currentSource(session, retry.candidate.source) &&
-      (retry !== session.lastFailed || ['error', 'unavailable'].includes(session.stage)) ? retry.id : null;
-    const unverifiedHints = new Map();
-    if (session.browsing.sourceId === null && session.target.metadataProvider) {
-      for (const result of session.results) {
-        if (!result.hint || result.match?.value === true) continue;
-        if (!unverifiedHints.has(result.source.key)) unverifiedHints.set(result.source.key, new Set());
-        unverifiedHints.get(result.source.key).add(result.source.detailId);
-      }
-    }
-    const candidates = [...session.candidates.values()].filter(candidate => {
-      if (session.browsing.sourceId !== null || !session.target.metadataProvider) return true;
-      return candidate.eligible !== false && !unverifiedHints.get(candidate.source.key)?.has(candidate.detailId);
-    });
-    if (session.target.kind === 'movie') candidates.sort((a, b) => compareCandidates(a, b,
-      { preferences: { ...ctx.preferences(), ruleOrder: ['quality', 'pan', 'keyword'] } }));
-    const season = session.browsing.season ?? session.target.season;
-    const kind = session.metadataSources.find(row => row.id === session.metadataSourceId)?.kind;
-    let projected = browsingProjections.get(session.browsing);
-    if (!projected || projected.season !== season || projected.kind !== kind) {
-      const value = { ...session.browsing };
-      if (value.sourceId !== null) {
-        value.originalEpisodes = value.episodes;
-        if (kind === 'tv' && season !== undefined && value.episodes.some(row => row.season !== undefined))
-          value.episodes = value.episodes.filter(row => row.season === season);
-      }
-      projected = { season, kind, value };
-      browsingProjections.set(session.browsing, projected);
-    }
-    const browsing = clone(projected.value);
-    if (session.restoring) browsing.loading = true;
-    const result = session.results.find(row => row.id === browsing.sourceId);
-    if (result) {
-      const parent = catalog.source(session.target, result.source);
-      browsing.lines = browsing.lines.map(row => ({ ...row, ...catalog.line(parent, row) }));
-    }
-    const projectFile = row => {
-      if (row.playbackTarget) return row;
-      const candidate = session.candidates.get(row.candidateId);
-      if (candidate) return { ...row, ...catalog.candidate(session.target, candidate) };
-      const file = result?.detail?.lines.find(line => line.id === browsing.lineId)?.episodes.find(item => item.index === row.index);
-      return file ? { ...row, ...catalog.file(session.target, result.source, browsing.lineId, file) } : row;
-    };
-    browsing.episodes = browsing.episodes.map(projectFile);
-    if (browsing.originalEpisodes) browsing.originalEpisodes = browsing.originalEpisodes.map(projectFile);
-    const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
-    // Cold source reentry retains the TMDB entry's metadata before discovery
-    // supplies a selected metadata source.
-    const metadataTarget = !session.target.metadataProvider && session.entryTarget.metadataProvider === 'tmdb'
-      ? session.entryTarget : session.target;
-    const metadataProvider = selected?.provider ?? metadataTarget.metadataProvider;
-    const metadataKind = selected?.kind ?? metadataTarget.kind;
-    const metadataId = selected?.metadataId ?? metadataTarget.metadataId;
-    const metadataPath = `${metadataProvider === 'douban' ? '/rexxar/api/v2' : '/3'}/${metadataKind}/${metadataId}`;
-    const metadata = session.metadata && metadataProvider
-      ? catalog.metadata(metadataProvider, metadataPath, session.metadata, metadataTarget) : clone(session.metadata);
-    const episodes = ctx.metadata.visibleEpisodes(session).map(row => {
-      const entry = catalog.metadata(metadataProvider, `${metadataPath}/season/${row.season}`,
-        { name: session.target.title, season_number: row.season, episodes: [row] });
-      return entry.episodes?.[0] ?? row;
-    });
+      (retry !== session.lastFailed || ['error', 'unavailable'].includes(session.stage))
+      ? retry.id
+      : null;
+
+    const work = ctx.metadata.buildWorkInfo(session);
+    const sourceMenu = buildSourceMenu(session);
+    const lineMenu = buildLineMenu(session);
+    const directory = ctx.browsing.buildDirectorySnapshot(session);
+    const player = buildPlayerState(session, work);
+
     return {
-      sessionId: session.id, sequence: session.sequence, rulesRevision: session.rules.revision,
-      target: publicTarget(session.target),
-      entryTarget: publicTarget(session.entryTarget), entryResolution: session.entryResolution,
-      ...(session.entrySurface === undefined ? {} : { entrySurface: session.entrySurface }),
-      stage: session.stage, error: session.error, initializationError: session.initializationError,
-      retryMediaAttemptId,
+      sessionId: session.id,
+      sequence: session.sequence,
+      rulesRevision: session.rules.revision,
+      targetId: session.targetId,
+      keyword: session.keyword,
+      stage: session.stage,
+      error: session.error,
       errorStage: session.error && session.error === session.feedbackFailure?.code ? session.feedbackFailure.stage : null,
-      reportError: session.reportError, metadata, workInfo: ctx.metadata.workInfo(session),
-      metadataSources: session.metadataSources.map(row => {
-        const value = catalog.metadata(row.provider,
-          `${row.provider === 'douban' ? '/rexxar/api/v2' : '/3'}/${row.kind}/${row.metadataId}`,
-          { title: row.title, ...(row.seasons === undefined ? {} :
-            row.provider === 'douban' ? { doubanSeasons: row.seasons } : { seasons: row.seasons }) });
-        const seasons = value.doubanSeasons ?? value.seasons;
-        return {
-          ...fields(row, ['id', 'provider', 'metadataId', 'kind', 'title']),
-          ...fields(value, ['businessId', 'playbackTarget']), ...(seasons === undefined ? {} : { seasons }),
-        };
-      }),
-      metadataSourceId: session.metadataSourceId, metadataError: session.metadataError,
-      metadataCache: ctx.metadata.metadataCacheState(session),
-      metadataSupplement: ctx.metadata.metadataSupplement(session),
-      sources: session.results.map(item => ({
-        id: item.id, title: item.title,
-        source: publicSource(item.source), state: item.state, error: item.error,
-        ...catalog.source(session.target, item.source, item.title || session.target.title),
-      })),
-      search: [...session.search.values()].map(state => fields(state, ['sourceKey', 'page', 'completed', 'loading', 'error'])),
-      browsing, episodes, candidates: candidates.map(candidate => publicCandidate(candidate, session.target, catalog)),
-      attempt: session.pending && !session.pending.resourceReleased ? {
-        id: session.pending.id,
-        candidate: publicCandidate(session.pending.candidate, session.pending.target, catalog),
-        prepareOnly: session.pending.prepareOnly, position: session.pending.position, paused: session.pending.paused,
-      } : null,
-      current: session.current && !session.current.resourceReleased ? {
-        attemptId: session.current.id,
-        candidate: publicCandidate(session.current.candidate, session.current.target, catalog),
-        position: session.position, duration: session.duration, paused: session.paused,
-      } : null,
-      constraint: clone(session.constraint), searchComplete: searchComplete(session),
-      preferences: clone(ctx.preferences()), shortVideo: session.shortVideo, previewEpisodes: session.previewEpisodes,
-      prefetch: [...session.prefetch.values()].map(value => ({
-        target: publicTarget(value.target),
-        state: value.state, bytes: value.bytes ?? 0, error: value.error ?? null,
-      })),
+      reportError: session.reportError,
+      noSources: session.noSources,
+      retryMediaAttemptId,
+      work,
+      sourceMenu,
+      lineMenu,
+      directory,
+      player,
     };
   }
 

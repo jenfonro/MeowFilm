@@ -12,6 +12,7 @@ public sealed partial class FilmEpisodeDirectoryView : UserControl
 
     internal event Action<FilmEpisodeItem>? EpisodeActivated;
     internal event Action<FilmCandidateItem>? CandidateActivated;
+    internal event Action? LoadMoreRequested;
 
     internal FilmEpisodeDirectoryView(FilmPlaybackPage page, FilmEpisodeDirectory directory)
     {
@@ -43,5 +44,10 @@ public sealed partial class FilmEpisodeDirectoryView : UserControl
     {
         if (sender is Button { Tag: FilmCandidateItem candidate })
             CandidateActivated?.Invoke(candidate);
+    }
+
+    private void LoadMoreEpisodes_Click(object sender, RoutedEventArgs e)
+    {
+        LoadMoreRequested?.Invoke();
     }
 }

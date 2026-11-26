@@ -8,8 +8,7 @@ import MeowUI
 public final class FilmDetailViewController: PageViewController, UIScrollViewDelegate, FilmPlaybackPage {
     struct EpisodeDirectoryKey: Hashable {
         let source: String?
-        let line: FilmPlaybackIdentifier?
-        let metadata: String?
+        let line: String?
         let season: Int?
     }
     struct EpisodeMenuState: Equatable {
@@ -54,13 +53,14 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     let sourceButton = UIButton(type: .system)
     let lineButton = UIButton(type: .system)
     let searchButton = UIButton(type: .system)
+    let episodesMoreButton = UIButton(type: .system)
+    var episodesMoreContainer = UIView()
     let episodeState = UILabel()
     let playbackState = UILabel()
     let loadingIndicator = UIActivityIndicatorView(style: .medium)
     private let sourceRow = UIStackView()
     var displayedSnapshot: FilmPlaybackSnapshot?
-    var displayedAggregateProvider: FilmMetadataProvider?
-    var displayedPreviewEpisodes: Bool?
+    var displayedPreviewState: (preview: Bool, canToggle: Bool)?
     var displayedCanRetryMedia: Bool?
     var displayedEpisodeMenuState: EpisodeMenuState?
     var renderedEmptySourceMenus = false
@@ -72,6 +72,8 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private(set) lazy var episodeCollection = FilmEpisodeCollectionView(images: images, theme: theme)
     private(set) lazy var castRail = FilmCastRailView(images: images, theme: theme)
     private(set) lazy var similarRail = FilmRelatedRailView(images: images, theme: theme)
+    private var castHeadingContainer: UIView?
+    private var similarHeadingContainer: UIView?
     var selectedSeasonID: String?
     private var heroSpaceHeight: NSLayoutConstraint!
     var episodeDirectory: EpisodeDirectoryKey?
@@ -186,13 +188,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         configureSections()
         observe(library, whenVisible: true) { [weak self] in self?.renderFavorite() }
         if let model {
-            // Observe ONLY low-frequency presentation slices; framework coalesces while hidden behind fullscreen player.
             let presentationVisuals = Publishers.MergeMany([
                 model.presentationStore.$snapshot.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 model.presentationStore.$presentation.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 model.presentationStore.$opening.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-                model.presentationStore.$metadataViewProvider.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-                model.presentationStore.$selectedAggregateProvider.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 model.presentationStore.$nativeStatus.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             ]).eraseToAnyPublisher()
             observe(presentationVisuals, whenVisible: true) { [weak self] in
@@ -395,30 +394,51 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         content.addArrangedSubview(seasonTitle)
         content.setCustomSpacing(6, after: seasonTitle)
         content.addArrangedSubview(episodeCollection)
+        content.setCustomSpacing(12, after: episodeCollection)
+
+        var moreEpConfig = UIButton.Configuration.tinted()
+        moreEpConfig.title = "加载更多"
+        moreEpConfig.cornerStyle = .capsule
+        moreEpConfig.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
+            var attrs = $0; attrs.font = .systemFont(ofSize: 14); return attrs
+        }
+        episodesMoreButton.configuration = moreEpConfig
+        episodesMoreButton.accessibilityIdentifier = "film.detail.episodes-load-more"
+        episodesMoreButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        episodesMoreButton.addAction(UIAction { [weak model] _ in model?.loadMoreEpisodes() }, for: .touchUpInside)
+        let moreEpRow = UIStackView(arrangedSubviews: [episodesMoreButton])
+        moreEpRow.axis = .vertical; moreEpRow.alignment = .center
+        episodesMoreContainer = inset(moreEpRow)
+        episodesMoreContainer.isHidden = true
+        content.addArrangedSubview(episodesMoreContainer)
+        content.setCustomSpacing(26, after: episodesMoreContainer)
+
         episodeState.font = .systemFont(ofSize: 14)
         episodeState.textAlignment = .center; episodeState.numberOfLines = 0
         episodeState.accessibilityIdentifier = "film.detail.episodes-state"
         episodeState.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         var searchConfiguration = UIButton.Configuration.tinted()
-        searchConfiguration.title = "搜索剧集"
+        searchConfiguration.title = "加载更多"
         searchConfiguration.cornerStyle = .capsule
+        searchConfiguration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
+            var attrs = $0; attrs.font = .systemFont(ofSize: 14); return attrs
+        }
         searchButton.configuration = searchConfiguration
         searchButton.accessibilityIdentifier = "film.detail.search"
         searchButton.isHidden = true
         searchButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-        searchButton.addAction(UIAction { [weak model] _ in model?.send("search.more") }, for: .touchUpInside)
+        searchButton.addAction(UIAction { [weak model] _ in model?.loadMoreSources() }, for: .touchUpInside)
         let episodeStatus = UIStackView(arrangedSubviews: [episodeState, searchButton])
         episodeStatus.axis = .vertical; episodeStatus.alignment = .center; episodeStatus.spacing = 8
         episodeStateContainer = inset(episodeStatus)
         episodeStateContainer.isHidden = model == nil
         content.addArrangedSubview(episodeStateContainer)
         content.setCustomSpacing(26, after: episodeStateContainer)
-        content.setCustomSpacing(26, after: episodeCollection)
         renderSeason()
-        addHeading("演职人员")
+        castHeadingContainer = addHeading("演职人员")
         content.addArrangedSubview(castRail)
         content.setCustomSpacing(26, after: castRail)
-        addHeading("相似作品")
+        similarHeadingContainer = addHeading("相似作品")
         similarRail.onSelect = { [weak self] item in
             guard let self else { return }
             if let kind = item.kind, let onSelectRelatedItem {
@@ -437,7 +457,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private func configureSources() {
         sourceRow.axis = .horizontal; sourceRow.spacing = 8; sourceRow.distribution = .fillEqually
         sourceRow.isHidden = model == nil
-        for (button, title, id) in [(sourceButton, "站点源", "source"), (lineButton, "网盘源", "line")] {
+        for (button, title, id) in [(sourceButton, "站点源", "source"), (lineButton, "线路", "line")] {
             button.setTitle(title, for: .normal)
             button.accessibilityLabel = title
             button.titleLabel?.font = .systemFont(ofSize: 14)
@@ -490,7 +510,14 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
 
     func renderRelated() {
         let width = max(240, view.safeAreaLayoutGuide.layoutFrame.width)
+        let hasCast = !detail.cast.isEmpty
+        castHeadingContainer?.isHidden = !hasCast
+        castRail.isHidden = !hasCast
         castRail.apply(members: detail.cast, theme: theme)
+
+        let hasSimilar = !detail.similarItems.isEmpty
+        similarHeadingContainer?.isHidden = !hasSimilar
+        similarRail.isHidden = !hasSimilar
         similarRail.apply(items: detail.similarItems, viewportWidth: width, theme: theme)
     }
 
@@ -534,6 +561,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         episodeState.textColor = UIColor(theme.muted)
         summaryButton.setTitleColor(UIColor(theme.accent), for: .normal)
         searchButton.configuration?.baseForegroundColor = UIColor(theme.accent)
+        episodesMoreButton.configuration?.baseForegroundColor = UIColor(theme.accent)
         loadingIndicator.color = UIColor(theme.muted)
         for button in [sourceButton, lineButton] {
             button.setTitleColor(UIColor(theme.ink), for: .normal)
@@ -612,7 +640,8 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         }
     }
 
-    private func addHeading(_ title: String) {
+    @discardableResult
+    private func addHeading(_ title: String) -> UIView {
         let label = UILabel()
         label.text = title
         label.font = .systemFont(ofSize: 21)
@@ -621,6 +650,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         let container = inset(label)
         content.addArrangedSubview(container)
         content.setCustomSpacing(12, after: container)
+        return container
     }
 
     func inset(_ child: UIView, horizontal: CGFloat = 16) -> UIView {

@@ -33,8 +33,6 @@ public final class FilmPresentationStateStore: ObservableObject {
     @Published public internal(set) var opening = false
     @Published public internal(set) var observationError: FilmPlaybackError?
     @Published public internal(set) var actionError: FilmPlaybackError?
-    @Published public internal(set) var metadataViewProvider: FilmMetadataProvider = .tmdb
-    @Published internal var selectedAggregateProvider: FilmMetadataProvider?
     @Published public internal(set) var mediaStopError: FilmPlaybackError?
     @Published public internal(set) var sessionReleaseError: FilmPlaybackError?
     /// Coarse lifecycle playback status (never mutated by high-frequency progress or transient buffering ticks).

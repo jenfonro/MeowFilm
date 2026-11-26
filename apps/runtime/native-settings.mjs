@@ -3,7 +3,9 @@ import { performance } from 'node:perf_hooks';
 import { BridgeError } from '@meowfilm/runtime-bridge';
 import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
-export const APP_SETTINGS_BLOCKS = new Set(['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences']);
+export const APP_SETTINGS_BLOCKS = new Set([
+  'cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences', 'film.video-sources',
+]);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const revision = value => Number.isSafeInteger(value) && value >= 0;
 

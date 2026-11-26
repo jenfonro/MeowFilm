@@ -241,8 +241,8 @@ internal sealed partial class FilmDebugAdapter(FilmCapability capability) : IDeb
         {
             target = "film.data",
             kind = "sections",
-            loading = capability.ActiveData.State == FilmSectionState.Loading,
-            error = capability.ActiveData.State == FilmSectionState.Failed ? "LOAD_FAILED" : null,
+            loading = capability.ActiveData.State == CatalogSectionState.Loading,
+            error = capability.ActiveData.State == CatalogSectionState.Failed ? "LOAD_FAILED" : null,
             tabs,
             filters = Array.Empty<object>(),
             sections = new object[]
@@ -287,13 +287,14 @@ internal sealed partial class FilmDebugAdapter(FilmCapability capability) : IDeb
         return capability.Sections[0];
     }
 
-    private static FilmCardItem ResolveFilmCard(IReadOnlyList<FilmCardItem> items, JsonElement? parameters)
+    private static FilmCardItem ResolveFilmCard(IReadOnlyList<ICatalogCardDisplay> rawItems, JsonElement? parameters)
     {
-        if (items.Count == 0) throw DebugApiException.InvalidState("Target film section has no items.");
+        var items = rawItems.OfType<FilmCardItem>().ToArray();
+        if (items.Length == 0) throw DebugApiException.InvalidState("Target film section has no items.");
         if (DebugParams.GetInt(parameters, "itemIndex") is { } ii)
         {
-            if (ii < 0 || ii >= items.Count)
-                throw DebugApiException.InvalidArgument($"itemIndex {ii} out of range (0..{items.Count - 1}).");
+            if (ii < 0 || ii >= items.Length)
+                throw DebugApiException.InvalidArgument($"itemIndex {ii} out of range (0..{items.Length - 1}).");
             return items[ii];
         }
         if (DebugParams.GetString(parameters, "itemId") is { Length: > 0 } iid)

@@ -85,6 +85,7 @@ public enum MusicPublicBrowseRequest: Sendable, Hashable {
 
     let service: NativeMusicService
     @Published public internal(set) var request: MusicPublicBrowseRequest
+    @Published var previewResetRevision = 0
     var pageEpoch = UUID(), actionEpoch = UUID(), loadEpoch = UUID()
     var homeNeedsRefresh = true
     var playlistNeedsRefresh = true
@@ -95,8 +96,19 @@ public enum MusicPublicBrowseRequest: Sendable, Hashable {
     var canLoadDisplayPreviews: Bool { !isHome || (!homeNeedsRefresh && !isLoading) }
     /// Module-local identity for page-owned presentations, never queue authority.
     var actionPageID: UUID { pageEpoch }
+    static let discoveryCacheTTL: TimeInterval = 3600
     var closed = false, visible = false, displayVisible = false
     var contentDay: Date?
+    var contentLoadedAt: Date?
+    var isDiscoveryExpired: Bool {
+        guard loaded, let contentLoadedAt else { return false }
+        switch request {
+        case .discovery(.channel), .discovery(.featured), .discovery(.channels):
+            return Date().timeIntervalSince(contentLoadedAt) >= Self.discoveryCacheTTL
+        default:
+            return false
+        }
+    }
     var isDaily: Bool {
         switch request {
         case .discovery(.daily), .homeAction(.daily, _): return true
@@ -226,8 +238,15 @@ public enum MusicPublicBrowseRequest: Sendable, Hashable {
         invalidate(clear: true)
     }
 
+    func invalidateCachedDiscovery() {
+        retireArtwork()
+        if isHome { homeNeedsRefresh = true }
+        if loaded { contentLoadedAt = .distantPast }
+    }
+
     func invalidate(clear: Bool) {
         retireArtwork()
+        previewResetRevision &+= 1
         pageEpoch = UUID(); actionEpoch = UUID(); loadEpoch = UUID()
         homeTask?.work.cancel(); homeTask = nil
         task?.cancel(); task = nil; actionTask?.cancel(); actionTask = nil
@@ -248,6 +267,7 @@ public enum MusicPublicBrowseRequest: Sendable, Hashable {
             dailyStyle = nil
             contentIsCurrent = false
             contentDay = nil
+            contentLoadedAt = nil
             homeNeedsRefresh = true
             displayedHomeSource = nil
         }
@@ -257,6 +277,7 @@ public enum MusicPublicBrowseRequest: Sendable, Hashable {
     /// navigation/source/access change retires their page identity.
     func invalidateHomeRead() {
         retireArtwork()
+        previewResetRevision &+= 1
         loadEpoch = UUID()
         homeTask?.work.cancel(); homeTask = nil
         task?.cancel(); task = nil

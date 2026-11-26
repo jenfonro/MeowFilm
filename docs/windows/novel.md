@@ -2,29 +2,27 @@
 
 共同业务、共享纯规则与排版位置语义见[小说业务与阅读契约](../common/novel/reading.md)。本端使用 `source@0.3.0` / `source.runtime.v2` 的原生配置模式，RPC 与受信图片见[运行器书源仓库](../runtime/source-library.md)。
 
-`NovelCapability` 装配在影视之后，拥有 `novel-home`（首页）、`novel-categories`（分类）、`novel-shelf`（书架）、`novel-history`（阅读历史）、`novel-book`（书籍详情）与 `novel-reader`（原生阅读器）六个路由；统一搜索显式区分音乐、影视和小说会话。顶部媒体“小说”进入 `novel-home`，该首项不在下方侧栏重复展示；下方保留 `novel-categories`、`novel-shelf`、`novel-history` 导航入口。阅读请求 Shell 隐藏侧栏与播放器控件，保留音乐播放 owner；非沉浸页面继续提供原有 Header 契约。设置沿用壳的小说类别，编辑草稿只在当前窗口内存在，配置经独立 owner 保存。
+`NovelCapability` 装配在影视之后，拥有 `novel-home`（首页）、`novel-data`（隐藏栏目详情）、`novel-shelf`（书架）、`novel-history`（阅读历史）、`novel-book`（书籍详情）与 `novel-reader`（原生阅读器）六个路由，不保留独立分类页路由；统一搜索显式区分音乐、影视和小说会话。顶部媒体“小说”进入 `novel-home`，该首项不在下方侧栏重复展示；下方保留 `novel-shelf`、`novel-history` 导航入口。阅读请求 Shell 隐藏侧栏与播放器控件，保留音乐播放 owner；非沉浸页面继续提供原有 Header 契约。设置沿用壳的小说类别，编辑草稿只在当前窗口内存在，配置经独立 owner 保存。
 
-分类、书架与历史入口沿用 Shell 公共导航项模板。小说呈现体系按 `Novel/Presentation/{Reader,Views,Dialogs,Settings,Controls}/` 分层组织，全面采用编译期 `{x:Bind}` 的声明式 WinUI XAML 构建：`Views/NovelView.xaml` 负责内容视图切换与阅读器工具栏，`Views/NovelDiscoveryView.xaml` 与 `Controls/NovelDiscoveryChannelBar.xaml`（配套 `Controls/NovelDiscoveryTheme.xaml`）承载首页与分类，`Views/NovelShelfView.xaml` 与 `Views/NovelHistoryView.xaml` 分别承载独立书架与阅读历史，`Views/NovelBookView.xaml`、`Views/NovelSidebarView.xaml`、`Settings/NovelSettingsView.xaml` 以及 `Dialogs/` 下各类编辑／导入／目录／换源／分组浮层均以独立 `.xaml` 视图声明；普通文字统一使用系统常规字体，层级只通过字号区分。封面与正文图片由独立 `NovelImage`（`Controls/NovelImage.cs` + `Reader/NovelImagePixels.cs`）承载，复用 `DesktopViewport` 首次视口准入并实现 `IDebugImageVisual`。
+书架与历史入口沿用 Shell 公共导航项模板。小说呈现体系按 `Novel/Presentation/{Reader,Views,Dialogs,Settings,Controls}/` 与 `NovelTheme.xaml` 分层组织，全面采用编译期 `{x:Bind}` 的声明式 WinUI XAML 构建：`Views/NovelView.xaml` 负责内容视图切换与阅读器工具栏，首页与栏目详情直接复用 `Shared/Catalog/CatalogBrowseView.xaml`、`Shared/Catalog/CatalogShelf.xaml` 与 `FilmCard`（小说条目经受信 `NovelImage` 加载封面并隐藏视频播放角标），`Views/NovelShelfView.xaml` 与 `Views/NovelHistoryView.xaml` 分别承载独立书架与阅读历史，`Views/NovelBookView.xaml`、`Views/NovelSidebarView.xaml`、`Settings/NovelSettingsView.xaml` 以及 `Dialogs/` 下各类编辑／导入／目录／换源／分组浮层均以独立 `.xaml` 视图声明；普通文字统一使用系统常规字体，层级只通过字号区分。封面与正文图片由独立 `NovelImage`（`Controls/NovelImage.xaml.cs` + `Reader/NovelImagePixels.cs`）承载，复用 `DesktopViewport` 首次视口准入并实现 `IDebugImageVisual`。
 
 发现、书架、历史、书籍、设置、编辑器及阅读可视面均位于同一 Shell WinUI 呈现树内，弹窗统一通过 `DesktopModalHost`（`ShowDialogAsync`／`ShowSurfaceAsync`，支持 `stack: true` 叠层确认）居中呈现，不保留 WPF 可视岛或独立窗口追位。阅读核心仍保留 Win2D／DirectWrite 正文排版与绘制（`NovelReadingSurface`、`NovelPageRaster`、`CanvasTextLayout`、`CanvasRenderTarget`、`CanvasImageSource`），字体枚举使用 `CanvasTextFormat`，颜色使用 WinUI 类型转换，图片使用 SkiaSharp 解码；小说数据、规则或存储 owner 不变。
 
-## 首页与分类
+## 首页与栏目详情
 
-首页与分类共享一个活动书源、源返回入口及已加载书籍。首次准备来源投影后，默认选择排序中首个启用、允许发现并同时声明 `exploreKinds`／`explore` 的来源；后续由页面右上角或侧栏显式切换，不跨源聚合，不因失败或来源停用而静默换源。页面只展示运行器返回的书名、作者、简介、封面、`kind`／`wordCount` 等字段及真实来源；没有统一评分、完结筛选、热度排序或综合榜的推断实现。
+首页与栏目详情页（`novel-data`）共享一个活动书源及该源 `exploreKinds` 构建的栏目集合。首次准备来源投影后，默认选择排序中首个启用、允许发现并同时声明 `exploreKinds`／`explore` 的来源；后续由侧栏显式切换，不跨源聚合，不因失败或来源停用而静默换源。页面只展示运行器返回的真实字段及来源，没有统一评分、完结筛选、热度排序或榜单正则推断。
 
-`exploreKinds` 的返回顺序保持不变，空 URL 作为分组标题而非可请求入口。分类页保留全部频道入口（包括榜单），只展示当前频道的一行筛选；顶栏频道、书源与刷新同处一行，不再创建重复“分类”标题、结果标题或“X 本作品”。频道导航复用公共 `MeowFilm.SettingsArea`，固定一行，仅溢出时显示尾部箭头；全部频道在栏下悬浮换行展开，不占布局、不挤压书源、刷新或结果，选择、页面隐藏或窗口缩放时收起。筛选与电影栏目详情共用 `FilterChrome.xaml` 的紧凑大胶囊／选中小胶囊：外层使用近白的动态主题表面 `FloatingSurface`，选中项使用淡 `AccentSoft` 背景及 `AccentText` 主题强调文字，高对比沿用系统表面与选中颜色。
-
-首页只请求和展示榜单入口；识别依据为书源分组／入口名称的“榜”“排行”或明确 ranking 标签、URL 路径中的榜单段，不用域名、查询参数或 fragment 推断。无榜单显示空状态，不回退到普通分类。返回首页时，分类页选中的非榜单入口改选真实榜单，再加载对应数据。`explore` 使用当前入口 URL 和连续页码，按来源书籍身份去重并保留返回顺序；“更多”保留已加载页，无新增书籍时结束分页。首页保留选读与本地继续阅读、常规宽度六列封面；分类保留三列图文条目，窄窗减少列数并纵向排列选读／继续阅读。选读是当前结果首本，不推断跨源推荐或排行；无阅读历史时不生成继续阅读书籍。开始阅读、打开详情、收藏与接着读沿用现有规则、Library 和书籍会话；发现页收藏不会切换当前阅读会话，同书跨源的加入操作不会反向取消已存在收藏。
+`exploreKinds` 的返回顺序保持不变：空 URL 项作为分组标题（形成一个多子项栏目，首项作为首页横向架默认预览入口），未归属分组标题的非空 URL 项各自形成独立单入口栏目，不含有效 URL 项的空分组省略。首页复用影视首页同一套 `CatalogBrowseView` 与横向 `CatalogShelf`（`Shelf` + `FilmCard`），首屏初始批次与滚动进入视口按需准入栏目并限制并发请求数；栏目标题带右侧 chevron，点击进入 `novel-data`。栏目详情页复用影视数据页同一套响应式 `AdaptiveCardPanel` 海报网格、顶部刷新与胶囊“加载更多”：当栏目包含多个子分类选项时展示“分类”筛选行（`FilterChrome.xaml` 样式），单入口栏目自动隐藏筛选区；默认首项直接复用首页已加载的第 1 页书籍而无需重复请求，切换子分类取消在途请求、清空并从第 1 页重新加载，“加载更多”按连续页码请求并按 `SourceIdentity` 去重，无新增书籍时结束分页。
 
 分类逐项消费标题与 URL，书籍逐项消费书名与非空 `bookUrl`；坏项不影响同批健康项，原始附加字段仍供页面读取。分类或书籍列表的坏根及非空全坏响应报告失败，不提交候选分类、书籍或页码；合法空数组与仅含分组标题的分类保留空状态，更多失败重试原页。
 
-`NovelDiscoveryState` 区分加载、正在取消、成功、空、失败、已取消和不可用。同源同分类刷新暂存入口与首批书籍，仅成功后整体替换；失败／取消保留已展示成功数据、入口、已提交页码及“更多”状态。切源／切分类立即清除旧目标书籍；更多失败保留前页并重试同一页。失败使用统一通知及现有可重试浮层，不把错误说明永久插入页面。取消等待实际来源调用结束才退出加载状态；新代次、来源 revision 或可用性变化隔离旧结果。来源失效时保留所选身份、清除旧书籍与入口；可用来源的新 revision 通过刷新或恢复发现路由重载，停用／删除的来源保持不可用，直到用户显式选择其他来源。发现页在同一路由内保留页面、书源与同组筛选控件；loading、书架变化及分页仅更新对应状态／成员，焦点随原控件自然保留。书卡按 `SourceIdentity` 协调，书源 revision、书籍或封面 URL 变化时才替换对应图片；同目标刷新批次在最终发布时增量呈现，不暴露清空再添加的中间状态。书籍详情保留 session 的页面和封面，只更新元数据、书架状态与目录差异。统一搜索小说结果采用相同成员／图片身份边界，状态回执不清空书卡。
+`NovelDiscoveryState` 与 `CatalogSectionState` 区分待加载、加载中、成功、空、失败、已取消和不可用。切源或切换子分类立即清除对应旧结果；分页失败保留已加载页并由同一按钮重试。离开路由或页面隐藏取消未完成请求，返回时按准入状态恢复未完成工作；新代次、来源 revision 或可用性变化隔离旧结果。来源失效时保留所选身份、清除旧栏目；可用来源的新 revision 通过刷新或恢复路由重载，停用／删除的来源保持不可用，直到用户显式选择其他来源。书卡按 `SourceIdentity` 增量协调，书源 revision、书籍或封面 URL 变化时才替换对应图片；书籍详情保留 session 的页面和封面，只更新元数据、书架状态与目录差异。统一搜索小说结果采用相同成员／图片身份边界，状态回执不清空书卡。
 
 `NovelCapability` 实现 `IDesktopSidebarSource`，保留同一个 `SidebarView`，只投影真实已启用书源；当前源可切换，无发现能力的行不可请求。`Sources.Changed` 更新来源投影，不形成第二书源库。管理图标发出 `SettingsRequested`，Shell 仅为当前 owner 打开既有设置，不增加设置路由或重挂 SettingsView。侧栏导入及空页导入复用现有网络／内容预览和多选确认；HTTP(S) 地址使用 URL 预览，确认后只导入选择定义，不重复下载，也不强制改写源的 enabled 标记。
 
 来源未返回封面地址时，发现页保留封面比例并显示中性“暂无封面”状态，不生成或补配其他书籍图片；该状态沿用系统高对比颜色。
 
-操作通知按事件通过公共 `NoticeOutlet.Post` 发布，页面状态重绘不重发保存或导入结果；保存回执与运行生效失败是独立通知。绿色书源点只表示启用，不证明实际发现取数通过。`WEB_INTERACTION_REQUIRED` 保持失败状态，在发现重试浮层显示“书源需要网页验证”，不呈现为“暂无书籍”。纯脚本响应与真实空榜的运行器错误边界见[Reader 来源](../runtime/reader-source-runtime.md#兼容边界)。
+操作通知按事件通过公共 `NoticeOutlet.Post` 发布，页面状态重绘不重发保存或导入结果；保存回执与运行生效失败是独立通知。绿色书源点只表示启用，不证明实际发现取数通过。`WEB_INTERACTION_REQUIRED` 保持失败状态，在页面失败状态与错误通知中显示“书源需要网页验证”并提供重试，不呈现为“暂无书籍”。纯脚本响应与真实空榜的运行器错误边界见[Reader 来源](../runtime/reader-source-runtime.md#兼容边界)。
 
 ## 书源配置与设置保存
 
@@ -53,7 +51,7 @@
 
 净化规则的名称、分组、执行字段、顺序、禁用标记和预算按 `NovelRule` 类型读取，坏的持久字段报告存储损坏。规则扩展不参与管理字段校验，仍随规则保留；正则语法及实际执行预算由 Node 消费，不在原生保存时预执行。无关保存和等值规则重存保持规则快照及精确扩展，坏的启用正则在运行器执行时失败。保留会话按规则输入快照判断是否需要重新处理。
 
-运行器源列表是当前原生配置的内存投影；Cookie、源变量由运行器持有。本地收藏、置顶、历史与锚点的数据 API 保留，不依赖运行器就绪；首页继续阅读与详情加／移书架仍消费原有数据。接着读按最新历史条目的准确 `BookId` 恢复 entry／会话及锚点，不重新按来源或规则身份选择 canonical 条目；相同来源身份或规则身份的已有条目仍可分别保留。打开书籍、显示继续阅读及恢复正文不新增或改写 ReadAt／Anchor，实际阅读进度仍由现有保存路径提交。封面／书籍／正文图片网络调用首次准备来源投影，不要求先进入首页或设置，也不会以旧书籍恢复已停用／删除的来源。章节模型以开放 JSON 保留目录字段和规则上下文，正文／购章返回的变量更新与原字段一并进入后续调用。
+运行器源列表是当前原生配置的内存投影；Cookie、源变量由运行器持有。本地收藏、置顶、历史与锚点的数据 API 保留，不依赖运行器就绪；书架／历史继续阅读与详情加／移书架仍消费原有数据。继续阅读按条目准确 `BookId` 恢复 entry／会话及锚点，不重新按来源或规则身份选择 canonical 条目；相同来源身份或规则身份的已有条目仍可分别保留。打开书籍、书架／历史列表展示及恢复正文不新增或改写 ReadAt／Anchor，实际阅读进度仍由现有保存路径提交。封面／书籍／正文图片网络调用首次准备来源投影，不要求先进入首页或设置，也不会以旧书籍恢复已停用／删除的来源。章节模型以开放 JSON 保留目录字段和规则上下文，正文／购章返回的变量更新与原字段一并进入后续调用。
 
 配置列表读取当前关系字段与开放 definition 节点，冷读不执行来源规则，也不提前声称来源动作可用。缺失或损坏的必要关系结构报告存储损坏。显式导入／编辑或运行器实际应用成功后，才从定义取得 `weight`／`lastUpdateTime`／`respondTime`，缺失或不可消费时分别使用 0／0／180000；`hasExplore` 按当前协议与实际发现规则推导，不把原始同名管理字段当作执行事实。导入和保存回执直接采用新 revision；实际搜索／发现选择先等待当前配置应用，由运行器返回真实 actions，管理操作仍不等待运行器，退休仍按真实来源状态执行。运行器 apply 只消费返回的来源身份、revision、actions 与 errorCode；未消费的展示／管理材料不拒绝本地配置，也不替代运行器的执行许可。
 
@@ -73,7 +71,7 @@
 
 `NovelReadingSurface` 是 WinUI `Grid`，由 Win2D／DirectWrite `CanvasTextLayout` 完成段落与 UTF-16 排版；`NovelPageRaster` 将当前页绘制到复用的 `CanvasRenderTarget`，再写入普通树内 `Image` 的 `CanvasImageSource`，翻页快照持有独立表面。排版只在正文或布局输入变化时重算，绘制请求在 UI DispatcherQueue 合并，当前尺寸的 GPU 目标复用；DPI 取 `XamlRoot.RasterizationScale`，尺寸、主题和系统高对比变化触发重排。覆盖与平移动画使用同树图像的 WinUI transform／storyboard，不移动其他窗口。提供无动画分页与上下滚动，保留指针、滚轮、键盘和自动阅读交互。页号不持久化；字号、窗口尺寸和图片尺寸变化重新从正文锚点定位。`ratio` 采用正文 UTF-16 长度、图片固定权重组成的逻辑进度，与 `blockIndex` 配合恢复图片内相对位置，不使用全章布局像素推算长图切片。只保留当前章节显示内容，正文图片首次进入视口才读取；已准入图片在本章内保留请求、像素与运行器引用，滚出再滚回不重载。仅当前可见图片在所需解码宽度增大时重解码，换章节／卸载／来源退休与关闭释放；暂时隐藏保留成功像素并取消未完成读取。正文按显示宽度解码，不套用封面 512 像素缩略规则。小说与元数据受信二进制图片统一使用 `IRuntimeImageClient.ReadImageAsync(reference, cancellationToken)` 完整读取，已删除带 `maximumBytes` 的重载；公共HTTP和受信图片读取均不套用编码缓存的单项4MiB配额。原生 byte[] / MemoryStream 表示边界由类型本身处理，不用最大值模拟无限额。自动阅读在手动交互、离页、窗口失焦及末尾暂停。
 
-布局完成通过 `LayoutCompleted` 刷新页码与章内比例标签，不发送 `PositionChanged` 或启动进度保存计时器。首页、分类及搜索封面同样按实际裁剪祖先和滚动视口取得需求；首屏外不获取，首次进入后由当前挂载页面保留请求、像素和来源引用，滚出再滚回不重取。真正卸载或来源退休取消并等待实际排空，迟到请求不覆盖新封面。已退役来源不恢复封面准入；替代代次使用新 owner 和页面，隐藏／卸载不新取图。真实获取失败不因普通布局通知自动重试。
+布局完成通过 `LayoutCompleted` 刷新页码与章内比例标签，不发送 `PositionChanged` 或启动进度保存计时器。首页、栏目详情及搜索封面同样按实际裁剪祖先和滚动视口取得需求；首屏外不获取，首次进入后由当前挂载页面保留请求、像素和来源引用，滚出再滚回不重取。真正卸载或来源退休取消并等待实际排空，迟到请求不覆盖新封面。已退役来源不恢复封面准入；替代代次使用新 owner 和页面，隐藏／卸载不新取图。真实获取失败不因普通布局通知自动重试。
 
 受控 Web 使用锁定版本的 WebView2 SDK 和系统已安装的兼容 Browser Runtime，不静默安装或分发 Browser Runtime。仅承载当前来源的登录／验证码／动态页面，每次交互使用独立临时 profile，禁止弹出其他应用、下载及额外设备权限。动态 request／rule／webview 在加载和异步脚本完成后自动回传；登录／验证码／browser 保留用户确认。Legado browser 的 value 为带最终 URL、状态和正文的响应对象，由共同 helper 适配成 StrResponse；QYSG 不推测额外返回格式。以运行器 `request.cookies` 为权威种子，普通请求头剔除 Cookie；注入后取得 SDK 实际全量 baseline，完成时以全量 Cookie diff 生成逐 origin 的 `cookieChanges`（含删除），保留 hostOnly、Domain、Path、Secure、HttpOnly、SameSite 与到期信息。结果使用共同 `value/url/headers` 封套；不混入原始响应 Set-Cookie 以免使已删除 Cookie 复活。取消／退休不提交 Cookie；返回前等待 Browser 实际退出并删除临时 profile。购章须先确认具体书籍与章节，随后才调用源声明的 payAction，取消不发购章 RPC。
 

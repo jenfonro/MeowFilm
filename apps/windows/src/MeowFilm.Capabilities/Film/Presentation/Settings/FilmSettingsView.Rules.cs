@@ -15,7 +15,7 @@ public partial class FilmSettingsView
     public bool RulesIdle => !rulesBusy;
     public bool RulesFailed => rulesFailed;
     public bool CanEditRules => rulesLoaded && !rulesBusy;
-    private FilmSettingsRuleEditor[] RuleEditors => ruleEditors ??= [EpisodeCleanEditor, EpisodeEditor, MovieEditor, SearchEditor];
+    private FilmSettingsRuleEditor[] RuleEditors => ruleEditors ??= [EpisodeCleanEditor, EpisodeEditor, MovieEditor, SearchEditor, SeasonEditor];
 
     private void RulesStateChanged()
     {
@@ -75,7 +75,8 @@ public partial class FilmSettingsView
         EpisodeCleanRegexRules = EpisodeCleanEditor.Rows.Select(row => row.Pattern).ToArray(),
         EpisodeRules = EpisodeEditor.Rows.Select(Match).ToArray(),
         MovieRules = MovieEditor.Rows.Select(Match).ToArray(),
-        AggregateRegexRules = SearchEditor.Rows.Select(row => row.Pattern).ToArray()
+        AggregateRegexRules = SearchEditor.Rows.Select(row => row.Pattern).ToArray(),
+        SeasonRules = SeasonEditor.Rows.Select(Match).ToArray()
     };
     private static FilmMatchRule Match(FilmSettingsRuleRow row) => new(row.Pattern, row.Replace, row.Flags);
 
@@ -88,6 +89,7 @@ public partial class FilmSettingsView
             SetRows(EpisodeEditor, snapshot.EpisodeRules);
             SetRows(MovieEditor, snapshot.MovieRules);
             SetRows(SearchEditor, snapshot.AggregateRegexRules.Select(pattern => new FilmMatchRule(pattern)));
+            SetRows(SeasonEditor, snapshot.SeasonRules);
         }
         finally { replacingRules = false; }
         InvalidateRuleResults();
@@ -165,6 +167,7 @@ public partial class FilmSettingsView
         {
             FilmRuleSection.Episode => new FilmRuleRequest(target, EpisodeInput.Text),
             FilmRuleSection.Movie => new FilmRuleRequest(target, MovieInput.Text),
+            FilmRuleSection.Season => new FilmRuleRequest(target, SeasonInput.Text, SeasonQuery.Text),
             _ => new FilmRuleRequest(target, SearchInput.Text, SearchQuery.Text)
         };
         var draft = ReadDraft();
@@ -178,10 +181,17 @@ public partial class FilmSettingsView
     public ObservableCollection<FilmRuleResultLine> EpisodeResultLines { get; } = [];
     public ObservableCollection<FilmRuleResultLine> MovieResultLines { get; } = [];
     public ObservableCollection<FilmRuleResultLine> SearchResultLines { get; } = [];
+    public ObservableCollection<FilmRuleResultLine> SeasonResultLines { get; } = [];
 
     private void ShowRuleResult(FilmRuleResult result)
     {
-        var lines = result.Section switch { FilmRuleSection.Episode => EpisodeResultLines, FilmRuleSection.Movie => MovieResultLines, _ => SearchResultLines };
+        var lines = result.Section switch
+        {
+            FilmRuleSection.Episode => EpisodeResultLines,
+            FilmRuleSection.Movie => MovieResultLines,
+            FilmRuleSection.Season => SeasonResultLines,
+            _ => SearchResultLines
+        };
         lines.Clear();
         foreach (var line in FilmRuleEditorLogic.BuildResultLines(result)) lines.Add(line);
         var editor = result.Section switch { FilmRuleSection.Episode => EpisodeCleanEditor, FilmRuleSection.Search => SearchEditor, _ => null };
@@ -196,6 +206,7 @@ public partial class FilmSettingsView
         if (EpisodeResultLines.Count > 0) EpisodeResultLines.Clear();
         if (MovieResultLines.Count > 0) MovieResultLines.Clear();
         if (SearchResultLines.Count > 0) SearchResultLines.Clear();
+        if (SeasonResultLines.Count > 0) SeasonResultLines.Clear();
         foreach (var editor in RuleEditors)
             foreach (var row in editor.Rows) row.Preview = "";
     }

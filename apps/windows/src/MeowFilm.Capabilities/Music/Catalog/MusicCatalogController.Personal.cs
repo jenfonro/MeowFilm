@@ -534,7 +534,7 @@ public sealed partial class MusicCatalogController
     private CancellationTokenSource? vipReadCancellation;
     private Task vipWork = Task.CompletedTask;
     private long vipEpoch;
-    private bool vipViewVisible, vipSigning, vipInvalidated = true;
+    private bool vipSigning, vipInvalidated = true;
 
     public MusicVipAccountSummary? VipAccount => IsVipChannel ? vipSnapshot?.Account : null;
     public MusicVipSignCardData? VipSign => IsVipChannel ? vipSnapshot?.Sign : null;
@@ -584,7 +584,7 @@ public sealed partial class MusicCatalogController
 
     internal void PrepareVipShutdown()
     {
-        vipViewVisible = false;
+        catalogViewVisible = false;
         vipEpoch++;
         vipReadCancellation?.Cancel();
     }
@@ -593,7 +593,7 @@ public sealed partial class MusicCatalogController
 
     internal Task UpdateVipPageAsync(bool viewVisible)
     {
-        vipViewVisible = viewVisible;
+        catalogViewVisible = viewVisible;
         if (!viewVisible)
         {
             vipEpoch++;
@@ -605,7 +605,7 @@ public sealed partial class MusicCatalogController
 
     private Task SyncVipSurfaceAsync()
     {
-        if (stopping || disposed || !vipViewVisible || !IsVipChannel)
+        if (stopping || disposed || !catalogViewVisible || !IsVipChannel)
         {
             if (!IsVipChannel && vipSnapshot is not null) ClearVipDisplay();
             return Task.CompletedTask;
@@ -623,7 +623,7 @@ public sealed partial class MusicCatalogController
         try
         {
             var snapshot = await application.VipPage.ReadVipPageAsync(request.Token);
-            if (epoch == vipEpoch && vipViewVisible && IsVipChannel && !stopping && !disposed)
+            if (epoch == vipEpoch && catalogViewVisible && IsVipChannel && !stopping && !disposed)
             {
                 vipSnapshot = snapshot;
                 VipPageBindings();

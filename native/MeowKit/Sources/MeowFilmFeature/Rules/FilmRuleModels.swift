@@ -1,11 +1,11 @@
 import Foundation
 
 public enum FilmRuleSection: String, Codable, CaseIterable, Sendable {
-    case episode, movie, search
+    case episode, movie, search, season
 }
 
 public enum FilmRuleGroup: String, Codable, CaseIterable, Sendable {
-    case episodeClean, episode, movie, search
+    case episodeClean, episode, movie, search, season
 
     public var isClean: Bool { self == .episodeClean || self == .search }
     public var section: FilmRuleSection {
@@ -13,6 +13,7 @@ public enum FilmRuleGroup: String, Codable, CaseIterable, Sendable {
         case .episodeClean, .episode: return .episode
         case .movie: return .movie
         case .search: return .search
+        case .season: return .season
         }
     }
     public var title: String {
@@ -21,6 +22,7 @@ public enum FilmRuleGroup: String, Codable, CaseIterable, Sendable {
         case .episode: return "集数匹配规则"
         case .movie: return "电影匹配规则"
         case .search: return "搜索净化设置"
+        case .season: return "原始标题季度提取"
         }
     }
 }
@@ -51,13 +53,16 @@ public struct FilmRuleSet: Codable, Equatable, Sendable {
     public var episodeRules: [FilmMatchRule]
     public var movieRules: [FilmMatchRule]
     public var aggregateRegexRules: [String]
+    public var seasonRules: [FilmMatchRule]
 
     public init(episodeCleanRegexRules: [String] = [], episodeRules: [FilmMatchRule] = [],
-                movieRules: [FilmMatchRule] = [], aggregateRegexRules: [String] = []) {
+                movieRules: [FilmMatchRule] = [], aggregateRegexRules: [String] = [],
+                seasonRules: [FilmMatchRule] = []) {
         self.episodeCleanRegexRules = episodeCleanRegexRules
         self.episodeRules = episodeRules
         self.movieRules = movieRules
         self.aggregateRegexRules = aggregateRegexRules
+        self.seasonRules = seasonRules
     }
 }
 
@@ -68,6 +73,7 @@ extension FilmRuleSet {
         case .episode: return episodeRules
         case .movie: return movieRules
         case .search: return aggregateRegexRules.map { .init(pattern: $0) }
+        case .season: return seasonRules
         }
     }
 
@@ -77,6 +83,7 @@ extension FilmRuleSet {
         case .episode: episodeRules = rules
         case .movie: movieRules = rules
         case .search: aggregateRegexRules = rules.map(\.pattern)
+        case .season: seasonRules = rules
         }
     }
 }
@@ -114,6 +121,7 @@ public struct FilmRuleResult: Codable, Equatable, Sendable {
     public let rewrittenText: String?
     public let groupKey: String
     public let trailingDigits: String
+    public let season: Int?
     public let errors: [FilmRuleError]
     public let previews: [String]
 }

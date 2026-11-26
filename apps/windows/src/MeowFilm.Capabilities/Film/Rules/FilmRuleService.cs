@@ -71,6 +71,7 @@ public sealed class FilmRuleService : IAsyncDisposable
             {
                 FilmRuleSection.Episode => owned with { EpisodeCleanRegexRules = defaults.EpisodeCleanRegexRules, EpisodeRules = defaults.EpisodeRules },
                 FilmRuleSection.Movie => owned with { MovieRules = defaults.MovieRules },
+                FilmRuleSection.Season => owned with { SeasonRules = defaults.SeasonRules },
                 _ => owned with { AggregateRegexRules = defaults.AggregateRegexRules }
             };
             return PersistAsync(next, token);
@@ -176,7 +177,8 @@ public sealed class FilmRuleService : IAsyncDisposable
             EpisodeCleanRegexRules = Clean(rules.EpisodeCleanRegexRules),
             EpisodeRules = Matches(rules.EpisodeRules),
             MovieRules = Matches(rules.MovieRules),
-            AggregateRegexRules = Clean(rules.AggregateRegexRules)
+            AggregateRegexRules = Clean(rules.AggregateRegexRules),
+            SeasonRules = Matches(rules.SeasonRules)
         };
     }
 
@@ -184,7 +186,8 @@ public sealed class FilmRuleService : IAsyncDisposable
         left.EpisodeCleanRegexRules.SequenceEqual(right.EpisodeCleanRegexRules, StringComparer.Ordinal) &&
         left.EpisodeRules.SequenceEqual(right.EpisodeRules) &&
         left.MovieRules.SequenceEqual(right.MovieRules) &&
-        left.AggregateRegexRules.SequenceEqual(right.AggregateRegexRules, StringComparer.Ordinal);
+        left.AggregateRegexRules.SequenceEqual(right.AggregateRegexRules, StringComparer.Ordinal) &&
+        left.SeasonRules.SequenceEqual(right.SeasonRules);
 
     private static FilmRuleSet Defaults(string name)
     {
@@ -206,7 +209,7 @@ public sealed class FilmRuleService : IAsyncDisposable
             return true;
         }
         if (rules.EpisodeCleanRegexRules.Concat(rules.AggregateRegexRules).Any(value => !Valid(value)) ||
-            rules.EpisodeRules.Concat(rules.MovieRules).Any(row => !Valid(row.Pattern) || !Valid(row.Replace) || !Valid(row.Flags)))
+            rules.EpisodeRules.Concat(rules.MovieRules).Concat(rules.SeasonRules).Any(row => !Valid(row.Pattern) || !Valid(row.Replace) || !Valid(row.Flags)))
             throw new FilmPlaybackException("INVALID_RULES");
     }
 
@@ -221,7 +224,8 @@ public sealed class FilmRuleService : IAsyncDisposable
             EpisodeCleanRegexRules = Array.AsReadOnly(rules.EpisodeCleanRegexRules.ToArray()),
             EpisodeRules = Array.AsReadOnly(rules.EpisodeRules.ToArray()),
             MovieRules = Array.AsReadOnly(rules.MovieRules.ToArray()),
-            AggregateRegexRules = Array.AsReadOnly(rules.AggregateRegexRules.ToArray())
+            AggregateRegexRules = Array.AsReadOnly(rules.AggregateRegexRules.ToArray()),
+            SeasonRules = Array.AsReadOnly(rules.SeasonRules.ToArray())
         };
     }
 
@@ -230,6 +234,7 @@ public sealed class FilmRuleService : IAsyncDisposable
         FilmRuleSection.Episode => "episode",
         FilmRuleSection.Movie => "movie",
         FilmRuleSection.Search => "search",
+        FilmRuleSection.Season => "season",
         _ => throw new ArgumentOutOfRangeException(nameof(section))
     };
 

@@ -470,46 +470,6 @@ struct MusicQueueSimilarState: Equatable, Sendable {
     var batches: [MusicQueueSimilarBatchRecord]
 }
 
-struct MusicQueueFMState: Equatable, Sendable {
-    var provider: String
-    var mode: String?
-    var submode: String
-    var entry: String?
-    var ruleID: String?
-    var tabTagID: String?
-    var sourceName: String
-    var continueEnabled: Bool
-
-    static func fromAction(_ action: MusicHomeAction, continueEnabled: Bool) throws -> MusicQueueFMState {
-        switch action {
-        case .fm(let mode, let submode, let entry):
-            return MusicQueueFMState(provider: "", mode: mode.rawValue, submode: submode, entry: entry?.rawValue,
-                                     ruleID: nil, tabTagID: nil, sourceName: "", continueEnabled: continueEnabled)
-        case .ruleFM(let ruleID, let tabTagID, let sourceName):
-            return MusicQueueFMState(provider: "rule", mode: nil, submode: "", entry: nil,
-                                     ruleID: ruleID, tabTagID: tabTagID, sourceName: sourceName, continueEnabled: continueEnabled)
-        default:
-            throw MusicServiceError.invalidRequest
-        }
-    }
-
-    func toAction() throws -> MusicHomeAction {
-        if provider == "rule" {
-            guard let ruleID, let tabTagID else { throw MusicServiceError.corruptStorage }
-            return .ruleFM(ruleID: ruleID, tabTagID: tabTagID, sourceName: sourceName)
-        }
-        guard provider.isEmpty, let modeRaw = mode, let fmMode = MusicHomeAction.FMMode(rawValue: modeRaw) else {
-            throw MusicServiceError.corruptStorage
-        }
-        let fmEntry: MusicHomeAction.FMEntry?
-        if let entry, !entry.isEmpty {
-            guard let parsed = MusicHomeAction.FMEntry(rawValue: entry) else { throw MusicServiceError.corruptStorage }
-            fmEntry = parsed
-        } else { fmEntry = nil }
-        return .fm(mode: fmMode, submode: submode, entry: fmEntry)
-    }
-}
-
 struct MusicQueueState: Equatable, Sendable {
     var currentID: String? = nil
     var serial: Int = 0
@@ -521,7 +481,6 @@ struct MusicQueueState: Equatable, Sendable {
     var history: [String] = []
     var failed: [String] = []
     var similar: MusicQueueSimilarState? = nil
-    var fm: MusicQueueFMState? = nil
     static let `default` = MusicQueueState()
 }
 

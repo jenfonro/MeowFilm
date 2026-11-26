@@ -69,8 +69,8 @@ public sealed partial class NovelSidebarView : UserControl
         if (sender is not FrameworkElement { DataContext: NovelSidebarSourceItem item }) return;
         var current = module.Sources.Sources.FirstOrDefault(s => s.InstallationId == item.InstallationId);
         if (current is null) return;
-        if (module.Route is NovelCapability.HomeRoute or NovelCapability.CategoriesRoute)
-            module.RunUi(ct => module.LoadDiscoveryAsync(current, null, true, ct));
+        if (module.Route == NovelCapability.HomeRoute)
+            module.RunUi(ct => module.SwitchExploreSourceAsync(current, ct));
         else
         {
             module.SelectExploreSource(current);

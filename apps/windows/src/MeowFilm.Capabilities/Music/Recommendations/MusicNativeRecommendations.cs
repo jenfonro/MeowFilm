@@ -144,6 +144,7 @@ public sealed partial class MusicNativeApplication
             using var frame = sessions.Begin(awaitPhysical: true);
             Task<MusicRecommendationSnapshot>? work = null;
             MusicPlatformSession? fmAccount = null;
+            string? fmPreferenceScope = null;
             try
             {
                 await accounts.EnsureInitialObservationAsync(start.Token).ConfigureAwait(false);
@@ -157,10 +158,11 @@ public sealed partial class MusicNativeApplication
                     {
                         start.Token.ThrowIfCancellationRequested();
                         fmAccount = await sessions.AcquireAsync("wy", CancellationToken.None).ConfigureAwait(false);
+                        fmPreferenceScope = fmAccount?.UserId is { Length: > 0 } uid ? uid : "guest";
                         start.Token.ThrowIfCancellationRequested();
-                        if (fmAccount is not null && effective.Mode is null)
+                        if (effective.Mode is null)
                         {
-                            var saved = await fmPreferences.ReadAsync(fmAccount.UserId, CancellationToken.None).ConfigureAwait(false);
+                            var saved = await fmPreferences.ReadAsync(fmPreferenceScope, CancellationToken.None).ConfigureAwait(false);
                             effective = effective with
                             {
                                 Mode = saved.Mode,
@@ -187,9 +189,9 @@ public sealed partial class MusicNativeApplication
                 lock (gate) if (--recommendationPreludes == 0) recommendationPreludesDrained.TrySetResult();
             }
             var started = await work.ConfigureAwait(false);
-            if (fmAccount is not null && started.Error.Length == 0 && started.Mode.Length > 0)
+            if (fmPreferenceScope is not null && started.Error.Length == 0 && started.Mode.Length > 0)
             {
-                await SaveFmSelectionAsync(fmAccount, started, start.Token).ConfigureAwait(false);
+                await SaveFmSelectionAsync(fmAccount, fmPreferenceScope, started, start.Token).ConfigureAwait(false);
             }
             return started;
         }, cancellationToken);
@@ -206,7 +208,8 @@ public sealed partial class MusicNativeApplication
             Volatile.Read(ref binding.Revoked) != 0) throw new MusicOperationException("PLAYBACK_UNAVAILABLE");
     }
 
-    private async Task SaveFmSelectionAsync(MusicPlatformSession? account, MusicRecommendationSnapshot snapshot, CancellationToken token)
+    private async Task SaveFmSelectionAsync(MusicPlatformSession? account, string? preferenceScope,
+        MusicRecommendationSnapshot snapshot, CancellationToken token)
     {
         bool Current() => !token.IsCancellationRequested && (account is null || accounts.IsCurrent(account)) &&
             recommendations.IsFmSelectionCurrent(snapshot);
@@ -217,10 +220,12 @@ public sealed partial class MusicNativeApplication
         }
         try
         {
-            account ??= await accounts.AcquireSettledAsync("wy", CancellationToken.None).ConfigureAwait(false);
-            if (account is null || !Current()) return;
+            if (preferenceScope is null)
+                account ??= await accounts.AcquireSettledAsync("wy", CancellationToken.None).ConfigureAwait(false);
+            string resolvedScope = account?.UserId is { Length: > 0 } uid ? uid : preferenceScope ?? "guest";
+            if (!Current()) return;
             var selection = new MusicFmSelection(snapshot.Mode, snapshot.Submode, snapshot.RuleId, snapshot.TabTagId);
-            await fmPreferences.SaveAsync(account.UserId, selection, Current, CancellationToken.None).ConfigureAwait(false);
+            await fmPreferences.SaveAsync(resolvedScope, selection, Current, CancellationToken.None).ConfigureAwait(false);
         }
         finally { lock (gate) if (--recommendationPreludes == 0) recommendationPreludesDrained.TrySetResult(); }
     }

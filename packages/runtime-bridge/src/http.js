@@ -176,7 +176,7 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
   if (typeof resolveRoute !== 'function' || onClose !== undefined && typeof onClose !== 'function') invalid();
   const active = new Map(), sockets = new Set();
   let baseUrl, starting, closing, closed = false, sequence = 0, streamCleanupFailed = false;
-  const server = http.createServer({ requestTimeout: 0 }, (request, response) => {
+  const server = http.createServer({ requestTimeout: 0, keepAliveTimeout: 0 }, (request, response) => {
     const rawRequestId = request.headers['x-meow-request-id'];
     const requestId = typeof rawRequestId === 'string' && rawRequestId && !active.has(rawRequestId)
       ? rawRequestId : randomUUID();

@@ -321,11 +321,33 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func showFilm(_ item: FilmItem, kind: FilmPlaybackKind, entrySurface: String? = nil, animated: Bool = true) {
+        let resolvedKind = FilmItemKind(rawValue: kind.rawValue) ?? item.kind
+        let updatedEntry = item.entry.map { base in
+            FilmEntry(
+                targetId: base.targetId,
+                keyword: base.keyword,
+                title: base.title,
+                subtitle: base.subtitle,
+                poster: base.poster,
+                backdrop: base.backdrop,
+                score: base.score,
+                textBadge: base.textBadge,
+                siteLabel: base.siteLabel,
+                kind: resolvedKind ?? base.kind,
+                year: base.year,
+                season: base.season,
+                episode: base.episode,
+                seasonHint: base.seasonHint,
+                tmdb: base.tmdb,
+                douban: base.douban,
+                siteEntry: base.siteEntry
+            )
+        }
         let item = FilmItem(sourceID: item.sourceID, id: item.id, title: item.title,
-                            kind: FilmItemKind(rawValue: kind.rawValue) ?? item.kind,
+                            kind: resolvedKind,
                             posterURL: item.posterURL, largePosterURL: item.largePosterURL,
-                            score: item.score, subtitle: item.subtitle, metadataSeed: item.metadataSeed,
-                            businessID: item.businessID, playbackTarget: item.playbackTarget)
+                            score: item.score, subtitle: item.subtitle,
+                            entry: updatedEntry)
         let model: FilmPlaybackModel
         do { model = try assembly.makeFilmPlayback(item: item, entrySurface: entrySurface) }
         catch {
@@ -459,6 +481,16 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 guard let self, let novel = self.assembly.novel else { return UIViewController() }
                 let page = NovelHomeViewController(feature: novel, themeProvider: appearance)
                 page.onSelect = { [weak self] in self?.showNovel($0) }
+                page.onSelectCategory = { [weak self] model in
+                    guard let self, let novel = self.assembly.novel else { return }
+                    let category = NovelCategoryViewController(
+                        model: model,
+                        feature: novel,
+                        themeProvider: appearance
+                    )
+                    category.onSelectItem = { [weak self] in self?.showNovel($0) }
+                    self.navigation.pushViewController(category, animated: true)
+                }
                 self.novelHome = page; return page
             },
             { [weak self] in
@@ -475,7 +507,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 case .film: content = .film(settings: self.assembly.filmSettings)
                 case .novel:
                     guard let home = self.novelHome else { return }
-                    content = .novel(discovery: home.discovery, home: { [weak self] in self?.main?.select(.novel) })
+                    content = .novel(discovery: home.discovery)
                 default: content = .music(selectedPage: main.selectedPage)
                 }
                 self.root.showSidebar(content: content)

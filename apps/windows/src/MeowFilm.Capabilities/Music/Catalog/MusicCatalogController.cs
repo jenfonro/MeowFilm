@@ -74,7 +74,7 @@ public sealed partial class MusicCatalogController : MusicController
 
     private string? lastChannelRoute;
     private string channelEntryError = "";
-    private bool catalogSourceReload;
+    private bool catalogSourceReload, channelRefreshRequired, catalogViewVisible;
     private CatalogPageState? publishedHomeState;
     private CatalogLoadFlight? catalogLoadFlight;
 

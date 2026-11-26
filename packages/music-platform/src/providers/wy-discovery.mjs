@@ -160,9 +160,10 @@ function resource(r, { banner = false } = {}) {
   }
   if (kind === 'fm' || declared?.type === 'fm') {
     const coverLabel = text(r.fmLogoTextContent);
-    const fmAction = scalar(r.ruleId) || scalar(r.tabTagId)
+    const explicitMode = text(r.mode) || declared?.mode, explicitSubmode = text(first(r.subMode, r.submode)) || declared?.submode || '';
+    const fmAction = !explicitMode && !explicitSubmode && (scalar(r.ruleId) || scalar(r.tabTagId))
       ? { type: 'fm', provider: 'rule', ruleId: scalar(r.ruleId), tabTagId: scalar(r.tabTagId), sourceName: coverLabel || base.title }
-      : { type: 'fm', mode: fmMode(text(r.mode) || declared?.mode), submode: text(first(r.subMode, r.submode)) || declared?.submode || '' };
+      : { type: 'fm', mode: fmMode(explicitMode), submode: explicitSubmode };
     return wrap(browseCard('wy', { ...base, kind: 'fm', coverLabel, action: fmAction }));
   }
   if (['playlist', 'play_list', 'song_list', 'list', 'scroll_playlist', 'toplist'].includes(kind) || declared?.type === 'playlist') {
@@ -547,7 +548,12 @@ function cube(raw, target, selectedTag, c) {
   };
 }
 
-export async function wyChannelPage(c, params) {
+export function wyChannelPage(c, params) {
+  const id = input(params.id), prev = record(params.continuation), selectedTag = text(params.tag ?? prev.tag ?? '');
+  return c.cached(['channel', id, text(params.pageCode), selectedTag, prev], fc => readChannelPage(fc, params));
+}
+
+async function readChannelPage(c, params) {
   const id = input(params.id), prev = params.continuation ?? {}, selectedTag = params.tag ?? prev.tag ?? '';
   // A supplied descriptor already contains the real recipe selector; do not re-read its directory to prove it.
   const known = { feature: 'featured', featured: 'featured', chart: 'rankings', rankings: 'rankings',
@@ -710,7 +716,13 @@ export async function wyChannelPage(c, params) {
   return result;
 }
 
-export async function wyCharts(c, { kind, period = 'daily', year }) {
+export function wyCharts(c, { kind, period = 'daily', year }) {
+  const chartKind = input(kind);
+  return c.cached(['charts', chartKind, text(period), year ?? null],
+    fc => readCharts(fc, { kind: chartKind, period, year }));
+}
+
+async function readCharts(c, { kind, period = 'daily', year }) {
   const chartId = 'chart:' + input(kind);
   let items, name, layout = 'song-list';
   if (kind === 'albums' || kind === 'singles') {

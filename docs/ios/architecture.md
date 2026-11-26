@@ -88,7 +88,7 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 
 禁止将大量跨子域文件平铺堆塞在单一目录，UI 模块按清晰职责建立子目录归位：
 
-- `MeowUI/`：`Accounts/`、`Appearance/`、`Artwork/`、`Controls/`、`Layout/`、`List/`、`Management/`、`Navigation/`、`Presentation/`、`Search/`、`Settings/`
+- `MeowUI/`：`Accounts/`、`Appearance/`、`Artwork/`、`Catalog/`、`Controls/`、`Layout/`、`List/`、`Management/`、`Navigation/`、`Presentation/`、`Search/`、`Settings/`
 - `MeowFilmFeature/`：`Home/`、`Detail/`、`Player/`、`Search/UI/`、`Settings/UI/{Core,Sources,Playback,Rules,Pan}/`、`Debug/`（保留 `Catalog/`、`Library/`、`Pan/`、`Playback/`、`Rules/`、`Settings/`、`SettingsSources/`、`Sources/` 非 UI 业务目录）
 - `MeowMusicFeature/`：`Appearance/`、`Artwork/`、`Catalog/{Browse,Channels,DailyStyle}/`、`Library/UI/`、`Playback/{Artwork,Cache,FM,FullPlayer,Lyrics,MiniPlayer,Model,Presentation,Queue,Sources}/`、`Presentation/`、`Search/UI/`、`Settings/{State,Pages,Accounts,Sources,Search}/`、`Debug/`
 - `MeowNovelFeature/`：`Artwork/`、`Browse/`、`Detail/`、`Reader/`、`Settings/`、`Web/`、`Debug/`（保留 `Library/`、`Reading/`、`Runtime/`）
@@ -208,6 +208,6 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 | `music.home.display.v1`、`music.source-checks.v1` | 首页展示快照和来源发现观察（缓存库） |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
-| `meowfilm.film.library.v1` | 影视收藏身份，保留原来源／影片字段及可选 Node `businessID/playbackTarget`，见[影视收藏](film.md#详情和收藏) |
+| `meowfilm.film.library.v1` | 影视收藏身份，以统一 `target_id`（`work:<sessionKey>`）保存 `keyword`、展示字段及可选 `tmdb`／`douban`／`siteEntry` 引用，见[影视收藏](film.md#详情和收藏) |
 
 歌曲／录音、来源、队列 occurrence、播放 attempt、账号访问代次和文件版本是相互独立的身份，不能用标题、短期 URL 或队列位置替代。

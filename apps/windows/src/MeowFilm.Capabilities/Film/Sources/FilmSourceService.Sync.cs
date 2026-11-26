@@ -297,6 +297,7 @@ public sealed partial class FilmSourceService
         var next = new Snapshot(Freeze(cats), Freeze(videos));
         var candidate = new StoredFilmSourceState(next.Cats.Select(StoredFilmCat.From).ToArray(), next.Videos,
             deleted.OrderBy(key => key.InstallationId, StringComparer.Ordinal).ThenBy(key => key.SiteKey, StringComparer.Ordinal).ToArray());
+        var beforeVideos = document.Videos;
         var after = storageRevision;
         token.ThrowIfCancellationRequested();
         if (!FilmSourceStore.StateEquals(candidate, document))
@@ -311,10 +312,46 @@ public sealed partial class FilmSourceService
                 throw;
             }
         }
+        bool videoConfigChanged = !VideoSettingsEqual(beforeVideos, candidate.Videos);
         document = candidate;
         storageRevision = after;
         initialized = true;
         Volatile.Write(ref snapshot, next);
+        if (videoConfigChanged)
+        {
+            await NotifyVideoSourcesChangedAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static bool VideoSettingsEqual(IReadOnlyList<FilmVideoSource> a, IReadOnlyList<FilmVideoSource> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+        {
+            if (a[i].Key != b[i].Key || a[i].Name != b[i].Name || a[i].Order != b[i].Order || a[i].Options != b[i].Options)
+                return false;
+        }
+        return true;
+    }
+
+    private async Task NotifyVideoSourcesChangedAsync()
+    {
+        if (!RuntimeActive) return;
+        if (Runtime is IRuntimeConnectionSource source)
+        {
+            try
+            {
+                var connection = await source.CaptureConnectionAsync().ConfigureAwait(false);
+                await connection.Client.CallAsync("runtime.settings.changed", new { block = "film.video-sources" },
+                    TimeSpan.FromSeconds(5), connection.Revoked).ConfigureAwait(false);
+                return;
+            }
+            catch
+            {
+                // Durable storage is already committed; fall through to async notification if supported.
+            }
+        }
+        (Runtime as IRuntimeSettingsNotifications)?.SettingsChanged("film.video-sources");
     }
 
     private static IReadOnlyList<T> Freeze<T>(IEnumerable<T> values) => Array.AsReadOnly(values.ToArray());

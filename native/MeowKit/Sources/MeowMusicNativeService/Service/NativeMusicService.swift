@@ -31,8 +31,8 @@ struct MusicDomainState: Sendable {
             if q.runID != runID {
                 q.history = []
                 q.failed = []
+                q.runID = runID
             }
-            q.runID = runID
             queue = q
             persisted.insert(.queue)
         } else {
@@ -193,11 +193,6 @@ public actor NativeMusicService {
     var queueFeedbackOrigins: [String: MusicNativeQueueFeedbackOrigin] = [:]
     var similarMode = MusicNativeSimilarRuntime()
     var fmPlayback: MusicNativeFMSession?
-    var fmRestored = false
-    var fmRestoration: (id: UUID, task: Task<Void, Error>)?
-    var fmRestoreRetryAfter: UInt64 = 0
-    var fmPreviews: [MusicHomeAction: MusicNativeFMPreviewEntry] = [:]
-    var fmPreviewOrder: [MusicHomeAction] = []
     var fmQueues: [UUID: (MusicHomeAction, MusicQueueAuthorization, MusicNativeFMRead)] = [:]
 
     nonisolated func now() -> Date { Date() }
@@ -274,8 +269,6 @@ public actor NativeMusicService {
         }
         publicQueueSources.removeAll()
         clearFMPlayback()
-        fmRestored = false
-        clearFMPreviews()
         for value in fmQueues.values {
             value.1.revoke()
             retainSimilarDrain(Task { await value.2.close() })

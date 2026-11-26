@@ -7,7 +7,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
 {
     private static readonly IReadOnlyList<string> NovelTargets =
     [
-        "novel.home", "novel.categories", "novel.shelf", "novel.history", "novel.book", "novel.reader", "settings.novel"
+        "novel.home", "novel.data", "novel.shelf", "novel.history", "novel.book", "novel.reader", "settings.novel"
     ];
 
     public string DebugModuleId => capability.Id;
@@ -24,7 +24,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
         return capability.Route switch
         {
             NovelCapability.HomeRoute => "novel.home",
-            NovelCapability.CategoriesRoute => "novel.categories",
+            NovelCapability.DataRoute => "novel.data",
             NovelCapability.ShelfRoute => "novel.shelf",
             NovelCapability.HistoryRoute => "novel.history",
             NovelCapability.BookRoute => "novel.book",
@@ -39,13 +39,54 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
         switch (target)
         {
             case "novel.home":
+            {
+                if (DebugParams.GetString(parameters, "sourceId") is { Length: > 0 } sourceId)
+                {
+                    await capability.Sources.EnsureReadyAsync(cancellationToken);
+                    var source = capability.Sources.Sources.FirstOrDefault(s =>
+                        string.Equals(s.InstallationId, sourceId, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(s.Name, sourceId, StringComparison.OrdinalIgnoreCase))
+                        ?? throw DebugApiException.NotFound($"Novel source not found: '{sourceId}'.");
+                    capability.SelectExploreSource(source);
+                }
                 await capability.NavigateAsync(NovelCapability.HomeRoute, cancellationToken);
-                await SelectKindFromParamsAsync(parameters, cancellationToken);
                 return true;
-            case "novel.categories":
-                await capability.NavigateAsync(NovelCapability.CategoriesRoute, cancellationToken);
-                await SelectKindFromParamsAsync(parameters, cancellationToken);
+            }
+            case "novel.data":
+            {
+                if (DebugParams.GetString(parameters, "sourceId") is { Length: > 0 } sourceId)
+                {
+                    await capability.Sources.EnsureReadyAsync(cancellationToken);
+                    var source = capability.Sources.Sources.FirstOrDefault(s =>
+                        string.Equals(s.InstallationId, sourceId, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(s.Name, sourceId, StringComparison.OrdinalIgnoreCase))
+                        ?? throw DebugApiException.NotFound($"Novel source not found: '{sourceId}'.");
+                    capability.SelectExploreSource(source);
+                }
+                await capability.EnsureHomeLoadedAsync(cancellationToken);
+                if (capability.DataSections.Count == 0)
+                    throw DebugApiException.InvalidState("No novel discovery sections available.");
+                var category = DebugParams.GetString(parameters, "category") ?? DebugParams.GetString(parameters, "sectionId");
+                int? sectionIdx = DebugParams.GetInt(parameters, "sectionIndex");
+                NovelDataSection selected = capability.DataSections.Contains(capability.ActiveNovelData)
+                    ? capability.ActiveNovelData
+                    : capability.DataSections[0];
+                if (sectionIdx is { } si)
+                {
+                    if (si < 0 || si >= capability.DataSections.Count)
+                        throw DebugApiException.InvalidArgument($"sectionIndex {si} out of range (0..{capability.DataSections.Count - 1}).");
+                    selected = capability.DataSections[si];
+                }
+                else if (!string.IsNullOrWhiteSpace(category))
+                {
+                    selected = capability.DataSections.FirstOrDefault(s =>
+                        string.Equals(s.Key, category, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(s.Title, category, StringComparison.OrdinalIgnoreCase))
+                        ?? throw DebugApiException.NotFound($"Novel section not found: '{category}'.");
+                }
+                await capability.SwitchToDataSectionAsync(selected, cancellationToken);
                 return true;
+            }
             case "novel.shelf":
                 await capability.NavigateAsync(NovelCapability.ShelfRoute, cancellationToken);
                 return true;
@@ -56,9 +97,24 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
             {
                 if (DebugParams.GetString(parameters, "bookId") is { Length: > 0 } bookId)
                 {
-                    var entry = capability.Library.Entries.FirstOrDefault(e => string.Equals(e.BookId, bookId, StringComparison.Ordinal))
-                        ?? throw DebugApiException.NotFound($"Novel bookId not found in library: '{bookId}'.");
-                    await capability.OpenEntryDirectAsync(entry, cancellationToken);
+                    var entry = capability.Library.Entries.FirstOrDefault(e =>
+                        string.Equals(e.BookId, bookId, StringComparison.Ordinal) ||
+                        string.Equals(e.Book.SourceIdentity, bookId, StringComparison.Ordinal) ||
+                        string.Equals(e.Book.BookUrl, bookId, StringComparison.Ordinal));
+                    if (entry is not null)
+                    {
+                        await capability.OpenEntryDirectAsync(entry, cancellationToken);
+                        return true;
+                    }
+                    var card = capability.ActiveNovelData.Items.Concat(capability.Sections.SelectMany(s => s.Items))
+                        .OfType<NovelCardItem>()
+                        .FirstOrDefault(c =>
+                            string.Equals(c.Book.SourceIdentity, bookId, StringComparison.Ordinal) ||
+                            string.Equals(c.Book.BookUrl, bookId, StringComparison.Ordinal));
+                    if (card is null)
+                        throw DebugApiException.NotFound($"Novel bookId not found: '{bookId}'.");
+                    await capability.ReceiveBookAsync(card.Book, cancellationToken);
+                    await capability.NavigateAsync(NovelCapability.BookRoute, cancellationToken);
                     return true;
                 }
                 if (capability.Session is null) throw DebugApiException.InvalidState("No active novel book session.");
@@ -74,34 +130,6 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
             default:
                 return false;
         }
-    }
-
-    private NovelKind[] ActiveSelectableKinds() =>
-        NovelDiscoveryKinds.Groups(capability.Kinds, rankingsOnly: capability.Route == NovelCapability.HomeRoute)
-            .SelectMany(g => g.Kinds)
-            .ToArray();
-
-    private async Task SelectKindFromParamsAsync(JsonElement? parameters, CancellationToken cancellationToken)
-    {
-        var url = DebugParams.GetString(parameters, "kindUrl");
-        var idx = DebugParams.GetInt(parameters, "kindIndex");
-        if (url is null && idx is null) return;
-        var kinds = ActiveSelectableKinds();
-        NovelKind? picked;
-        if (idx is { } i)
-        {
-            if (i < 0 || i >= kinds.Length)
-                throw DebugApiException.InvalidArgument($"kindIndex {i} out of range (0..{Math.Max(0, kinds.Length - 1)}).");
-            picked = kinds[i];
-        }
-        else
-        {
-            picked = kinds.FirstOrDefault(k => string.Equals(k.Url, url, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(k.Title, url, StringComparison.OrdinalIgnoreCase));
-            if (picked is null)
-                throw DebugApiException.NotFound($"Novel explore kind not found: '{url}'.");
-        }
-        await capability.LoadDiscoveryAsync(capability.ExploreSource, picked, reset: false, cancellationToken);
     }
 
     public Task<bool> TryOpenDebugSettingsSectionAsync(string section, CancellationToken cancellationToken)
@@ -280,84 +308,134 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
             });
         }
 
-        var tabs = ActiveSelectableKinds().Select((k, idx) => new
-        {
-            group = "category",
-            index = idx,
-            id = k.Url,
-            title = k.Title,
-            selected = capability.ExploreKind?.Url == k.Url,
-            enabled = true
-        }).ToArray();
+        if (capability.IsData)
+            return Task.FromResult<object?>(BuildDataDebugContent(maxItems));
 
-        var shelfItems = capability.Library.OrderedShelfEntries().Take(maxItems).Select((entry, idx) => new
+        return Task.FromResult<object?>(BuildHomeDebugContent(maxItems));
+    }
+
+    private object BuildHomeDebugContent(int maxItems)
+    {
+        var sections = capability.Sections.Select((sec, si) => new
         {
-            index = idx,
-            id = entry.BookId,
+            index = si,
+            id = sec.Key,
+            title = sec.Title,
             kind = "novel",
-            title = entry.Book.Name,
-            subtitle = entry.Book.Author,
-            badge = entry.Book.LatestChapterTitle,
-            coverUrl = entry.Book.CoverUrl,
-            actions = new[] { "open" },
-            meta = new { sourceId = entry.Book.InstallationId, bookUrl = entry.Book.BookUrl, onShelf = true }
+            layout = "rail",
+            hasMore = sec.Definition.Options.Count > 0,
+            itemCount = sec.Items.Count,
+            items = sec.Items.OfType<NovelCardItem>().Take(maxItems).Select((card, ci) => new
+            {
+                index = ci,
+                id = card.Book.SourceIdentity,
+                kind = "novel",
+                title = card.Book.Name,
+                subtitle = card.Book.Author,
+                badge = card.Book.LatestChapterTitle,
+                coverUrl = card.Book.CoverUrl,
+                actions = new[] { "open" },
+                meta = new { sourceId = card.Book.InstallationId, bookUrl = card.Book.BookUrl }
+            }).ToArray()
         }).ToArray();
 
-        var discoverItems = capability.DiscoverBooks.Take(maxItems).Select((book, idx) => new
+        return new
         {
-            index = idx,
-            id = book.SourceIdentity,
-            kind = "novel",
-            title = book.Name,
-            subtitle = book.Author,
-            badge = book.LatestChapterTitle,
-            coverUrl = book.CoverUrl,
-            actions = new[] { "open" },
-            meta = new { sourceId = book.InstallationId, bookUrl = book.BookUrl }
-        }).ToArray();
-
-        var sections = new object[]
-        {
-            new
-            {
-                index = 0,
-                id = "discover",
-                title = capability.ExploreKind?.Title ?? "发现",
-                kind = "novel",
-                layout = "grid",
-                hasMore = capability.MoreDiscovery,
-                itemCount = capability.DiscoverBooks.Count,
-                items = discoverItems
-            },
-            new
-            {
-                index = 1,
-                id = "shelf",
-                title = "书架",
-                kind = "novel",
-                layout = "list",
-                hasMore = false,
-                itemCount = shelfItems.Length,
-                items = shelfItems
-            }
-        };
-
-        return Task.FromResult<object?>(new
-        {
-            target = capability.Route == NovelCapability.CategoriesRoute ? "novel.categories" : "novel.home",
-            kind = "sections",
-            loading = capability.LoadingDiscovery,
-            error = string.IsNullOrWhiteSpace(capability.DiscoveryError) ? null : capability.DiscoveryError,
-            tabs,
+            target = "novel.home",
+            kind = sections.Length == 0 ? "empty" : "sections",
+            loading = capability.IsDiscoveryBusy,
+            error = capability.HomeState == NovelDiscoveryState.Failed
+                ? (capability.DiscoveryError.Length > 0 ? capability.DiscoveryError : "LOAD_FAILED")
+                : null,
+            tabs = Array.Empty<object>(),
             filters = Array.Empty<object>(),
             sections,
             rows = Array.Empty<object>(),
-            hasMore = capability.MoreDiscovery,
+            hasMore = false,
             detail = (object?)null,
             player = (object?)null,
             reader = (object?)null,
-            settings = (object?)null
-        });
+            settings = (object?)null,
+            selectedSource = capability.ExploreSource is { } src
+                ? new { id = src.InstallationId, name = src.Name }
+                : null
+        };
+    }
+
+    private object BuildDataDebugContent(int maxItems)
+    {
+        var active = capability.DataSections.Contains(capability.ActiveNovelData)
+            ? capability.ActiveNovelData
+            : null;
+        var tabs = capability.DataSections.Select((ds, idx) => new
+        {
+            group = "category",
+            index = idx,
+            id = ds.Key,
+            title = ds.Title,
+            selected = ReferenceEquals(ds, active),
+            enabled = true
+        }).ToArray();
+
+        var filters = (active?.FilterRows ?? []).SelectMany(row =>
+            row.Options.Select((opt, idx) => new
+            {
+                group = row.Key,
+                index = idx,
+                id = opt.Value,
+                title = opt.Label,
+                selected = opt.IsSelected
+            })).ToArray();
+
+        var items = (active?.Items ?? []).OfType<NovelCardItem>().Take(maxItems).Select((card, ci) => new
+        {
+            index = ci,
+            id = card.Book.SourceIdentity,
+            kind = "novel",
+            title = card.Book.Name,
+            subtitle = card.Book.Author,
+            badge = card.Book.LatestChapterTitle,
+            coverUrl = card.Book.CoverUrl,
+            actions = new[] { "open" },
+            meta = new { sourceId = card.Book.InstallationId, bookUrl = card.Book.BookUrl }
+        }).ToArray();
+
+        var sections = active is null
+            ? Array.Empty<object>()
+            : new object[]
+            {
+                new
+                {
+                    index = 0,
+                    id = active.Key,
+                    title = active.Title,
+                    kind = "novel",
+                    layout = "grid",
+                    hasMore = active.ShowPageAction,
+                    itemCount = active.Items.Count,
+                    items
+                }
+            };
+
+        return new
+        {
+            target = "novel.data",
+            kind = "sections",
+            loading = active?.State == CatalogSectionState.Loading,
+            error = active?.State == CatalogSectionState.Failed ? active.StatusText : null,
+            tabs,
+            filters,
+            sections,
+            rows = Array.Empty<object>(),
+            hasMore = active?.ShowPageAction ?? false,
+            detail = (object?)null,
+            player = (object?)null,
+            reader = (object?)null,
+            settings = (object?)null,
+            selectedSource = capability.ExploreSource is { } src
+                ? new { id = src.InstallationId, name = src.Name }
+                : null
+        };
     }
 
     public async Task<object?> TryHandleDebugActionAsync(string action, JsonElement? parameters, bool settingsOpen, CancellationToken cancellationToken)
@@ -365,80 +443,50 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
         switch (action)
         {
             case "refresh":
-                await capability.LoadDiscoveryAsync(capability.ExploreSource, capability.ExploreKind, reset: true, cancellationToken);
-                return new { refreshed = true, count = capability.DiscoverBooks.Count };
+                if (capability.IsData)
+                {
+                    await capability.RefreshNovelDataAsync();
+                    return new { refreshed = true, route = capability.Route };
+                }
+                if (capability.IsHome)
+                {
+                    await capability.RefreshNovelHomeAsync(cancellationToken);
+                    return new { refreshed = true, route = capability.Route, sections = capability.Sections.Count };
+                }
+                return new { refreshed = false, route = capability.Route };
+
+            case "section.more":
+            {
+                if (!capability.IsHome)
+                    throw DebugApiException.InvalidState("section.more is only supported on novel.home.");
+                var sec = ResolveHomeSection(parameters);
+                await capability.OpenNovelDataAsync(sec);
+                return new { invoked = true, section = sec.Title, route = capability.Route };
+            }
 
             case "section.item.invoke":
             {
-                var sid = DebugParams.GetString(parameters, "sectionId");
-                int? siParam = DebugParams.GetInt(parameters, "sectionIndex");
-                bool useShelf;
-                if (siParam is { } si)
-                {
-                    if (si is not (0 or 1))
-                        throw DebugApiException.InvalidArgument($"sectionIndex {si} out of range (0..1).");
-                    useShelf = si == 1;
-                }
-                else if (!string.IsNullOrWhiteSpace(sid))
-                {
-                    if (string.Equals(sid, "shelf", StringComparison.OrdinalIgnoreCase) || sid == "书架") useShelf = true;
-                    else if (string.Equals(sid, "discover", StringComparison.OrdinalIgnoreCase) || sid == "发现") useShelf = false;
-                    else throw DebugApiException.NotFound($"Novel section not found: '{sid}'.");
-                }
-                else
-                {
-                    useShelf = false;
-                }
-
-                var itemId = DebugParams.GetString(parameters, "itemId");
-                int? iiParam = DebugParams.GetInt(parameters, "itemIndex");
-                if (useShelf)
-                {
-                    var shelf = capability.Library.OrderedShelfEntries().ToArray();
-                    NovelEntry chosen;
-                    if (iiParam is { } ii)
-                    {
-                        if (ii < 0 || ii >= shelf.Length) throw DebugApiException.InvalidArgument("Shelf itemIndex out of range.");
-                        chosen = shelf[ii];
-                    }
-                    else if (!string.IsNullOrWhiteSpace(itemId))
-                    {
-                        chosen = shelf.FirstOrDefault(e => string.Equals(e.BookId, itemId, StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(e.Book.Name, itemId, StringComparison.OrdinalIgnoreCase))
-                            ?? throw DebugApiException.NotFound($"Shelf item '{itemId}' not found.");
-                    }
-                    else
-                    {
-                        if (shelf.Length == 0) throw DebugApiException.InvalidState("Shelf is empty.");
-                        chosen = shelf[0];
-                    }
-                    await capability.OpenEntryDirectAsync(chosen, cancellationToken);
-                    return new { invoked = true, section = "shelf", title = chosen.Book.Name };
-                }
                 NovelBook book;
-                if (iiParam is { } di)
+                if (capability.IsData)
                 {
-                    if (di < 0 || di >= capability.DiscoverBooks.Count) throw DebugApiException.InvalidArgument("Discover itemIndex out of range.");
-                    book = capability.DiscoverBooks[di];
+                    book = ResolveNovelCard(capability.ActiveNovelData.Items, parameters);
                 }
-                else if (!string.IsNullOrWhiteSpace(itemId))
+                else if (capability.IsHome)
                 {
-                    book = capability.DiscoverBooks.FirstOrDefault(b => string.Equals(b.SourceIdentity, itemId, StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(b.Name, itemId, StringComparison.OrdinalIgnoreCase))
-                        ?? throw DebugApiException.NotFound($"Discover item '{itemId}' not found.");
+                    var sec = ResolveHomeSection(parameters);
+                    book = ResolveNovelCard(sec.Items, parameters);
                 }
                 else
                 {
-                    if (capability.DiscoverBooks.Count == 0) throw DebugApiException.InvalidState("Discover list is empty.");
-                    book = capability.DiscoverBooks[0];
+                    throw DebugApiException.InvalidState("section.item.invoke is only supported on novel.home or novel.data.");
                 }
-                await capability.OpenBookDirectAsync(book, cancellationToken);
-                return new { invoked = true, section = "discover", title = book.Name };
+                await capability.OpenBookAsync(book, cancellationToken);
+                return new { invoked = true, id = book.SourceIdentity, title = book.Name, route = capability.Route };
             }
 
             case "tab.select":
             {
-                var group = (DebugParams.GetString(parameters, "group") ?? "category").Trim().ToLowerInvariant();
+                var group = (DebugParams.GetString(parameters, "group") ?? "").Trim().ToLowerInvariant();
                 var id = DebugParams.GetString(parameters, "id");
                 var idx = DebugParams.GetInt(parameters, "index");
                 if (group == "settings-section" || settingsOpen)
@@ -451,22 +499,54 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     if (!capability.DebugSettings.SelectDebugTab(key)) throw DebugApiException.NotFound($"Unknown novel settings tab '{key}'.");
                     return new { group = "settings-section", selected = key };
                 }
-                var kinds = ActiveSelectableKinds();
-                NovelKind? kind;
-                if (idx is { } ki)
+
+                if (capability.IsData && capability.ActiveNovelData.FilterRows.Count > 0 &&
+                    (group == "" || group == "filter" || group == "category" && capability.ActiveNovelData.FilterRows.Any(r => r.Key == "category")))
                 {
-                    if (ki < 0 || ki >= kinds.Length)
-                        throw DebugApiException.InvalidArgument($"Novel category index {ki} out of range (0..{Math.Max(0, kinds.Length - 1)}).");
-                    kind = kinds[ki];
+                    // Prefer filter option selection when group is "filter" or matches an option in ActiveNovelData.
+                    var row = capability.ActiveNovelData.FilterRows[0];
+                    if (group == "filter" ||
+                        (group != "section" && (idx is not null || row.Options.Any(o =>
+                            string.Equals(o.Value, id, StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(o.Label, id, StringComparison.OrdinalIgnoreCase)))))
+                    {
+                        CatalogFilterOption? option = null;
+                        if (idx is { } fi)
+                        {
+                            if (fi < 0 || fi >= row.Options.Count)
+                                throw DebugApiException.InvalidArgument($"Filter index {fi} out of range (0..{row.Options.Count - 1}).");
+                            option = row.Options[fi];
+                        }
+                        else if (!string.IsNullOrWhiteSpace(id))
+                        {
+                            option = row.Options.FirstOrDefault(o =>
+                                string.Equals(o.Value, id, StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(o.Label, id, StringComparison.OrdinalIgnoreCase));
+                        }
+                        if (option is null) throw DebugApiException.NotFound($"Novel filter option not found: '{id}'.");
+                        await capability.SelectNovelDataFilterAsync(option);
+                        return new { group = row.Key, selected = option.Label, id = option.Value };
+                    }
                 }
-                else
+
+                if (capability.DataSections.Count == 0)
+                    throw DebugApiException.InvalidState("No novel sections available.");
+                NovelDataSection? target = null;
+                if (idx is { } ci)
                 {
-                    kind = kinds.FirstOrDefault(k => string.Equals(k.Url, id, StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(k.Title, id, StringComparison.OrdinalIgnoreCase));
+                    if (ci < 0 || ci >= capability.DataSections.Count)
+                        throw DebugApiException.InvalidArgument($"Novel section index {ci} out of range (0..{capability.DataSections.Count - 1}).");
+                    target = capability.DataSections[ci];
                 }
-                if (kind is null) throw DebugApiException.NotFound("Novel category tab not found.");
-                await capability.LoadDiscoveryAsync(capability.ExploreSource, kind, reset: false, cancellationToken);
-                return new { group = "category", selected = kind.Title };
+                else if (!string.IsNullOrWhiteSpace(id))
+                {
+                    target = capability.DataSections.FirstOrDefault(d =>
+                        string.Equals(d.Key, id, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(d.Title, id, StringComparison.OrdinalIgnoreCase));
+                }
+                if (target is null) throw DebugApiException.NotFound("Novel section tab not found.");
+                await capability.SwitchToDataSectionAsync(target, cancellationToken);
+                return new { group = "section", selected = target.Title };
             }
 
             case "list.item.invoke":
@@ -520,27 +600,22 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     await capability.OpenEntryDirectAsync(picked, cancellationToken);
                     return new { invoked = true, bookId = picked.BookId, title = picked.Book.Name };
                 }
-                if (idxParam is { } di)
+                if (capability.IsData)
                 {
-                    if (di < 0 || di >= capability.DiscoverBooks.Count) throw DebugApiException.InvalidArgument("List index out of range.");
-                    await capability.OpenBookDirectAsync(capability.DiscoverBooks[di], cancellationToken);
-                    return new { invoked = true, title = capability.DiscoverBooks[di].Name };
+                    var book = ResolveNovelCardByListParams(capability.ActiveNovelData.Items, id, idxParam);
+                    await capability.OpenBookAsync(book, cancellationToken);
+                    return new { invoked = true, title = book.Name };
                 }
-                if (!string.IsNullOrWhiteSpace(id))
-                {
-                    var found = capability.DiscoverBooks.FirstOrDefault(b => string.Equals(b.SourceIdentity, id, StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(b.Name, id, StringComparison.OrdinalIgnoreCase))
-                        ?? throw DebugApiException.NotFound($"Book '{id}' not found.");
-                    await capability.OpenBookDirectAsync(found, cancellationToken);
-                    return new { invoked = true, title = found.Name };
-                }
-                throw DebugApiException.InvalidArgument("List index out of range.");
+                throw DebugApiException.InvalidState($"list.item.invoke is not supported on route '{capability.Route}'.");
             }
 
             case "list.load_more":
-                if (!capability.MoreDiscovery) return new { loadedMore = false };
-                await capability.LoadDiscoveryAsync(capability.ExploreSource, capability.ExploreKind, reset: false, cancellationToken);
-                return new { loadedMore = true, count = capability.DiscoverBooks.Count };
+                if (capability.IsData)
+                {
+                    await capability.LoadMoreNovelDataAsync();
+                    return new { loadedMore = true, count = capability.ActiveNovelData.Items.Count };
+                }
+                return new { loadedMore = false };
 
             case "setting.set":
             {
@@ -572,12 +647,81 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     await capability.Sources.RefreshAsync(cancellationToken);
                     return new { executed = true, domain = "novel", command = cmd, sourceCount = capability.Sources.Sources.Count };
                 }
+                if (cmd is "import_sources")
+                {
+                    var text = DebugParams.GetString(parameters, "text");
+                    var url = DebugParams.GetString(parameters, "url");
+                    var fileName = DebugParams.GetString(parameters, "fileName");
+                    var imported = await capability.Sources.ImportAsync(text, url, fileName, cancellationToken);
+                    return new { executed = true, domain = "novel", command = cmd, imported, sourceCount = capability.Sources.Sources.Count };
+                }
                 throw DebugApiException.InvalidArgument($"Unsupported novel settings command '{cmd}'.");
             }
 
             default:
                 return null;
         }
+    }
+
+    private NovelHomeSection ResolveHomeSection(JsonElement? parameters)
+    {
+        if (capability.Sections.Count == 0) throw DebugApiException.InvalidState("No novel sections available.");
+        if (DebugParams.GetInt(parameters, "sectionIndex") is { } si)
+        {
+            if (si < 0 || si >= capability.Sections.Count)
+                throw DebugApiException.InvalidArgument($"sectionIndex {si} out of range (0..{capability.Sections.Count - 1}).");
+            return capability.Sections[si];
+        }
+        if (DebugParams.GetString(parameters, "sectionId") is { Length: > 0 } sid)
+        {
+            return capability.Sections.FirstOrDefault(s =>
+                string.Equals(s.Key, sid, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(s.Title, sid, StringComparison.OrdinalIgnoreCase))
+                ?? throw DebugApiException.NotFound($"Novel section '{sid}' not found.");
+        }
+        return capability.Sections[0];
+    }
+
+    private static NovelBook ResolveNovelCard(IReadOnlyList<ICatalogCardDisplay> rawItems, JsonElement? parameters)
+    {
+        var items = rawItems.OfType<NovelCardItem>().ToArray();
+        if (items.Length == 0) throw DebugApiException.InvalidState("Target novel section has no items.");
+        if (DebugParams.GetInt(parameters, "itemIndex") is { } ii)
+        {
+            if (ii < 0 || ii >= items.Length)
+                throw DebugApiException.InvalidArgument($"itemIndex {ii} out of range (0..{items.Length - 1}).");
+            return items[ii].Book;
+        }
+        if (DebugParams.GetString(parameters, "itemId") is { Length: > 0 } iid)
+        {
+            return items.FirstOrDefault(c =>
+                string.Equals(c.Book.SourceIdentity, iid, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(c.Book.BookUrl, iid, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(c.Book.Name, iid, StringComparison.OrdinalIgnoreCase))?.Book
+                ?? throw DebugApiException.NotFound($"Novel item '{iid}' not found.");
+        }
+        return items[0].Book;
+    }
+
+    private static NovelBook ResolveNovelCardByListParams(IReadOnlyList<ICatalogCardDisplay> rawItems, string? id, int? index)
+    {
+        var items = rawItems.OfType<NovelCardItem>().ToArray();
+        if (items.Length == 0) throw DebugApiException.InvalidState("Target novel section has no items.");
+        if (index is { } ii)
+        {
+            if (ii < 0 || ii >= items.Length)
+                throw DebugApiException.InvalidArgument($"index {ii} out of range (0..{items.Length - 1}).");
+            return items[ii].Book;
+        }
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            return items.FirstOrDefault(c =>
+                string.Equals(c.Book.SourceIdentity, id, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(c.Book.BookUrl, id, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(c.Book.Name, id, StringComparison.OrdinalIgnoreCase))?.Book
+                ?? throw DebugApiException.NotFound($"Novel item '{id}' not found.");
+        }
+        return items[0].Book;
     }
 
     public Task<object?> GetDebugPlaybackStateAsync(CancellationToken cancellationToken) =>

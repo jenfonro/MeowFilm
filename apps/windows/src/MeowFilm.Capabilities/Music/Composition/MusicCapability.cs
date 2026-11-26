@@ -159,6 +159,7 @@ public sealed partial class MusicCapability :
         await ctx.PersistentChorus.ClearAsync(null, cancellationToken).ConfigureAwait(false);
         await Catalog.ClearHomeSnapshotAsync(cancellationToken).ConfigureAwait(false);
         await ctx.Application.ClearCachesAsync(cancellationToken).ConfigureAwait(false);
+        await Catalog.InvalidateBrowseCachesAsync().ConfigureAwait(false);
     }
 
     internal async Task<object?> GetCacheStatsAsync(CancellationToken cancellationToken = default)

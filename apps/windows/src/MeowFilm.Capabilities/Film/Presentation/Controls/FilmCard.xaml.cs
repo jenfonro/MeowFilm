@@ -1,9 +1,14 @@
+using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using System.ComponentModel;
 
 namespace MeowFilm.Capabilities;
+
+public sealed class CatalogCardActivatedEventArgs(ICatalogCardDisplay item) : EventArgs
+{
+    public ICatalogCardDisplay Item { get; } = item ?? throw new ArgumentNullException(nameof(item));
+}
 
 public sealed class FilmCardActivatedEventArgs(FilmCardItem item) : EventArgs
 {
@@ -12,12 +17,25 @@ public sealed class FilmCardActivatedEventArgs(FilmCardItem item) : EventArgs
 
 public partial class FilmCard : UserControl
 {
+    public event EventHandler<CatalogCardActivatedEventArgs>? CardActivated;
     public event EventHandler<FilmCardActivatedEventArgs>? Activated;
 
     private INotifyPropertyChanged? observed;
     private object? boundContext;
-    public IFilmCardDisplay? Item => DataContext as IFilmCardDisplay;
+    public ICatalogCardDisplay? Item => DataContext as ICatalogCardDisplay;
+    public string CardTitle => Item?.Title ?? "";
+    public string PosterAddress => Item?.NovelBook is null ? Item?.Poster ?? "" : "";
+    public NovelBook? NovelBook => Item?.NovelBook;
+    public NovelSourceService? NovelSources => Item?.NovelSources;
+    public Visibility FilmPosterVisibility => Item?.NovelBook is null ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility NovelPosterVisibility => Item?.NovelBook is not null ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility PlayMarkVisibility => Item?.ShowPlayMark == true ? Visibility.Visible : Visibility.Collapsed;
+    public string CardScore => Item?.Score ?? "";
+    public Visibility ScoreBadgeVisibility => Item?.HasScore == true ? Visibility.Visible : Visibility.Collapsed;
+    public string CardTextBadge => Item?.TextBadge ?? "";
     public Visibility TextBadgeVisibility => Item is { HasTextBadge: true, HasScore: false } ? Visibility.Visible : Visibility.Collapsed;
+    public string CardSubtitle => Item?.Subtitle ?? "";
+    public Visibility SubtitleVisibility => Item?.HasSubtitle == true ? Visibility.Visible : Visibility.Collapsed;
 
     public FilmCard()
     {
@@ -52,31 +70,37 @@ public partial class FilmCard : UserControl
         if (Item is not { } item) return;
         switch (e.PropertyName)
         {
-            case nameof(IFilmCardDisplay.Title):
+            case nameof(ICatalogCardDisplay.Title):
                 TitleText.Text = item.Title;
                 AutomationProperties.SetName(HitButton, item.Title);
                 break;
-            case nameof(IFilmCardDisplay.Poster):
-                Poster.Address = item.Poster;
+            case nameof(ICatalogCardDisplay.Poster):
+                if (item.NovelBook is null) Poster.Address = item.Poster;
                 break;
-            case nameof(IFilmCardDisplay.Score):
+            case nameof(ICatalogCardDisplay.NovelBook) or nameof(ICatalogCardDisplay.NovelSources):
+                BookPoster.Sources = item.NovelSources;
+                BookPoster.Book = item.NovelBook;
+                Poster.Visibility = FilmPosterVisibility;
+                BookPoster.Visibility = NovelPosterVisibility;
+                break;
+            case nameof(ICatalogCardDisplay.Score):
                 ScoreText.Text = item.Score;
                 break;
-            case nameof(IFilmCardDisplay.HasScore):
-                ScoreBadge.Visibility = item.HasScore ? Visibility.Visible : Visibility.Collapsed;
+            case nameof(ICatalogCardDisplay.HasScore):
+                ScoreBadge.Visibility = ScoreBadgeVisibility;
                 TextBadge.Visibility = TextBadgeVisibility;
                 break;
-            case nameof(IFilmCardDisplay.TextBadge):
+            case nameof(ICatalogCardDisplay.TextBadge):
                 TextBadgeText.Text = item.TextBadge;
                 break;
-            case nameof(IFilmCardDisplay.HasTextBadge):
+            case nameof(ICatalogCardDisplay.HasTextBadge):
                 TextBadge.Visibility = TextBadgeVisibility;
                 break;
-            case nameof(IFilmCardDisplay.Subtitle):
+            case nameof(ICatalogCardDisplay.Subtitle):
                 Subtitle.Text = item.Subtitle;
                 break;
-            case nameof(IFilmCardDisplay.HasSubtitle):
-                SiteLabel.Visibility = item.HasSubtitle ? Visibility.Visible : Visibility.Collapsed;
+            case nameof(ICatalogCardDisplay.HasSubtitle):
+                SiteLabel.Visibility = SubtitleVisibility;
                 break;
             case null or "":
                 Bindings.Update();
@@ -86,7 +110,9 @@ public partial class FilmCard : UserControl
 
     private void Activate_Click(object sender, RoutedEventArgs e)
     {
-        if (Item?.ToCard() is { } item)
-            Activated?.Invoke(this, new(item));
+        if (Item is not { } item) return;
+        CardActivated?.Invoke(this, new(item));
+        if (item is IFilmCardDisplay film)
+            Activated?.Invoke(this, new(film.ToCard()));
     }
 }

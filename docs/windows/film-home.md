@@ -15,7 +15,7 @@ Windows 将影视浏览作为独立的 `FilmCapability` 装配在音乐能力之
 
 首页每栏经公共运行器 `film.data.metadata.entry` 读取豆瓣 `recent_hot` 的 `start=0&limit=12`。进入栏目数据页时复用这 12 条种子，并以 `start=12&limit=12` 补齐首批 24 条；“加载更多”之后按 `limit=24` 继续推进偏移。适配器只传递 `kind` 对应路径及 `start/limit/category/type`，普通读取由运行器检查缓存，显式刷新传递 `refresh:true`；不以本地菜单、栏目 key 或展示标题建立业务许可表，不增加偏移上限或截断返回结果。网络、代理和凭据由[公共元数据 owner](../runtime/metadata-data.md)管理，原生不另建 HTTPS 客户端。
 
-响应消费影片 `id`、非空 `title`、评分 `rating.value`、海报候选及 Node 的 `businessId/playbackTarget`。`DoubanFilmHomeSource` 用业务 ID 建立 `FilmCardItem`，原样保留目标，不按栏目／影片字符串拼目标；共同语义见[稳定业务身份](../common/film/search.md#稳定业务身份)。海报优先级为 `pic.normal`、`pic.large`、`cover.url`、`cover_url`、`poster`、`image`；零分不显示。图片保留运行器返回的 `/v1/douban/images/...` 相对引用，通过既有 `ArtworkService` 和受信图片通道获取、解码、缓存、取消与释放，不在通用图片 HTTP 层加入豆瓣分派。辅助 cache/components 或未消费字段的形状不阻断有效影片列表，未知缓存状态原样投影而不当作 fresh，真实刷新错误仍由通知报告。运行器未能投影业务身份的原始条目、缺失或非法的 `businessId/playbackTarget` 只隔离该条，不补造展示或播放身份；缺少有效列表、非空列表全部不可消费等真实格式错误不伪装成成功空列表。
+响应消费影片 `id`、非空 `title`、评分 `rating.value`、海报候选及 Node 投影的轻量 `entry`（`targetId = "work:<sessionKey>"`、`keyword`、`douban: {kind, id}` 等）。`DoubanFilmHomeSource` 据此建立 `FilmCardItem` 并保留 `Entry`，不按栏目／影片字符串拼底层目标；共同语义见[稳定作品身份](../common/film/search.md#稳定作品身份与轻量卡片引用)。海报优先级为 `pic.normal`、`pic.large`、`cover.url`、`cover_url`、`poster`、`image`；零分不显示。图片保留运行器返回的 `/v1/douban/images/...` 相对引用，通过既有 `ArtworkService` 和受信图片通道获取、解码、缓存、取消与释放，不在通用图片 HTTP 层加入豆瓣分派。辅助 cache/components 或未消费字段的形状不阻断有效影片列表，未知缓存状态原样投影而不当作 fresh，真实刷新错误仍由通知报告。运行器未能投影有效 `entry` 的原始条目只隔离该条，不补造展示或播放身份；缺少有效列表、非空列表全部不可消费等真实格式错误不伪装成成功空列表。
 
 ## 状态与生命周期
 
@@ -37,4 +37,4 @@ Windows 将影视浏览作为独立的 `FilmCapability` 装配在音乐能力之
 
 构造和初始化只准备页壳，首次导航才读取业务数据。`CaptureNavigationLocation()` 捕获当前路由，播放页位置为 `film-playback:<NavigationIdentity>`；`RestoreNavigationAsync(string location, CancellationToken token)` 按保留实例恢复，不从序列化卡片重建播放页，具体见[播放页保留](film-playback.md#页面保留与读取恢复)。首页／数据页由领域状态判断是否需要补齐未完成读取；Ready 分区不重新请求或清空集合，原有筛选、卡片和滚动宿主继续复用。Shell 保留的隐藏模块使用 Collapsed：FilmView 撤销未完成请求并收尾取消状态，共享 Shelf 停止滚动动画、暂停 ScrollChanged 挂接，显示后按当前尺寸恢复同一完整卡片锚点；没有隐藏定时翻页。共享卡片悬浮生命周期由 CardMotion 负责。
 
-首次 Pending/Loading 且无结果时，首页栏目（`FilmShelf.xaml`）与数据页（`FilmView.xaml`）按 `ShowLoading` 复用全局共享 `MeowFilm.LoadingRing`（`ProgressRing`）加载指示；首页栏目单行高度按同一 `Shelf.MeasureCards` 与 `FilmCard` 海报比例／标题行计算，在加载、空／失败状态与卡片就绪之间保持固定不变。真实结果到达后停止加载指示并呈现内容，空、失败、取消停止加载并保留原状态／重试；已有内容的补齐、分页及失败不遮盖卡片。
+首次 Pending/Loading 且无结果时，共享首页栏目（`Shared/Catalog/CatalogShelf.xaml`）与栏目数据页（`Shared/Catalog/CatalogBrowseView.xaml`）按 `ShowLoading` 复用 `ProgressRing` 加载指示；首页栏目单行高度按同一 `Shelf.MeasureCards` 与 `FilmCard` 海报比例／标题行计算，在加载、空／失败状态与卡片就绪之间保持固定不变。真实结果到达后停止加载指示并呈现内容，空、失败、取消停止加载并保留原状态／重试；已有内容的补齐、分页及失败不遮盖卡片。

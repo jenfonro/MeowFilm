@@ -214,9 +214,9 @@ actor MusicNodeAccountProvider {
         let value = try await call(operation, params)
         try await authorize(); return try value.musicData()
     }
-    func fm(_ action: MusicHomeAction, preview: Bool,
+    func fm(_ action: MusicHomeAction, preview: Bool, unplaySongIds: [String] = [],
             authorize: @escaping @Sendable () async throws -> Void) async throws -> MusicNativeFMResponse {
-        try await authorize(); let (operation, params) = MusicPlatformDTO.action(action, preview: preview)
+        try await authorize(); let (operation, params) = MusicPlatformDTO.action(action, preview: preview, unplaySongIds: unplaySongIds)
         let value = try await call(operation, params); try await authorize()
         return .init(tracks: value[music: "items"] == .null ? [] : try MusicPlatformDTO.tracks(value),
             artwork: MusicArtworkURL.normalized(value[music: "cover"].musicText))

@@ -6,11 +6,14 @@ import MeowUI
 @MainActor
 extension FilmDetailViewController {
     func showDirectory(animated: Bool = true) {
-        guard let model, let browsing = model.presentation?.browsing, browsing.error == nil,
-              let sourceID = browsing.sourceID, !browsing.originalFiles.isEmpty else { return }
-        let page = FilmDirectoryViewController(model: model, sourceID: sourceID, lineID: browsing.lineID,
-                                               metadataSourceID: model.presentation?.metadataSourceID, season: browsing.season,
-                                               themeProvider: themeProvider)
+        guard let model, let snapshot = model.presentation, snapshot.directoryError == nil,
+              let sourceID = snapshot.sourceSelectedID, !snapshot.directoryRawItems.isEmpty else { return }
+        let page = FilmDirectoryViewController(
+            model: model,
+            sourceID: sourceID,
+            lineID: snapshot.lineSelectedID,
+            themeProvider: themeProvider
+        )
         page.onPresentPlayback = onPresentPlayback
         navigationController?.pushViewController(page, animated: animated)
     }
@@ -29,53 +32,73 @@ extension FilmDetailViewController {
             return
         }
         renderedEmptySourceMenus = false
-        play.isEnabled = canPlay(snapshot)
-        play.configuration?.title = model.directoryHasNoVideoSource ? "无可用视频源" : "播放"
-        play.accessibilityLabel = model.directoryHasNoVideoSource ? "播放，无可用视频源" : "播放"
+        play.isEnabled = !snapshot.noSources && model.canStartPlayback
+        play.configuration?.title = snapshot.noSources ? "暂无可用视频源" : "播放"
+        play.accessibilityLabel = snapshot.noSources ? "播放，暂无可用视频源" : "播放"
         let busy = model.opening || model.playbackStatus.busy
         if busy { loadingIndicator.startAnimating() } else { loadingIndicator.stopAnimating() }
         playbackState.text = model.playbackStatus == .failed ? nil : model.playbackStatus.title
-        let metadataChanged = displayedSnapshot == nil || displayedSnapshot?.workInfo != snapshot.workInfo
-        let directoryMetadataChanged = displayedSnapshot?.metadata != snapshot.metadata ||
-            displayedSnapshot?.metadataCache != snapshot.metadataCache ||
-            displayedSnapshot?.metadataSupplement != snapshot.metadataSupplement ||
-            displayedSnapshot?.metadataSourceID != snapshot.metadataSourceID ||
-            displayedSnapshot?.metadataSources != snapshot.metadataSources
+
+        let metadataChanged = displayedSnapshot == nil || displayedSnapshot?.work != snapshot.work
         if metadataChanged {
             let next = FilmPlaybackPresentation.detail(snapshot, original: originalDetail)
             let relatedChanged = detail.cast != next.cast || detail.similarItems != next.similarItems
             if detail != next { detail = next; renderMetadata() }
             if relatedChanged { renderRelated() }
         }
-        if displayedSnapshot?.sources != snapshot.sources || displayedSnapshot?.browsing != snapshot.browsing ||
-            displayedSnapshot?.searchComplete != snapshot.searchComplete ||
-            displayedSnapshot?.entryResolution != snapshot.entryResolution ||
-            displayedAggregateProvider != model.aggregateSourceProvider ||
-            displayedCanRetryMedia != model.canRetryMedia || directoryMetadataChanged {
+
+        let sourceMenuChanged = displayedSnapshot == nil ||
+            displayedSnapshot?.noSources != snapshot.noSources ||
+            displayedSnapshot?.sourceSelectedID != snapshot.sourceSelectedID ||
+            displayedSnapshot?.sourcePlaceholder != snapshot.sourcePlaceholder ||
+            displayedSnapshot?.sourceDisabled != snapshot.sourceDisabled ||
+            displayedSnapshot?.sourceCanLoadMore != snapshot.sourceCanLoadMore ||
+            displayedSnapshot?.sourceLoadingMore != snapshot.sourceLoadingMore ||
+            displayedSnapshot?.sourceOptions != snapshot.sourceOptions ||
+            displayedSnapshot?.lineVisible != snapshot.lineVisible ||
+            displayedSnapshot?.lineSelectedID != snapshot.lineSelectedID ||
+            displayedSnapshot?.lineOptions != snapshot.lineOptions ||
+            displayedCanRetryMedia != model.canRetryMedia
+        if sourceMenuChanged {
             renderSourceMenus(snapshot)
             displayedCanRetryMedia = model.canRetryMedia
         }
-        if displayedSnapshot?.episodes != snapshot.episodes || displayedSnapshot?.browsing != snapshot.browsing ||
-            displayedSnapshot?.sources != snapshot.sources || displayedSnapshot?.entryResolution != snapshot.entryResolution ||
-            displayedSnapshot?.candidates != snapshot.candidates || directoryMetadataChanged {
+
+        let directoryChanged = displayedSnapshot == nil ||
+            displayedSnapshot?.noSources != snapshot.noSources ||
+            displayedSnapshot?.directoryMode != snapshot.directoryMode ||
+            displayedSnapshot?.directoryLoading != snapshot.directoryLoading ||
+            displayedSnapshot?.directoryError != snapshot.directoryError ||
+            displayedSnapshot?.directorySelectedSeason != snapshot.directorySelectedSeason ||
+            displayedSnapshot?.directoryCanLoadMore != snapshot.directoryCanLoadMore ||
+            displayedSnapshot?.directoryLoadingMore != snapshot.directoryLoadingMore ||
+            displayedSnapshot?.directorySeasons != snapshot.directorySeasons ||
+            displayedSnapshot?.directoryItems != snapshot.directoryItems ||
+            displayedSnapshot?.sourceOptions != snapshot.sourceOptions ||
+            displayedSnapshot?.sourceCanLoadMore != snapshot.sourceCanLoadMore ||
+            displayedSnapshot?.sourceLoadingMore != snapshot.sourceLoadingMore
+        if directoryChanged {
             renderRuntimeEpisodes()
         }
         updateEpisodeAvailability()
-        if displayedPreviewEpisodes != snapshot.previewEpisodes {
-            displayedPreviewEpisodes = snapshot.previewEpisodes
-            more.isEnabled = true
-            more.menu = UIMenu(children: [
+
+        let previewState = (preview: snapshot.previewEpisodes, canToggle: snapshot.canTogglePreview)
+        if displayedPreviewState == nil || displayedPreviewState! != previewState {
+            displayedPreviewState = previewState
+            let enabled = snapshot.canTogglePreview || snapshot.previewEpisodes
+            more.isEnabled = enabled
+            more.menu = enabled ? UIMenu(children: [
                 UIAction(title: "点映", identifier: .init("film.detail.preview"),
                          state: snapshot.previewEpisodes ? .on : .off) { [weak model] _ in
                     guard let model, let current = model.presentation else { return }
                     model.setPreview(!current.previewEpisodes)
                 }
-            ])
+            ]) : nil
         }
+
         renderEpisodeMenu()
         seasonButton.setTitleColor(UIColor(seasonButton.isUserInteractionEnabled ? theme.accent : theme.ink), for: .normal)
         displayedSnapshot = snapshot
-        displayedAggregateProvider = model.aggregateSourceProvider
         presentPlaybackError()
     }
 
@@ -92,104 +115,103 @@ extension FilmDetailViewController {
             sourceButton.accessibilityValue = "加载中..."
             sourceButton.isEnabled = false
             sourceButton.menu = nil
-            lineButton.isHidden = false
-            lineButton.setTitle("加载中...", for: .normal)
-            lineButton.isEnabled = false; lineButton.menu = nil
+            lineButton.isHidden = true
+            lineButton.menu = nil
             return
         }
-        var actions: [UIMenuElement] = snapshot.metadataSources.map { row in
-            UIAction(title: "\(row.provider.title) · \(row.title)",
-                     state: model?.aggregateSourceProvider == row.provider ? .on : .off) { [weak model] _ in
-                model?.browseAggregate(row.provider)
+
+        if snapshot.noSources {
+            sourceButton.setTitle("暂无可用视频源", for: .normal)
+            sourceButton.accessibilityValue = "暂无可用视频源"
+            sourceButton.isEnabled = false
+            sourceButton.menu = nil
+            lineButton.isHidden = true
+            lineButton.menu = nil
+            return
+        }
+
+        var actions: [UIMenuElement] = snapshot.sourceOptions.map { opt in
+            UIAction(
+                title: opt.displayTitle,
+                state: opt.id == snapshot.sourceSelectedID ? .on : .off
+            ) { [weak model] _ in
+                model?.browseSource(opt.id)
             }
         }
-        actions += snapshot.sources.map { row in
-            UIAction(title: "\(row.source.name) · \(row.title)",
-                     state: row.id == snapshot.browsing.sourceID ? .on : .off) { [weak model] _ in
-                model?.browse(sourceID: row.id)
-            }
-        }
-        let waitingForExplicitSiteSearch = snapshot.entryResolution == "unmatched" &&
-            snapshot.error != "SOURCE_NOT_FOUND" && snapshot.sources.isEmpty
-        if !waitingForExplicitSiteSearch && snapshot.error != "SOURCE_NOT_FOUND" && !snapshot.searchComplete &&
-            snapshot.entryResolution != "loading" && snapshot.entryResolution != "error" {
-            actions.append(UIAction(title: "加载更多来源") { [weak model] _ in model?.send("search.more") })
+        if snapshot.sourceCanLoadMore || snapshot.sourceLoadingMore {
+            actions.append(UIAction(
+                title: snapshot.sourceLoadingMore ? "正在搜索站点源…" : "加载更多",
+                attributes: snapshot.sourceLoadingMore ? .disabled : []
+            ) { [weak model] _ in
+                model?.loadMoreSources()
+            })
         }
         actions.append(UIMenu(options: .displayInline, children: [
-            UIAction(title: snapshot.browsing.sourceID == nil ? "刷新资料" : "刷新目录",
-                     identifier: .init("film.detail.refresh")) { [weak model] _ in model?.refreshBrowsing() },
+            UIAction(title: "刷新目录", identifier: .init("film.detail.refresh")) { [weak model] _ in
+                model?.refreshBrowsing()
+            },
             UIAction(title: "重试地址", identifier: .init("film.detail.retry-media"),
-                     attributes: model?.canRetryMedia == true ? [] : .disabled) { [weak model] _ in model?.retryMedia() }
+                     attributes: model?.canRetryMedia == true ? [] : .disabled) { [weak model] _ in
+                model?.retryMedia()
+            }
         ]))
         sourceButton.menu = UIMenu(title: "来源", children: actions)
-        let selectedTitle: String?
-        if let sourceID = snapshot.browsing.sourceID {
-            selectedTitle = snapshot.sources.first { $0.id == sourceID }.map { "\($0.source.name) · \($0.title)" }
+
+        let selectedTitle = snapshot.sourceOptions.first(where: { $0.id == snapshot.sourceSelectedID })?.displayTitle ??
+            snapshot.sourcePlaceholder
+        sourceButton.setTitle(selectedTitle, for: .normal)
+        sourceButton.accessibilityValue = selectedTitle
+        sourceButton.isEnabled = !snapshot.sourceDisabled
+
+        lineButton.isHidden = !snapshot.lineVisible
+        if snapshot.lineVisible {
+            let lineTitle = snapshot.lineOptions.first(where: { $0.id == snapshot.lineSelectedID })?.label ??
+                snapshot.lineOptions.first?.label ?? "线路"
+            lineButton.setTitle(lineTitle, for: .normal)
+            lineButton.isEnabled = !snapshot.lineOptions.isEmpty
+            lineButton.menu = snapshot.lineOptions.isEmpty ? nil : UIMenu(title: "线路", children: snapshot.lineOptions.map { line in
+                UIAction(title: line.label, state: line.id == snapshot.lineSelectedID ? .on : .off) { [weak model] _ in
+                    model?.browseLine(line.id)
+                }
+            })
         } else {
-            selectedTitle = snapshot.metadataSources.first { $0.provider == model?.aggregateSourceProvider }
-                .map { "\($0.provider.title) · \($0.title)" }
+            lineButton.menu = nil
         }
-        let waiting = snapshot.browsing.loading || snapshot.entryResolution == "loading"
-        let emptyTitle = waiting ? "加载中..." : "无可用视频源"
-        sourceButton.setTitle(selectedTitle ?? emptyTitle, for: .normal)
-        sourceButton.accessibilityValue = selectedTitle ?? emptyTitle
-        sourceButton.isEnabled = !snapshot.metadataSources.isEmpty || !snapshot.sources.isEmpty
-        lineButton.isHidden = snapshot.browsing.sourceID == nil && snapshot.entryResolution != "loading" &&
-            !snapshot.browsing.loading
-        lineButton.setTitle(snapshot.browsing.lines.first { $0.id == snapshot.browsing.lineID }?.label ??
-            emptyTitle, for: .normal)
-        lineButton.isEnabled = !snapshot.browsing.lines.isEmpty
-        lineButton.menu = snapshot.browsing.lines.isEmpty ? nil : UIMenu(title: "网盘源", children: snapshot.browsing.lines.map { line in
-            UIAction(title: line.label, state: line.id == snapshot.browsing.lineID ? .on : .off) { [weak model] _ in
-                model?.browse(sourceID: snapshot.browsing.sourceID, lineID: line.id)
-            }
-        })
     }
 
     func renderRuntimeEpisodes() {
         guard let snapshot = model?.presentation else { return }
-        let browsing = snapshot.browsing
-        let manualSearch = snapshot.entryResolution == "unmatched" && snapshot.error != "SOURCE_NOT_FOUND" &&
-            browsing.sourceID == nil && snapshot.sources.isEmpty
-        let metadataKind = snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.kind
-        let seasons = FilmPlaybackPresentation.seasons(snapshot)
-        let number = browsing.season ?? snapshot.target.position.season ?? snapshot.episodes.first?.position.season
-        let season = seasons.first { $0.number == number }
-        let seasonTitle = season?.title ??
-            (metadataKind == .tv ? "第一季" : metadataKind == .movie ? "正片" : "文件")
-        let metadataActions: [UIMenuElement] = snapshot.metadataSources.map { row in
-            UIAction(title: "\(row.provider.title) · \(row.title)",
-                     state: row.id == snapshot.metadataSourceID ? .on : .off) { [weak model] _ in
-                model?.browseMetadata(row.id)
+        let seasons = snapshot.directorySeasons
+        let selectedSeason = snapshot.directorySelectedSeason
+        let currentSeasonLabel = seasons.first(where: { $0.season == selectedSeason })?.label
+        let baseTitle = currentSeasonLabel ??
+            (snapshot.directoryMode == "movies" ? "正片" : snapshot.directoryMode == "files" ? "文件" : "集数")
+        let selectable = seasons.count > 1
+        seasonButton.setTitle(baseTitle + (selectable ? "  ﹀" : ""), for: .normal)
+        seasonButton.isUserInteractionEnabled = selectable
+        seasonButton.accessibilityTraits = selectable ? [.header, .button] : .header
+        seasonButton.menu = selectable ? UIMenu(title: "选择季度", children: seasons.compactMap { s in
+            guard let num = s.season else { return nil }
+            return UIAction(title: s.label, state: num == selectedSeason ? .on : .off) { [weak model] _ in
+                model?.browseSeason(num)
             }
+        }) : nil
+
+        if snapshot.directoryLoading && snapshot.directoryItems.isEmpty {
+            episodesMoreContainer.isHidden = true
+            showEpisodeState("加载中")
+            return
         }
-        seasonButton.setTitle(seasonTitle, for: .normal)
-        seasonButton.isUserInteractionEnabled = seasons.count > 1 || snapshot.metadataSources.count > 1
-        seasonButton.accessibilityTraits = seasonButton.isUserInteractionEnabled ? [.header, .button] : .header
-        let seasonActions: [UIMenuElement] = seasons.compactMap { season in
-            guard let number = season.number else { return nil }
-            return UIAction(title: season.title, state: number == (browsing.season ?? snapshot.target.position.season) ? .on : .off) { [weak model] _ in
-                model?.browseSeason(number)
-            }
-        }
-        var choices = seasonActions
-        if !metadataActions.isEmpty {
-            choices.insert(UIMenu(title: "资料视图", children: metadataActions), at: 0)
-        }
-        seasonButton.menu = choices.isEmpty ? nil : UIMenu(title: "季度", children: choices)
-        if snapshot.entryResolution == "loading" || browsing.loading { showEpisodeState("加载中"); return }
-        if snapshot.entryResolution == "error" || browsing.error != nil { showEpisodeState(nil); return }
-        if model?.directoryHasNoVideoSource == true {
-            showEpisodeState("无可用视频源")
-            searchButton.isHidden = !manualSearch
+        if snapshot.directoryError != nil && snapshot.directoryItems.isEmpty {
+            episodesMoreContainer.isHidden = true
+            showEpisodeState(nil)
             return
         }
 
         let key = EpisodeDirectoryKey(
-            source: snapshot.sources.first { $0.id == browsing.sourceID }?.businessID ?? browsing.sourceID,
-            line: browsing.lineID,
-            metadata: snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.businessID ?? snapshot.metadataSourceID,
-            season: number
+            source: snapshot.sourceSelectedID,
+            line: snapshot.lineSelectedID,
+            season: selectedSeason
         )
         if episodeDirectory != key {
             if let previous = episodeDirectory { episodeLayouts[previous] = episodeListVisible }
@@ -197,75 +219,56 @@ extension FilmDetailViewController {
         }
 
         let available = model.map { $0.canSelectFromPresentation && !$0.directoryHasNoVideoSource } ?? false
+        let fallbackArt = detail.item.posterURL ?? detail.item.largePosterURL
         var items: [FilmEpisodeListItem] = []
-        if browsing.sourceID != nil {
-            var mappedEpisodes: [FilmEpisodePosition: FilmPlaybackEpisode] = [:]
-            for episode in snapshot.episodes {
-                let coordinate = FilmEpisodePosition(season: episode.position.season, episode: episode.position.episode)
-                if mappedEpisodes[coordinate] == nil { mappedEpisodes[coordinate] = episode }
-            }
-            for file in browsing.files {
-                let episode = displayedEpisode(
-                    position: file.position, id: file.businessID, name: file.name, target: file.playbackTarget,
-                    metadataEpisode: mappedEpisodes[.init(season: file.position.season, episode: file.position.episode)]
-                )
-                let handler: (@MainActor () -> Void)? = file.candidateID.map { _ in
-                    { [weak self] in
-                        self?.model?.selectTarget(file.playbackTarget, metadataSourceID: snapshot.metadataSourceID)
-                        self?.onPresentPlayback?()
-                    }
+        items.reserveCapacity(snapshot.directoryItems.count)
+        for row in snapshot.directoryItems {
+            let ep = FilmPlaybackPresentation.episode(
+                from: row,
+                mode: snapshot.directoryMode,
+                fallbackArtworkURL: fallbackArt
+            )
+            let itemID = row.id
+            var handler: (@MainActor () -> Void)? = nil
+            if row.isPlayable {
+                handler = { [weak self] in
+                    self?.model?.selectItem(itemID)
+                    self?.onPresentPlayback?()
                 }
-                items.append(FilmEpisodeListItem(
-                    id: episode.id,
-                    episode: episode,
-                    accessibilityID: "film.file.\(file.id)",
-                    enabled: available && handler != nil,
-                    onSelect: handler
-                ))
             }
-        } else if metadataKind == .movie {
-            for candidate in snapshot.candidates {
-                let episode = FilmEpisode(
-                    id: candidate.businessID, title: candidate.name,
-                    summary: [candidate.quality, candidate.source.name, candidate.lineLabel]
-                        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
-                    artworkURL: detail.item.posterURL ?? detail.item.largePosterURL,
-                    businessID: candidate.businessID, playbackTarget: candidate.playbackTarget
-                )
-                items.append(FilmEpisodeListItem(
-                    id: episode.id,
-                    episode: episode,
-                    accessibilityID: "film.candidate.\(candidate.id)",
-                    enabled: available,
-                    onSelect: { [weak self] in
-                        self?.model?.selectTarget(candidate.playbackTarget, metadataSourceID: snapshot.metadataSourceID)
-                        self?.onPresentPlayback?()
-                    }
-                ))
-            }
-        } else if metadataKind == .tv {
-            for episode in snapshot.episodes {
-                let mapped = FilmPlaybackPresentation.episode(
-                    episode, fallbackArtworkURL: episodeArtwork(season: episode.position.season)
-                )
-                items.append(FilmEpisodeListItem(
-                    id: mapped.id,
-                    episode: mapped,
-                    accessibilityID: "film.episode.\(mapped.id)",
-                    enabled: available,
-                    onSelect: { [weak self] in
-                        self?.model?.selectTarget(episode.playbackTarget, metadataSourceID: snapshot.metadataSourceID)
-                        self?.onPresentPlayback?()
-                    }
-                ))
-            }
+            items.append(FilmEpisodeListItem(
+                id: itemID,
+                episode: ep,
+                accessibilityID: "film.item.\(itemID)",
+                enabled: available && handler != nil,
+                onSelect: handler
+            ))
         }
 
         if items.isEmpty {
-            showEpisodeState("暂无集数")
+            episodesMoreContainer.isHidden = true
+            if snapshot.noSources {
+                showEpisodeState("暂无可用视频源")
+                searchButton.isHidden = true
+            } else {
+                showEpisodeState("暂无集数")
+                let canSearchMore = snapshot.sourceOptions.isEmpty && (snapshot.sourceCanLoadMore || snapshot.sourceLoadingMore)
+                searchButton.isHidden = !canSearchMore
+                if canSearchMore {
+                    searchButton.configuration?.title = snapshot.sourceLoadingMore ? "搜索中..." : "加载更多"
+                    searchButton.isEnabled = !snapshot.sourceLoadingMore
+                }
+            }
             return
         }
+
         applyEpisodeItems(items, directory: key)
+        let showMoreEpisodes = !snapshot.noSources && (snapshot.directoryCanLoadMore || snapshot.directoryLoadingMore)
+        episodesMoreContainer.isHidden = !showMoreEpisodes
+        if showMoreEpisodes {
+            episodesMoreButton.configuration?.title = snapshot.directoryLoadingMore ? "加载中..." : "加载更多"
+            episodesMoreButton.isEnabled = !snapshot.directoryLoadingMore
+        }
     }
 
     func applyEpisodeItems(_ items: [FilmEpisodeListItem], directory: EpisodeDirectoryKey) {
@@ -308,8 +311,8 @@ extension FilmDetailViewController {
         selectedSeasonID = season?.id
         let selectable = detail.seasons.count > 1
         play.isEnabled = false
-        play.configuration?.title = "暂无片源"
-        play.accessibilityLabel = "播放，暂无可用片源"
+        play.configuration?.title = "暂无可用视频源"
+        play.accessibilityLabel = "播放，暂无可用视频源"
         seasonButton.setTitle((season?.title ?? "集数") + (selectable ? "  ﹀" : ""), for: .normal)
         seasonButton.menu = detail.seasons.isEmpty ? nil : UIMenu(title: "选择季度", children: detail.seasons.map { season in
             UIAction(title: season.title, state: season.id == selectedSeasonID ? .on : .off) { [weak self] _ in
@@ -331,7 +334,7 @@ extension FilmDetailViewController {
                     onSelect: nil
                 )
             }
-            let key = EpisodeDirectoryKey(source: nil, line: nil, metadata: season.id, season: nil)
+            let key = EpisodeDirectoryKey(source: nil, line: nil, season: season.number)
             applyEpisodeItems(items, directory: key)
         } else {
             showEpisodeState("暂无集数")
@@ -340,36 +343,15 @@ extension FilmDetailViewController {
     }
 
     func playSelection() {
-        guard let model, let selection = model.playSelectionTarget() else { return }
-        model.selectTarget(selection.target, metadataSourceID: selection.metadataSourceID)
+        guard let model, model.canStartPlayback else { return }
+        model.send("play")
         onPresentPlayback?()
-    }
-
-    func playbackFile(_ snapshot: FilmPlaybackSnapshot) -> FilmPlaybackFile? {
-        model?.playbackFile(in: snapshot)
-    }
-
-    func canPlay(_ snapshot: FilmPlaybackSnapshot) -> Bool {
-        model?.canPlayPresentation(snapshot) == true
-    }
-
-    private func episodeArtwork(season: Int?) -> URL? {
-        model?.presentation.flatMap { FilmPlaybackPresentation.seasons($0).first { $0.number == season }?.posterURL } ??
-            detail.item.posterURL ?? detail.item.largePosterURL
-    }
-
-    private func displayedEpisode(position: FilmEpisodePosition, id: String, name: String,
-                                  target: FilmPlaybackTarget?, metadataEpisode: FilmPlaybackEpisode?) -> FilmEpisode {
-        FilmPlaybackPresentation.displayedEpisode(
-            position: position, id: id, name: name, target: target,
-            metadataEpisode: metadataEpisode, fallbackArtworkURL: episodeArtwork(season: position.season)
-        )
     }
 
     func renderEpisodeMenu() {
         let showsDirectory: Bool
-        if let browsing = model?.presentation?.browsing, browsing.sourceID != nil,
-           browsing.error == nil, !browsing.originalFiles.isEmpty {
+        if let snapshot = model?.presentation, snapshot.directoryError == nil,
+           snapshot.sourceSelectedID != nil, !snapshot.directoryRawItems.isEmpty {
             showsDirectory = true
         } else {
             showsDirectory = false
@@ -397,6 +379,7 @@ extension FilmDetailViewController {
 
     func showEpisodeState(_ text: String?) {
         episodeCollection.isHidden = true
+        episodesMoreContainer.isHidden = true
         episodeStateContainer.isHidden = text == nil
         episodeState.text = text
         episodeState.isHidden = text == nil
@@ -413,18 +396,24 @@ extension FilmDetailViewController {
 
     func presentPlaybackError() {
         let active = model?.executionStage == nil ? nil : model?.snapshot
-        let reported = active?.reportError.map { FilmPlaybackError(code: $0) }
-        let metadata = active?.metadataError.map { FilmPlaybackError(code: $0) }
-        let browsing = active?.browsing.error.map { FilmPlaybackError(code: $0) }
-        let session = active?.error.map { FilmPlaybackError(code: $0) }
-        let entryError = active?.entryResolution == "error" ? FilmPlaybackError(code: "UPSTREAM_ERROR") : nil
+        let suppress = { (err: FilmPlaybackError?) -> FilmPlaybackError? in
+            guard let err else { return nil }
+            if err.code == "NO_VIDEO_SOURCES" { return nil }
+            if err.code == "NOT_CONFIGURED", active?.noSources == true { return nil }
+            return err
+        }
+        let reported = suppress(active?.reportError.map { FilmPlaybackError(code: $0) })
+        let browsing = suppress(active?.directoryError.map { FilmPlaybackError(code: $0) })
+        let session = suppress(active?.error.map { FilmPlaybackError(code: $0) })
+        let actionErr = suppress(model?.actionError)
+
         guard let model,
-              let error = model.actionError ?? model.observationError ?? reported ?? browsing ?? metadata ?? session ?? entryError else {
+              let error = actionErr ?? model.observationError ?? reported ?? browsing ?? session else {
             clearErrorSource("playback")
             return
         }
         let token = AnyHashable(String(describing: error))
-        if model.actionError == nil, model.observationError != nil {
+        if actionErr == nil, model.observationError != nil {
             syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                 model?.reconnect()
             })
@@ -436,8 +425,7 @@ extension FilmDetailViewController {
             syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                 model?.refreshBrowsing()
             })
-        } else if model.actionError == nil, model.observationError == nil, reported == nil,
-                  browsing != nil || metadata != nil || model.presentation?.entryResolution == "error" {
+        } else if actionErr == nil, model.observationError == nil, reported == nil, browsing != nil {
             syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                 model?.refreshBrowsing()
             })

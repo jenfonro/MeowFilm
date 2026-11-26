@@ -4,40 +4,53 @@ using System.Text.Json;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>Search presentation keeps the runtime's business identity and optional live selection reference.</summary>
+/// <summary>Search presentation keeps the runtime's normalized card entry and lightweight search session reference.</summary>
 public sealed class FilmSearchCardItem : IFilmCardDisplay, INotifyPropertyChanged
 {
     private FilmSearchCardValue value;
     internal FilmSearchCardItem(FilmSearchSession session, FilmSearchCardValue value)
     {
         this.value = value;
-        SearchContext = new(session, FilmSearchJson.Text(value.Item, "displayKey"), value.Item);
+        SearchContext = new(session, value.Key, value.Entry);
     }
 
     public string Id => value.Id;
     public string Title => value.Title;
     public string Poster => value.Poster;
-    public string Score => "";
+    public string Score => value.Score;
     public string TextBadge => value.TextBadge;
     public string Subtitle => value.Subtitle;
-    public bool HasScore => false;
+    public bool HasScore => Score.Length > 0;
     public bool HasTextBadge => TextBadge.Length > 0;
     public bool HasSubtitle => Subtitle.Length > 0;
+    public bool ShowPlayMark => true;
+    public NovelBook? NovelBook => null;
+    public NovelSourceService? NovelSources => null;
     public FilmSearchContext SearchContext { get; }
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    public bool HasSameDisplay(ICatalogCardDisplay other) => ReferenceEquals(this, other);
+
     public FilmCardItem ToCard() => new(Id, Title, Poster, Score)
     {
-        TextBadge = TextBadge, Subtitle = Subtitle, SearchContext = SearchContext, PlaybackContext = SearchContext.PlaybackRequest
+        TextBadge = TextBadge,
+        Subtitle = Subtitle,
+        SearchContext = SearchContext,
+        Entry = SearchContext.Entry
     };
 
     internal void Apply(FilmSearchCardValue next, FilmSearchCardFields fields)
     {
-        bool hadBadge = HasTextBadge, hadSubtitle = HasSubtitle;
+        bool hadScore = HasScore, hadBadge = HasTextBadge, hadSubtitle = HasSubtitle;
         value = next;
-        SearchContext.UpdateItem(next.Item);
+        SearchContext.Update(next.Key, next.Entry);
         if ((fields & FilmSearchCardFields.Title) != 0) Changed(nameof(Title));
         if ((fields & FilmSearchCardFields.Poster) != 0) Changed(nameof(Poster));
+        if ((fields & FilmSearchCardFields.Score) != 0)
+        {
+            Changed(nameof(Score));
+            if (hadScore != HasScore) Changed(nameof(HasScore));
+        }
         if ((fields & FilmSearchCardFields.TextBadge) != 0)
         {
             Changed(nameof(TextBadge));
@@ -54,14 +67,15 @@ public sealed class FilmSearchCardItem : IFilmCardDisplay, INotifyPropertyChange
 }
 
 [Flags]
-internal enum FilmSearchCardFields { None = 0, Title = 1, Poster = 2, TextBadge = 4, Subtitle = 8 }
+internal enum FilmSearchCardFields { None = 0, Title = 1, Poster = 2, Score = 4, TextBadge = 8, Subtitle = 16 }
 
 internal sealed record FilmSearchCardValue(string Key, string Id, string Title, string Poster,
-    string TextBadge, string Subtitle, JsonElement Item)
+    string Score, string TextBadge, string Subtitle, FilmEntry Entry)
 {
     internal FilmSearchCardFields Changes(FilmSearchCardValue previous) =>
         (Title != previous.Title ? FilmSearchCardFields.Title : 0) |
         (Poster != previous.Poster ? FilmSearchCardFields.Poster : 0) |
+        (Score != previous.Score ? FilmSearchCardFields.Score : 0) |
         (TextBadge != previous.TextBadge ? FilmSearchCardFields.TextBadge : 0) |
         (Subtitle != previous.Subtitle ? FilmSearchCardFields.Subtitle : 0);
 }
@@ -87,22 +101,19 @@ internal sealed class FilmSearchCardProjection
         if (previous is not null && JsonElement.DeepEquals(previous.Json, json)) return previous;
         if (json.ValueKind != JsonValueKind.Array) throw new FilmPlaybackException("INVALID_RESPONSE");
         var items = json.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.Object &&
-            FilmSearchJson.Text(item, "displayKey").Length > 0).ToArray();
+            (FilmSearchJson.Text(item, "displayKey").Length > 0 || FilmSearchJson.Text(item, "id").Length > 0)).ToArray();
         if (json.GetArrayLength() > 0 && items.Length == 0) throw new FilmPlaybackException("INVALID_RESPONSE");
         var values = new FilmSearchCardValue[items.Length];
         var keys = new HashSet<string>(StringComparer.Ordinal);
         for (int index = 0; index < items.Length; index++)
         {
             var item = items[index];
-            string key = FilmJson.RequiredText(item, "businessId");
-            if (!keys.Add(key)) throw new FilmPlaybackException("INVALID_RESPONSE");
-            // Refresh borrowed elements together when their owning array changes.
-            // Keeping one old document per unchanged card would retain historical full snapshots.
-            string poster = FilmSearchJson.Text(item, "poster");
-            var target = FilmJson.Target(item.GetProperty("playbackTarget"));
-            target.Validate();
-            values[index] = new(key, key, FilmSearchJson.Text(item, "title"),
-                poster, FilmSearchJson.Text(item, "textBadge"), FilmSearchJson.Text(item, "siteLabel"), item);
+            string key = FilmSearchJson.Text(item, "displayKey");
+            if (key.Length == 0) key = FilmSearchJson.Text(item, "id");
+            if (key.Length == 0 || !keys.Add(key)) throw new FilmPlaybackException("INVALID_RESPONSE");
+            var entry = FilmEntry.Read(item);
+            string subtitle = entry.SiteLabel.Length > 0 ? entry.SiteLabel : entry.Subtitle;
+            values[index] = new(key, key, entry.Title, entry.Poster, entry.Score, entry.TextBadge, subtitle, entry);
         }
         var order = previous?.Values.Select(value => value.Key).ToList() ?? [];
         var edits = new List<FilmSearchCardEdit>();
@@ -177,7 +188,6 @@ internal sealed class FilmSearchDisplay
     }
 }
 
-/// <summary>The transport owns this JSON tree. Child elements borrow it instead of cloning raw members per card.</summary>
 internal sealed class FilmSearchPreparedSnapshot
 {
     internal FilmSearchPreparedSnapshot(JsonElement snapshot, FilmSearchDisplay? previous, bool readDisplay = true)
@@ -193,8 +203,6 @@ internal sealed class FilmSearchPreparedSnapshot
         Loading = snapshot.GetProperty("loading").GetBoolean();
         HasMore = snapshot.GetProperty("hasMore").GetBoolean();
         NoSources = FilmJson.Bool(snapshot, "noSources");
-        MetadataQuery = FilmJson.Text(snapshot, "metadataQuery");
-        MetadataSearch = FilmJson.Member(snapshot, "metadataSearch") is { ValueKind: JsonValueKind.Object } search ? search : null;
         if (readDisplay) Display = FilmSearchDisplay.Read(snapshot, previous);
     }
 
@@ -207,8 +215,6 @@ internal sealed class FilmSearchPreparedSnapshot
     internal bool Loading { get; }
     internal bool HasMore { get; }
     internal bool NoSources { get; }
-    internal string MetadataQuery { get; } = "";
-    internal JsonElement? MetadataSearch { get; }
     internal FilmSearchChannelState SitesState { get; }
     internal FilmSearchChannelState MetadataState { get; }
     internal FilmSearchDisplay? Display { get; }
@@ -217,7 +223,7 @@ internal sealed class FilmSearchPreparedSnapshot
     {
         string id = FilmJson.RequiredText(snapshot, "sessionId");
         if (!Guid.TryParse(id, out _)) throw new FilmPlaybackException("INVALID_RESPONSE");
-        return (id, FilmJson.RequiredText(snapshot, "query"));
+        return (id, FilmSearchJson.Text(snapshot, "query"));
     }
 
     private static FilmSearchChannelState State(string state) => state switch

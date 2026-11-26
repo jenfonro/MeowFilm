@@ -21,12 +21,6 @@ CREATE TABLE ios_film_player_preferences (
     haptic_seek INTEGER NOT NULL CHECK (haptic_seek IN (0, 1))
 ) STRICT;
 
-CREATE TABLE ios_film_favorite_identity (
-    favorite_id TEXT PRIMARY KEY NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
-    source_id TEXT NOT NULL,
-    kind TEXT
-) STRICT;
-
 CREATE TABLE ios_novel_reading_background (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES novel_reading_settings(singleton) ON DELETE CASCADE,
     background_image_blob BLOB NOT NULL
@@ -242,18 +236,6 @@ CREATE TABLE ios_music_queue_similar_batch_entries (
     entry_id TEXT NOT NULL,
     PRIMARY KEY (scope, batch_id, position),
     FOREIGN KEY (scope, batch_id) REFERENCES ios_music_queue_similar_batches(scope, batch_id) ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE ios_music_queue_fm_state (
-    scope TEXT PRIMARY KEY NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
-    provider TEXT NOT NULL DEFAULT '' CHECK (provider IN ('', 'rule')),
-    mode TEXT,
-    submode TEXT NOT NULL DEFAULT '',
-    entry TEXT,
-    rule_id TEXT,
-    tab_tag_id TEXT,
-    source_name TEXT NOT NULL DEFAULT '',
-    continue_enabled INTEGER NOT NULL DEFAULT 1 CHECK (continue_enabled IN (0, 1))
 ) STRICT;
 
 CREATE TABLE ios_music_network_references (

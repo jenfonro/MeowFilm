@@ -2,22 +2,20 @@ using System.Text.Json;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class FilmDirectoryRow(string name, string path, bool isDirectory, string? candidateId,
-    JsonElement? playbackTarget, bool isCurrent)
+public sealed class FilmDirectoryRow(string name, string path, bool isDirectory, string? itemId, bool isCurrent)
 {
     public string Name { get; } = name;
     public string Path { get; } = path;
     public bool IsDirectory { get; } = isDirectory;
-    public string? CandidateId { get; } = candidateId;
-    public JsonElement? PlaybackTarget { get; } = playbackTarget;
+    public string? ItemId { get; } = itemId;
     public bool IsCurrent { get; } = isCurrent;
     public string Label => IsDirectory ? "目录 · " + Name : IsCurrent ? "当前 · " + Name : Name;
 
     internal FilmDirectoryRow WithCurrent(bool current) =>
-        IsCurrent == current ? this : new(Name, Path, IsDirectory, CandidateId, PlaybackTarget, current);
+        IsCurrent == current ? this : new(Name, Path, IsDirectory, ItemId, current);
 }
 
-/// <summary>Only groups already returned exact file paths. Browsing never requests or transfers a file.</summary>
+/// <summary>Groups returned file paths into a folder tree; clicking forwards semantic itemId to Node.</summary>
 internal sealed class FilmDirectory
 {
     private sealed class Folder(string path, Folder? parent)
@@ -30,15 +28,18 @@ internal sealed class FilmDirectory
 
     private readonly Folder root = new("", null);
     private Folder current;
-    private string currentCandidate;
+    private string currentItemId;
 
-    internal FilmDirectory(JsonElement browsing, string currentCandidate)
+    internal FilmDirectory(JsonElement rawItems, string currentItemId)
     {
         current = root;
-        this.currentCandidate = currentCandidate;
-        foreach (var file in FilmJson.Array(browsing, "originalEpisodes"))
+        this.currentItemId = currentItemId;
+        foreach (var file in FilmJson.Array(rawItems))
         {
-            string name = FilmJson.Text(file, "name"), path = FilmJson.Text(file, "path");
+            string itemId = FilmJson.RequiredText(file, "id");
+            string name = FilmJson.Text(file, "fileName");
+            if (name.Length == 0) name = FilmJson.Text(file, "title");
+            string path = FilmJson.Text(file, "path");
             string[] segments = path.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
             var folder = root;
             for (int index = 0; index < segments.Length - 1; index++)
@@ -48,24 +49,21 @@ internal sealed class FilmDirectory
                     folder.Children.Add(segment, child = new(folder.Path + "/" + segment, folder));
                 folder = child;
             }
-            var target = FilmJson.Member(file, "playbackTarget");
-            var exact = FilmJson.FileTarget(target);
-            string candidate = FilmJson.RequiredText(exact.Source!.Value, "candidateId");
-            folder.Files.Add(new(name.Length > 0 ? name : segments.LastOrDefault() ?? "", path, false,
-                candidate, target.Clone(), false));
+            string displayName = name.Length > 0 ? name : segments.LastOrDefault() ?? itemId;
+            folder.Files.Add(new(displayName, path, false, itemId, FilmJson.Bool(file, "active")));
         }
     }
 
     internal string Path => current.Path.Length == 0 ? "/" : current.Path;
     internal bool CanBack => current.Parent is not null;
     internal IReadOnlyList<FilmDirectoryRow> Rows => current.Children.Select(pair =>
-        new FilmDirectoryRow(pair.Key, pair.Value.Path, true, null, null, false)).Concat(current.Files.Select(row =>
-            row.WithCurrent(row.CandidateId == currentCandidate))).ToArray();
+        new FilmDirectoryRow(pair.Key, pair.Value.Path, true, null, false)).Concat(current.Files.Select(row =>
+            row.WithCurrent(row.IsCurrent || (currentItemId.Length > 0 && row.ItemId == currentItemId)))).ToArray();
 
-    internal bool UpdateCurrent(string candidateId)
+    internal bool UpdateCurrent(string itemId)
     {
-        if (currentCandidate == candidateId) return false;
-        currentCandidate = candidateId;
+        if (currentItemId == itemId) return false;
+        currentItemId = itemId;
         return true;
     }
 

@@ -87,8 +87,13 @@ export async function kgChannels(c) {
     ...groups.map(row => item(row.id ? 'category-' + row.id : '', row.name, 'playlists', 'more'))] };
 }
 
-export async function kgHome(c, params, target = 'kg:home') {
-  const current = pageNumber(params.continuation?.page), list = await playlists(c, current, '0', 20);
+export function kgHome(c, params, target = 'kg:home') {
+  const current = pageNumber(params.continuation?.page);
+  return c.cached(['home', target, current], fc => readKgHome(fc, current, target));
+}
+
+async function readKgHome(c, current, target) {
+  const list = await playlists(c, current, '0', 20);
   const sections = [browseSection({
     id: `${target}:playlists`, title: '推荐歌单', layout: 'playlist-rail',
     items: list.items, action: channelAction('playlist', 'playlists'),
@@ -109,9 +114,15 @@ export async function kgHome(c, params, target = 'kg:home') {
   });
 }
 
-export async function kgChannel(c, params) {
+export function kgChannel(c, params) {
+  const id = input(params.id), prev = record(params.continuation), current = pageNumber(prev.page);
+  if (id === 'feature') return kgHome(c, params, 'kg:channel:feature').then(page => ({ ...page, title: '精选' }));
+  return c.cached(['channel', id, text(params.pageCode), text(params.tag ?? prev.tag ?? ''), current, prev],
+    fc => readKgChannel(fc, params));
+}
+
+async function readKgChannel(c, params) {
   const id = input(params.id), target = 'kg:channel:' + id, prev = params.continuation ?? {}, current = pageNumber(prev.page);
-  if (id === 'feature') return { ...await kgHome(c, params, target), title: '精选' };
   if (id === 'chart') {
     return browsePage({
       platform: 'kg', id: target, title: '排行榜', more: false, continuation: null,

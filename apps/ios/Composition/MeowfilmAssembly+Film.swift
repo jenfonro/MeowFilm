@@ -6,29 +6,31 @@ import MeowRuntime
 extension MeowfilmAssembly {
     func makeFilmPlayback(item: FilmItem,
                           entrySurface: String? = nil) throws -> FilmPlaybackModel {
-        guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
-        guard let target = item.playbackTarget, let businessID = item.businessID, !businessID.isEmpty,
-              target.id.utf8.elementsEqual(businessID.utf8) else {
+        guard !closed, resources != nil else { throw FilmPlaybackError(code: "CLOSED") }
+        guard let entry = item.entry, !entry.targetId.isEmpty else {
             throw FilmPlaybackError(code: "INVALID_REQUEST")
         }
-        let metadata = try item.metadataSeed.map(RuntimeJSON.decode)
         return try makeFilmPlayback { [weak self] in
-            guard let self else { throw FilmPlaybackError(code: "CLOSED") }
-            let sources = try await self.filmPlaybackSources(resources: resources)
-            return FilmPlaybackRequest(target: target, sources: sources, metadata: metadata, entrySurface: entrySurface)
+            guard let self, await !self.closed else { throw FilmPlaybackError(code: "CLOSED") }
+            await self.scriptStartup?.value
+            try Task.checkCancellation()
+            guard await !self.closed else { throw FilmPlaybackError(code: "CLOSED") }
+            return FilmPlaybackRequest(entry: entry)
         }
     }
 
     func makeFilmPlayback(context: FilmSearchContext) throws -> FilmPlaybackModel {
-        guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
+        guard !closed, resources != nil else { throw FilmPlaybackError(code: "CLOSED") }
         return try makeFilmPlayback(searchContext: context) { [weak self, context] in
-            guard let self else { throw FilmPlaybackError(code: "CLOSED") }
-            let sources = try await self.filmPlaybackSources(resources: resources)
-            return try await context.playbackRequest(sources: sources)
+            guard let self, await !self.closed else { throw FilmPlaybackError(code: "CLOSED") }
+            await self.scriptStartup?.value
+            try Task.checkCancellation()
+            guard await !self.closed else { throw FilmPlaybackError(code: "CLOSED") }
+            return await context.playbackRequest()
         }
     }
 
-    /// The fixed Node target can open independently of a live search reference.
+    /// Node resolves live video sources via `film.video-sources` and owns session state.
     func makeFilmPlayback(searchContext: FilmSearchContext? = nil,
                           request: @escaping @Sendable () async throws -> FilmPlaybackRequest) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
@@ -46,22 +48,6 @@ extension MeowfilmAssembly {
            playbackPreferences: filmSettings?.playback, request: request)
         binding.model = model
         return model
-    }
-
-    private func filmPlaybackSources(resources: MeowfilmResources) async throws -> [FilmPlaybackSource] {
-        await scriptStartup?.value
-        try Task.checkCancellation()
-        guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
-        try await resources.filmSourceSettings.refresh()
-        try Task.checkCancellation()
-        guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
-        let catalog = await resources.filmSourceSettings.snapshot
-        let sources = catalog.videos.compactMap { video -> FilmPlaybackSource? in
-            guard let cat = catalog.cats.first(where: { $0.installationId.utf8.elementsEqual(video.key.installationId.utf8) }),
-                  cat.canDetect else { return nil }
-            return FilmSearchSite(cat: cat, source: video).playbackSource
-        }
-        return sources
     }
 
     func activateFilm(_ model: FilmPlaybackModel) async throws {

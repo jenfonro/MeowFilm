@@ -36,7 +36,7 @@
 
 普通设置的唯一存储、离线提交与通知语义见[共同契约](../common/settings-storage.md)。`createAppRuntime({settingsChanged})` 可选提供上述通知路由，使用 `runtime.http.v1` 信封；它不增加业务模块、describe 方法或设置值传输接口。正文只消费 `block` 字段，附加成员不参与设置写入；具体块名由装配分派，非法或未知块不作为配置保存受理。
 
-`apps/runtime/native-settings.mjs` 为受信启动通道提供设置快照适配，完整设置帧不设字节配额，仍验证 UTF-8、JSON、块身份及 CAS 指纹：启动时读齐六块，业务模块只读该原生值；后续通知重新读取对应块。元数据、影视规则和偏好的 HTTP 写设置方法在注入模式返回 `PERMISSION_DENIED`，Cat 来源意图也不由 HTTP 安装／编辑接口写入。pan 的在线凭据通过受限私密 CAS 能力写回同一原生 owner，不在公开 HTTP 增加读秘密的接口。各模块的确切读写接口见对应契约。
+`apps/runtime/native-settings.mjs` 为受信启动通道提供设置快照适配，完整设置帧不设字节配额，仍验证 UTF-8、JSON、块身份及 CAS 指纹：启动时读齐七块（`cat.sources`、`pan.accounts`、`tmdb`、`douban`、`film.rules`、`film.preferences`、`film.video-sources`），业务模块只读该原生值；后续通知重新读取对应块。元数据、影视规则和偏好的 HTTP 写设置方法在注入模式返回 `PERMISSION_DENIED`，Cat 来源意图也不由 HTTP 安装／编辑接口写入。pan 的在线凭据通过受限私密 CAS 能力写回同一原生 owner，不在公开 HTTP 增加读秘密的接口。各模块的确切读写接口见对应契约。
 
 该能力不由公共 HTTP 授予，不向脚本提供；原生密钥及存储路径不进入公开通知。iOS 使用既有受信 socketpair。私密帧按完整 JSON 行传输，不设字节配额，也不恢复旧分块协议。
 

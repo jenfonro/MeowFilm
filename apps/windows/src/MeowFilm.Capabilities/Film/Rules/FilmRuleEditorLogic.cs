@@ -15,6 +15,7 @@ internal static class FilmRuleEditorLogic
     {
         FilmRuleSection.Episode => "列表净化",
         FilmRuleSection.Movie => "电影匹配",
+        FilmRuleSection.Season => "原始标题季度提取",
         _ => "搜索列表净化"
     };
 
@@ -40,6 +41,7 @@ internal static class FilmRuleEditorLogic
             "episode" => draft with { EpisodeRules = Edit(draft.EpisodeRules, action, index, addedMatch) },
             "movie" => draft with { MovieRules = Edit(draft.MovieRules, action, index, addedMatch) },
             "search" => draft with { AggregateRegexRules = Edit(draft.AggregateRegexRules, action, index, addedClean) },
+            "season" => draft with { SeasonRules = Edit(draft.SeasonRules, action, index, addedMatch) },
             _ => throw new InvalidOperationException("未知规则组")
         };
 
@@ -57,9 +59,12 @@ internal static class FilmRuleEditorLogic
         var lines = new List<FilmRuleResultLine>();
         void Add(string name, string value) => lines.Add(new(name, name + "：" + value));
         Add("结果", result.Text);
-        if (result.InputText.Length != 0) Add(result.Section == FilmRuleSection.Movie ? "匹配文本" : "净化后", result.ProcessedText);
+        if (result.InputText.Length != 0)
+            Add(result.Section is FilmRuleSection.Movie or FilmRuleSection.Season ? "匹配文本" : "净化后", result.ProcessedText);
         if (result.MatchedRuleIndex is { } index) Add("命中规则", index.ToString(CultureInfo.InvariantCulture));
         if (result.RewrittenText is { } rewrite) Add("改写结果", rewrite);
+        if (result.Section == FilmRuleSection.Season && result.Season is { } season)
+            Add("提取季度", $"第{season}季");
         if (result.Section == FilmRuleSection.Search && result.InputText.Length != 0)
         {
             Add("聚合键", result.GroupKey);

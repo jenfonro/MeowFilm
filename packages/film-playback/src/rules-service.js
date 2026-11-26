@@ -20,7 +20,8 @@ function copyRules(rules) {
   try {
     return { episodeCleanRegexRules: rules.episodeCleanRegexRules.map(text),
       episodeRules: matches(rules.episodeRules), movieRules: matches(rules.movieRules),
-      aggregateRegexRules: rules.aggregateRegexRules.map(text) };
+      aggregateRegexRules: rules.aggregateRegexRules.map(text),
+      seasonRules: matches(rules.seasonRules) };
   } catch { throw fault('INVALID_RULES'); }
 }
 const ruleGroups = {
@@ -28,8 +29,15 @@ const ruleGroups = {
   episode: ['episodeRules', 'episode'],
   movie: ['movieRules', 'movie'],
   search: ['aggregateRegexRules', 'search'],
+  season: ['seasonRules', 'season'],
 };
-const emptyRules = () => ({ episodeCleanRegexRules: [], episodeRules: [], movieRules: [], aggregateRegexRules: [] });
+const emptyRules = () => ({
+  episodeCleanRegexRules: [],
+  episodeRules: [],
+  movieRules: [],
+  aggregateRegexRules: [],
+  seasonRules: [],
+});
 function groupInfo(group) {
   if (typeof group !== 'string' || !Object.hasOwn(ruleGroups, group)) throw fault('INVALID_REQUEST');
   return ruleGroups[group];
@@ -39,7 +47,7 @@ function groupDraft(group, rows) {
   return copyRules({ ...emptyRules(), [key]: rows });
 }
 function previewRequest({ section, text, query }) {
-  if (!['episode', 'movie', 'search'].includes(section) || !validRuleText(text) ||
+  if (!['episode', 'movie', 'search', 'season'].includes(section) || !validRuleText(text) ||
       section === 'search' && query !== undefined && !validRuleText(query)) throw fault('INVALID_REQUEST');
   return { section, text, ...(section === 'search' && query !== undefined ? { query } : {}) };
 }
@@ -85,7 +93,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings, debug = null 
         stale = false;
       } else {
         const value = nativeSettings.read('film.rules');
-        committed = snapshotOf(value === null ? defaults : copyRules(value.rules));
+        committed = snapshotOf(value === null ? defaults : copyRules({ ...defaults, ...value.rules }));
       }
     })().catch(error => {
       initialized = undefined;
@@ -121,7 +129,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings, debug = null 
       await initialize();
       const value = nativeSettings.read('film.rules');
       open();
-      committed = snapshotOf(value === null ? defaults : copyRules(value.rules));
+      committed = snapshotOf(value === null ? defaults : copyRules({ ...defaults, ...value.rules }));
     },
     set({ rules }, options) {
       const draft = copyRules(rules);
@@ -156,7 +164,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings, debug = null 
         rules: { ...saved, [key]: draft } }, { signal });
     },
     restore({ section, rules }, options) {
-      if (!['episode', 'movie', 'search'].includes(section)) throw fault('INVALID_REQUEST');
+      if (!['episode', 'movie', 'search', 'season'].includes(section)) throw fault('INVALID_REQUEST');
       const draft = rules === undefined ? undefined : cloneJSONValue(rules);
       return mutate(async signal => {
         const normalized = await invokeNative({ operation: 'restore', section, rules: draft ?? committed.rules }, { signal });

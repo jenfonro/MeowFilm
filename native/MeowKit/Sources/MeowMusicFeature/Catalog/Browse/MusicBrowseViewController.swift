@@ -144,9 +144,12 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 page.$collection.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             ])
             observe(stateChanges.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.renderState() }
+            observe(page.$previewResetRevision.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher()) {
+                [weak self] in self?.resetFMPreviews()
+            }
         }
         observe(model.accountChanges) { [weak self] platform in self?.accountChanged(platform) }
-        observe(model.fmArtworkChanges, whenVisible: true) { [weak self] in self?.updateFMArtwork() }
+        observe(model.cacheClearChanges) { [weak self] in self?.cachesCleared() }
         render()
     }
 
@@ -267,13 +270,28 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         }
     }
 
-    func accountChanged(_ platform: MusicAccountPlatform) {
-        if platform == .netease, !fmPreviews.isEmpty || !previewRequests.isEmpty || !previewTasks.isEmpty {
-            fmPreviews.removeAll(); previewRequests.removeAll()
-            for task in previewTasks.values { task.cancel() }
-            updateFMArtwork()
-            if isPageVisible { loadVisibleFMPreviews() }
+    func resetFMPreviews() {
+        guard !fmPreviews.isEmpty || !previewRequests.isEmpty || !previewTasks.isEmpty else { return }
+        fmPreviews.removeAll(); previewRequests.removeAll()
+        for task in previewTasks.values { task.cancel() }
+        updateFMArtwork()
+        if isPageActive, isPageVisible, !model.isClosed { loadVisibleFMPreviews() }
+    }
+
+    func cachesCleared() {
+        guard let page else { resetFMPreviews(); return }
+        page.invalidateCachedDiscovery()
+        if isPageActive, isPageVisible, !model.isClosed {
+            runPageTask { [weak self] in
+                if self?.isPageVisible == true { await page.loadIfNeeded() }
+            }
+        } else {
+            resetFMPreviews()
         }
+    }
+
+    func accountChanged(_ platform: MusicAccountPlatform) {
+        if platform == .netease { resetFMPreviews() }
         guard let page, page.invalidateAccount(platform) else { return }
         render()
         if isPageActive, isPageVisible, !model.isClosed {
@@ -493,11 +511,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     func artworkURL(for item: MusicPublicBrowseItem) -> URL? {
-        let current: URL?
-        if case .action(let action) = item.content, action.isPersonalFM { current = model.currentFMArtwork(action) }
-        else { current = nil }
         let preview = fmPreviews[item.id]
-        return current ?? (preview?.authorization.isActive == true ? preview?.artwork : nil) ?? item.artwork
+        return (preview?.authorization.isActive == true ? preview?.artwork : nil) ?? item.artwork
     }
 
     func isCurrentDisplayPreview(_ item: MusicPublicBrowseItem) -> Bool {
@@ -510,7 +525,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     func loadFMPreview(_ item: MusicPublicBrowseItem, action: MusicHomeAction) {
         guard isPageActive, isPageVisible, !model.isClosed,
-              item.artwork == nil, model.currentFMArtwork(action) == nil,
+              item.artwork == nil,
               !previewRequests.contains(item.id), previewTasks[item.id] == nil,
               isCurrentDisplayPreview(item),
               let provider = model.service else { return }

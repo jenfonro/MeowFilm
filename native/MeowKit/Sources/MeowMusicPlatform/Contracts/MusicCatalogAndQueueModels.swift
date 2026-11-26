@@ -752,12 +752,6 @@ public actor MusicRemoteQueueSource {
         }
         return result
     }
-    public func nextFMBatch(intent: MusicQueueAuthorization) async throws -> [MusicNativeTrackData] {
-        let items = try await nextFMReferences(intent: intent)
-        let value = try await projectTracks(items)
-        try intent.check(); try await validate()
-        return value
-    }
     public func nextFMReferences(intent: MusicQueueAuthorization) async throws -> [MusicQueueTrackReference] {
         guard context.kind == .fm else { throw MusicServiceError.invalidRequest }
         try await validate(); try intent.check()

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { decodePanResource } from '@meowfilm/script-host/cat-output';
 import { buildEpisodeMap } from './episodes.js';
-import { fail, fields, isIdentifier, resultDetailId, requireValue } from './identity.js';
+import { fail, fields, isIdentifier, resultDetailId, requireValue, text } from './identity.js';
 import { invokeRecognition, providerFamily } from './rules.js';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -44,6 +44,7 @@ function normalizeEpisode(item, index, { provider, source, resource, media } = {
   if (playId !== undefined) result.playId = playId;
   if (item.path !== undefined || item.file?.path !== undefined) result.path = item.path ?? item.file.path;
   if (share !== undefined) result.share = share;
+  if (item.shareOrigin !== undefined) result.shareOrigin = item.shareOrigin;
   if (actualProvider !== undefined) result.provider = actualProvider;
   return result;
 }
@@ -61,6 +62,8 @@ export function normalizeDetail(raw, { source } = {}) {
   }
   const detailId = resultDetailId(detail) ?? source?.detailId;
   if (detailId !== undefined && !isIdentifier(detailId)) invalidDetail();
+  const rawTitle = text(detail.vod_name ?? detail.title ?? detail.name) || text(source?.rawTitle ?? source?.title);
+  const remark = text(detail.vod_remarks ?? detail.remark) || text(source?.remark);
   const resources = new Map();
   if (raw._meow?.version === 1 && Array.isArray(raw._meow.resources)) {
     for (const resource of raw._meow.resources) {
@@ -73,7 +76,7 @@ export function normalizeDetail(raw, { source } = {}) {
     for (const media of raw._meow.media) {
       if (!object(media)) continue;
       if (media.lineIndex === undefined && media.episodeIndex === undefined) vodMedia.set(media.vodIndex, media);
-      else mediaRows.set(`${media.vodIndex}:${media.lineIndex}:${media.episodeIndex}`, media);
+      else mediaRows.set(`${vodIndex}:${media.lineIndex}:${media.episodeIndex}`, media);
     }
   }
   let lines;
@@ -117,14 +120,17 @@ export function normalizeDetail(raw, { source } = {}) {
       return { id, flag, label: flag, ...(provider === undefined ? {} : { provider }), episodes };
     });
   } else invalidDetail();
-  return { lines, raw, source, ...(detailId === undefined ? {} : { detailId }),
+  return {
+    lines, raw, source,
+    ...(detailId === undefined ? {} : { detailId }),
+    ...(rawTitle ? { rawTitle } : {}),
+    ...(remark ? { remark } : {}),
     ...(detail.kind === undefined ? {} : { kind: detail.kind }),
-    ...(detail.season === undefined ? {} : { season: detail.season }) };
+    ...(detail.season === undefined ? {} : { season: detail.season }),
+  };
 }
 
 export function stableFileIdentity(file) {
-  // Tokens/passwords/revisions are retained in file, but do not turn the same
-  // underlying resource into a fresh candidate whenever credentials refresh.
   const fields = ['provider', 'kind', 'shareId', 'fileId', 'coID', 'contentId', 'uk',
     ...(file.kind === 'stored' ? ['accountRevision'] : [])];
   const exact = Object.fromEntries(fields.filter(field => file[field] !== undefined).map(field => [field, file[field]]));
@@ -162,7 +168,6 @@ export async function recognizeVariantCandidates(candidate, variants, { rules, s
       ({ name: '', ...fields(variant, ['quality', 'fps']) })) }] } }, { signal });
   return variants.map((variant, index) => {
     const result = { ...candidate, id: `${candidate.id}:${variant.id}`, parentId: candidate.id, variant };
-    // A master/file label is not evidence about each of its variants.
     for (const field of ['quality', 'resolution', 'fps', 'codec']) delete result[field];
     if (texts[index].quality) result.quality = texts[index].quality;
     for (const field of ['resolution', 'fps', 'codec']) {
@@ -195,13 +200,11 @@ function mapIndex(map, key) {
   return index;
 }
 
-/** Content membership is independent of the currently requested season/file. */
 export function contentResults(rows, { target, rules, signal } = {}) {
   return invokeRecognition(rules, { operation: 'recognition.content', rows, target }, { signal });
 }
 
-/** Smart eligibility for a particular metadata target. */
-function matchesResults(rows, { target, contentIdentity, rules, signal } = {}) {
+export function matchesResults(rows, { target, contentIdentity, rules, signal } = {}) {
   return invokeRecognition(rules, { operation: 'recognition.matches', rows, target,
     ...(contentIdentity === undefined ? {} : { contentIdentity }) }, { signal });
 }
@@ -210,79 +213,160 @@ export async function matchesResult(raw, options) {
   return (await matchesResults([raw], options))[0];
 }
 
-export async function recognizeCandidates(detail, { target, source = detail?.source, metadata, rules, signal,
-  completeDirectory = false } = {}) {
-  if (!target || !['movie', 'tv', 'source', 'group'].includes(target.kind) || !source?.key) invalidDetail();
-  // normalizeDetail also accepts the expanded lines produced by data.expand.
-  // Their opaque row ID must never become the script's playId.
+export async function recognizeCandidates(detail, {
+  kind = 'tv',
+  source = detail?.source,
+  metadata = null,
+  baselineMetadata = null,
+  rules,
+  panMappings = [],
+  titleSeasonHint,
+  rawTitle,
+  signal,
+  completeDirectory = true,
+} = {}) {
+  if (!['movie', 'tv', 'source', 'group'].includes(kind) || !source?.key) invalidDetail();
   const normalized = normalizeDetail(detail, { source });
   const detailId = normalized.detailId ?? source.detailId;
   if (detailId === undefined) invalidDetail();
   const sourceIdentity = [source.key, source.engine ?? null, source.installationId ?? null, source.siteId ?? null];
   const candidateSource = { ...source, detailId };
-  // The session owns one complete directory; target-specific eligibility is
-  // applied when selecting, not by deleting ordinary files from that owner.
-  if (!completeDirectory && target.kind === 'source' && target.source) {
-    for (const field of ['key', 'engine', 'installationId', 'siteId', 'revision', 'generation']) {
-      if (target.source[field] !== undefined && target.source[field] !== source[field]) return [];
-    }
-    if (target.source.detailId !== undefined && target.source.detailId !== detailId) return [];
-  }
-  const texts = await invokeRecognition(rules, { operation: 'recognition.candidates', target: { kind: target.kind },
+  const effectiveRawTitle = text(rawTitle) || text(normalized.rawTitle) || text(source.rawTitle ?? source.title);
+
+  const texts = await invokeRecognition(rules, {
+    operation: 'recognition.candidates',
+    target: { kind },
     source: fields(source, ['manualSeasonHint']),
-    detail: { ...fields(normalized, ['season']), lines: normalized.lines.map(line =>
-      ({ ...fields(line, ['season']), episodes: line.episodes.map(item => ({
-        ...fields(item, ['name', 'fileName', 'path', 'season', 'episode', 'quality', 'hdr']),
-        ...fields({ fps: item.fps ?? item.file?.fps }, ['fps']),
-        ...(item.file ? { file: fields(item.file, ['name', 'path']) } : {}),
-      })) })) } }, { signal });
+    panMappings,
+    detail: {
+      ...fields(normalized, ['season']),
+      ...(effectiveRawTitle ? { rawTitle: effectiveRawTitle } : {}),
+      ...(Number.isSafeInteger(titleSeasonHint) && titleSeasonHint > 0 ? { titleSeason: titleSeasonHint } : {}),
+      lines: normalized.lines.map(line => ({
+        ...fields(line, ['season', 'label', 'flag', 'provider']),
+        episodes: line.episodes.map(item => ({
+          ...fields(item, ['name', 'fileName', 'path', 'season', 'episode', 'quality', 'hdr', 'provider']),
+          ...fields({ fps: item.fps ?? item.file?.fps }, ['fps']),
+          ...(item.file ? { file: fields(item.file, ['name', 'path']) } : {}),
+        })),
+      })),
+    },
+  }, { signal });
+
   let textIndex = 0;
-  const map = buildEpisodeMap(target.kind === 'group' ? null : metadata);
+  const hasMetadata = Boolean(metadata && typeof metadata === 'object');
+  const map = hasMetadata ? buildEpisodeMap(metadata) : [];
   const local = mapIndex(map, item => `${item.season}:${item.episode}`);
   const global = mapIndex(map, item => item.globalEpisode);
   const regularSeasons = new Set(map.filter(item => item.season > 0).map(item => item.season));
-  const singleSeason = regularSeasons.size === 1 && regularSeasons.has(1) && !(metadata?.number_of_seasons > 1);
+  const multiSeason = regularSeasons.size > 1 || Number(metadata?.number_of_seasons) > 1;
+  const singleSeason = regularSeasons.size === 1 && regularSeasons.has(1) && !multiSeason;
+  let season1Count = 0;
+  for (const item of map) {
+    if (item.season === 1 && item.episode > season1Count) season1Count = item.episode;
+  }
+  const baselineMap = baselineMetadata ? buildEpisodeMap(baselineMetadata) : [];
+  const baselineSeasons = new Set(baselineMap.filter(item => item.season > 0).map(item => item.season));
+  const allowSingleBaseline = multiSeason && (baselineSeasons.size === 1 || !baselineMetadata);
+
   const candidates = [];
   for (const line of normalized.lines) {
     for (const item of line.episodes) {
       const parsed = texts[textIndex++];
       if (!parsed.eligible && !completeDirectory) continue;
-      const { fileName, path, season, episode, movie, quality } = parsed;
+      const { fileName, path, season, episode, seasonRank = 0, sourceDirMaxEpisode = 0, panProvider, movie, quality } = parsed;
       const explicitGlobal = coordinate(item.globalEpisode);
-      let mapped = explicitGlobal === undefined ? undefined : global.get(explicitGlobal);
-      if (mapped && (season !== undefined && season !== mapped.season || episode !== undefined && episode !== mapped.episode)) {
-        mapped = undefined;
-      } else if (!mapped && season !== undefined && episode !== undefined) {
-        const localMatch = local.get(`${season}:${episode}`);
-        if (explicitGlobal === undefined || localMatch?.globalEpisode === explicitGlobal) mapped = localMatch;
-      } else if (!mapped && singleSeason && season === undefined && episode !== undefined) {
-        const localMatch = local.get(`1:${episode}`);
-        if (explicitGlobal === undefined || localMatch?.globalEpisode === explicitGlobal) mapped = localMatch;
+
+      let mapped;
+      let degraded = false;
+      let implicitSeason = false;
+      let effectiveRank = seasonRank;
+
+      if (!movie && hasMetadata && (episode !== undefined && episode > 0 || explicitGlobal !== undefined)) {
+        if (explicitGlobal !== undefined) {
+          mapped = global.get(explicitGlobal);
+          if (mapped && (season !== undefined && season !== mapped.season || episode !== undefined && episode !== mapped.episode)) {
+            mapped = undefined;
+          }
+        }
+        if (!mapped && season !== undefined && episode !== undefined) {
+          const localMatch = local.get(`${season}:${episode}`);
+          if (localMatch && (explicitGlobal === undefined || localMatch.globalEpisode === explicitGlobal)) {
+            mapped = localMatch;
+          } else if (allowSingleBaseline && season1Count > 0 && sourceDirMaxEpisode > season1Count) {
+            const globalMatch = global.get(episode);
+            if (globalMatch) { mapped = globalMatch; degraded = true; }
+          }
+        } else if (!mapped && season === undefined && episode !== undefined) {
+          if (singleSeason) {
+            const localMatch = local.get(`1:${episode}`);
+            if (localMatch && (explicitGlobal === undefined || localMatch.globalEpisode === explicitGlobal)) {
+              mapped = localMatch;
+            }
+          } else if (multiSeason) {
+            if (allowSingleBaseline && season1Count > 0 && sourceDirMaxEpisode > season1Count) {
+              const globalMatch = global.get(episode);
+              if (globalMatch) { mapped = globalMatch; degraded = true; effectiveRank = 0; }
+            }
+            if (!mapped && season1Count > 0 && episode <= season1Count) {
+              // Unseasoned title & unseasoned file can serve as lowest-priority Season 1 fallback.
+              const localMatch = local.get(`1:${episode}`);
+              if (localMatch) { mapped = localMatch; implicitSeason = true; effectiveRank = 0; }
+            }
+          }
+        }
       }
+
       const resourceIdentity = fileIdentity(item.file, item.share, sourceIdentity, detailId, line.id, item.playId);
-      const provider = item.file?.provider ?? item.provider ?? line.provider;
-      const candidate = { id: candidateIdentity(sourceIdentity, detailId, line.id, resourceIdentity),
-        fileIdentity: resourceIdentity, targetId: target.id, source: candidateSource, detailId, lineId: line.id,
-        lineLabel: line.label, flag: line.flag ?? line.id, name: item.name, fileName,
-        episodeId: item.id, index: item.index, kind: target.kind,
-        ...(completeDirectory ? { eligible: parsed.eligible } : {}),
-        ...(path === undefined ? {} : { path }), ...(provider === undefined ? {} : { provider }),
+      const rawProvider = item.file?.provider ?? item.provider ?? line.provider;
+      const resolvedPan = providerFamily(rawProvider) ?? providerFamily(panProvider);
+      const candidate = {
+        id: candidateIdentity(sourceIdentity, detailId, line.id, resourceIdentity),
+        fileIdentity: resourceIdentity,
+        source: candidateSource,
+        detailId,
+        lineId: line.id,
+        lineLabel: line.label,
+        flag: line.flag ?? line.id,
+        name: item.name,
+        fileName,
+        episodeId: item.id,
+        index: item.index,
+        kind,
+        eligible: parsed.eligible,
+        seasonRank: effectiveRank,
+        ...(degraded ? { degraded: true } : {}),
+        ...(implicitSeason ? { implicitSeason: true } : {}),
+        ...(path === undefined ? {} : { path }),
+        ...(rawProvider === undefined ? {} : { provider: rawProvider }),
+        ...(resolvedPan === undefined ? {} : { panProvider: resolvedPan }),
         ...Object.fromEntries(['resolution', 'fps', 'codec'].flatMap(field => {
           const value = item[field] ?? item.file?.[field];
           return value === undefined ? [] : [[field, value]];
         })),
-        ...(quality ? { quality } : {}), ...(item.file === undefined ? {} : { file: item.file }),
+        ...(quality ? { quality } : {}),
+        ...(item.file === undefined ? {} : { file: item.file }),
         ...(item.share === undefined ? {} : { share: item.share }),
-        ...(item.playId === undefined ? {} : { playId: item.playId }) };
+        ...(item.shareOrigin === undefined ? {} : { shareOrigin: item.shareOrigin }),
+        ...(item.playId === undefined ? {} : { playId: item.playId }),
+      };
+
       if (!movie) {
         if (mapped) {
           candidate.season = mapped.season;
           candidate.episode = mapped.episode;
           if (mapped.globalEpisode !== undefined) candidate.globalEpisode = mapped.globalEpisode;
-        } else {
+        } else if (!hasMetadata && episode !== undefined && episode > 0) {
+          candidate.season = season !== undefined && season > 0 ? season : 1;
+          candidate.episode = episode;
+          if (season === undefined || season <= 0) {
+            candidate.implicitSeason = true;
+            candidate.seasonRank = 0;
+          }
+          if (explicitGlobal !== undefined && explicitGlobal > 0) candidate.globalEpisode = explicitGlobal;
+        } else if (!hasMetadata) {
           if (season !== undefined) candidate.season = season;
           if (episode !== undefined) candidate.episode = episode;
-          if (explicitGlobal !== undefined && explicitGlobal > 0) candidate.globalEpisode = explicitGlobal;
         }
       }
       candidates.push(candidate);

@@ -13,8 +13,8 @@
 ## 类型与装配
 
 - App 只装配一个 `SearchResultsPage`，复用既有音乐视图与影视卡片。综合、单曲、歌单、影视分类及手动音乐／影视目标保持现行交互；普通数据刷新不覆盖手动目标。
-- `FilmSourceService` 提供来源配置快照及变更事件。搜索范围为启用且开启搜索的猫源与 TMDB，不包含豆瓣。每源传准确安装／站点／generation，以及顶层 `aggregateImages` 布尔和 `order`；不改变已有四个选项、封面单选或列表排序语义。
-- `FilmSearchService` 固定借用一个 `RuntimeConnection`，通过 `film.playback.v1` 调用 `film.search.open/snapshot/command/release/handoff`，以 `film` 事件通道订阅 `/v1/film/events/{sessionId}`。同一快照同时提供完整 `cards/rawCards` 与通道状态。
+- `FilmSourceService` 提供来源配置快照并持久化共享表 `film_video_*`（经 `film.video-sources` 原生设置块通知运行器）。搜索范围为启用且开启搜索的猫源与已配置 TMDB，不包含豆瓣；运行器内部直接解析活跃站点顺序、搜索开关与聚合封面选项，客户端不再在 `search.open` 上传 `sources`／`installationId`／`generation`。
+- `FilmSearchService` 固定借用一个 `RuntimeConnection`，通过 `film.playback.v1` 调用 `film.search.open/snapshot/command/release`，以 `film` 事件通道订阅 `/v1/film/events/{sessionId}`。同一快照同时提供完整 `cards/rawCards` 纯展示卡片数组与通道状态。
 - Node 唯一执行规则、识别、相关度、分页、聚合与排序，持有来源原始响应和规则快照。客户端只显示选定数组并转发动作，不再直接发搜索内容请求、执行 JS、排序或从卡片生成缓存 seed。
 - Capabilities 无规则／搜索 JS 内嵌资源；Platform 不再构建或复制独立规则 DLL。实际执行由运行器载荷的公共 script-host addon 提供，缺失运行器或方法时显示真实错误，无原生回退。
 - 正式 entry、manifest 与原生 describe 精确装配 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 九模块。通用默认三模块不变；加入豆瓣模块不扩展搜索范围。运行器装配与依赖分别见[平台接入](app-runtime.md)、[打包](runtime-packaging.md)。
@@ -25,8 +25,7 @@
 `FilmSearchService` 在后台读取 JSON、映射展示字段并计算身份级集合变化，
 Dispatcher 仅提交仍有效的 revision 及必要字段／集合操作；命令与 SSE 竞态按实际提交前驱重算。
 `FilmSearchSession` 保留完整已拥有的快照与借用连接，逐卡引用原数据而不深拷贝原始成员。
-搜索专属 `FilmSearchCardItem` 按 Node `businessId` 保持身份，
-同身份只通知变化字段；共享 `FilmCardItem` 仍是普通不可变模型，仅在准确激活时适配。
+搜索专属 `FilmSearchCardItem` 按卡片稳定 `Id` 保持身份，同身份只通知变化字段；共享 `FilmCardItem` 仍是普通模型，携带轻量 `FilmEntry` 供激活进入播放页。
 状态快照不重映射或改绑卡片，SSE 沿现有容量一的最新快照机制消费。
 首轮、加载更多和各源失败／空结果等状态均按 Node 回执显示；不在客户端增加自动重试、截条数或重复取数兜底。
 切换原始／聚合模式只选择已准备的对应集合，保留各自滚动位置，不重新映射 JSON。
@@ -43,25 +42,9 @@ Dispatcher 仅提交仍有效的 revision 及必要字段／集合操作；命�
 
 ## 搜索到真实播放接收
 
-`FilmSearchContext.PlaybackRequest` 直接读取卡片 `playbackTarget` 和 Node snapshot 的原授权
-`SourceSnapshot`。`FilmCapability.ReceiveSearchPlaybackAsync` 在执行仍有效时，以 opaque
-`displayKey` 调用 Node handoff 复用数据，再经 Shell 进入真实 `film-playback`；
-搜索已退役／连接已撤权时使用卡片固定请求。`HandoffOrLocatorAsync` 对现有受控
-失效类别降为该请求，不从显示标题重建目标。较旧点击的迟到回执不能覆盖较新导航。
-同一已持有 context 可复用原播放页，其他进入建立各自导航实例；共同身份与交接只见
-[影视契约](../common/film/search.md#稳定业务身份)。
+`FilmSearchContext.PlaybackRequest` 直接携带所点击卡片的轻量 `FilmEntry`（`targetId = "work:<sessionKey>"`、`keyword`、可选 `tmdb`/`douban`/`siteEntry`/`seasonHint`）以及活跃会话的 `searchReference: {sessionId, selectionId}`，不再经客户端调用 `search.handoff` 中转 `cacheEntries`、爬虫 `raw` 行或构造 `FilmPlaybackOpen`／`FilmSearchPlayback`。`FilmCapability.ReceiveSearchPlaybackAsync` 经 Shell 直接进入真实 `film-playback`，由 Node 运行器内部根据 `entry` 与可选 `searchReference` 复用或补全固定关键字会话；较旧点击的迟到回执不能覆盖较新导航。共同身份、原始拆分卡直选及跨词附加展示语义见[影视契约](../common/film/search.md#搜索到播放详情的交接)。
 
-`FilmSearchPlayback` 解码活跃 handoff 的 target/query/sources/results/resultHints/search/metadata/cacheEntries/searchReference，并绑定实际 producer；固定卡片路径不伪造这些回执：
-
-- 原始行交接的 `source` 保原单源 typed ID，数字 `0` 与字符串 `"0"` 不互换；不接受聚合成员或 TMDB 简介扩展。元数据页后续选择准确站点文件产生的 `source` 仍独立保留运行器给出的展示资料。
-- 未可靠关联的 `group` 保全部准确成员，不退化为代表项；可靠关联使用 Node 的 movie/tv 与元数据身份。
-- 原始行、原查询、已成功页及真实缓存 receipt 原样保留，不从显示标题重建查询、不生成新鲜度证明。换 owner 仍沿既有播放接缝降为 hints，不给旧事实盖新代次。
-- 播放 open 与 `search.update` 携带 `searchReference:{sessionId,selectionId}`。Node 重新读取该选择的事实与规则；客户端不上传 rules 或推导 metadataTarget。
-- `FilmPlaybackOpen` 的 `sources` 保留与当前安装相交的完整原搜索授权，不因当前执行目标为单源而收窄；`results/resultHints` 只转交 Node handoff 给出的真实卡片详情／成员。完整授权与分页事实不变成额外菜单条目，重入与迟到 reference 也不能借新全局来源扩大原授权。
-- 搜索列表停止后仍可向保留的播放选择通知有效 reference revision，但不发布其 cards/rawCards。播放端只转发 reference，不重搜、不预取全部详情，Node 负责迟到成员／可靠关联及已准备文件保护；退役搜索不再产生可复用 reference，页面最终释放时解除订阅。
-- 初次搜索 open 不生成 `resumeTarget`，允许 Node 跟随迟到 handoff。已有确认播放 snapshot 的同 owner 重进发送当前准确 `resumeTarget`，保留已选元数据、季集、globalEpisode 和 source/candidate；换 owner 不携带失效 searchReference 或仅用于跟随搜索的 resume marker。已确认元数据入口手选准确 source 则独立保存入口 `target` 与精确 `resumeTarget`，不依赖 searchReference 或 owner 仍有效；普通 source/group 入口不补造元数据 provenance。目标不由标题猜测。
-
-搜索派生文本可按 `FilmRuleText` 使用 UInt16 数组。展示 helper 接受数组并为 WinUI 渲染文本，原 JSON 和 opaque 身份不变，不从显示字符串反推选择。原始来源 `raw` 保持 Cat 契约。
+搜索派生文本可按 `FilmRuleText` 使用 UInt16 数组。展示 helper 接受数组并为 WinUI 渲染文本，原 JSON 和选择身份不变，不从显示字符串反推选择。
 
 Shell 保存模块不透明位置、公共页 `PageId` 及输入草稿，搜索与后续播放页使用同一历史顺序，
 不再用 origin／返回搜索捷径跳过中间播放页。`IDesktopNavigationRetention` 保留可达的

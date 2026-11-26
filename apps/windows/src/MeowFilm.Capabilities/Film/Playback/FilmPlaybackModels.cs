@@ -24,6 +24,7 @@ internal static class FilmPlaybackError
 
     internal static string Message(string code, string failure) => code switch
     {
+        "NO_VIDEO_SOURCES" => "暂无可用视频源",
         "TIMEOUT" or "MEDIA_UPSTREAM_TIMEOUT" or "MEDIA_PREFETCH_TIMEOUT" or PlaybackError.HttpDeadline => "请求超时，请重试",
         "CLOSED" => "服务已关闭，请重连",
         "DISCONNECTED" => "连接已断开，请重连",
@@ -123,62 +124,155 @@ internal static class FilmPlaybackError
 public sealed record FilmPlaybackMediaState(string? Identity, string Title, bool HasMedia, bool IsPlaying,
     double Position, double Duration);
 
-/// <summary>Exact search/detail identity. Display titles never supply an identity or episode coordinate.</summary>
-public sealed record FilmPlaybackTarget(string Id, string Kind, string Title,
-    string? MetadataProvider = null, string? MetadataId = null, int? Year = null,
-    int? Season = null, int? Episode = null, int? GlobalEpisode = null, JsonElement? Source = null,
-    JsonElement? Members = null)
+public sealed record FilmTmdbRef(string Kind, int Id);
+public sealed record FilmDoubanRef(string Kind, string Id);
+
+public sealed record FilmSiteEntryRef(string SourceKey, string? InstallationId, string? SiteKey,
+    JsonElement DetailId, string RawTitle = "", string Remark = "", string Poster = "")
 {
-    internal object Wire() => new
+    internal FilmSiteEntryRef Own() => this with
     {
-        id = Id, kind = Kind, title = Title, metadataProvider = MetadataProvider, metadataId = MetadataId,
-        year = Year, season = Season, episode = Episode, globalEpisode = GlobalEpisode, source = Source, members = Members
+        DetailId = DetailId.ValueKind == JsonValueKind.Undefined ? default : DetailId.Clone()
     };
+
+    internal bool SameContent(FilmSiteEntryRef? other) => other is not null &&
+        SourceKey == other.SourceKey && InstallationId == other.InstallationId && SiteKey == other.SiteKey &&
+        RawTitle == other.RawTitle && Remark == other.Remark && Poster == other.Poster &&
+        FilmJson.Equal(DetailId, other.DetailId);
+}
+
+/// <summary>Unified lightweight card entry shared across Home, Site Category, Search, Favorites, and History.</summary>
+public sealed record FilmEntry(
+    string TargetId,
+    string Keyword,
+    string Title,
+    string Subtitle = "",
+    string Poster = "",
+    string Backdrop = "",
+    string Score = "",
+    string TextBadge = "",
+    string SiteLabel = "",
+    string? Kind = null,
+    int? Year = null,
+    int? Season = null,
+    int? Episode = null,
+    int? SeasonHint = null,
+    FilmTmdbRef? Tmdb = null,
+    FilmDoubanRef? Douban = null,
+    FilmSiteEntryRef? SiteEntry = null)
+{
+    internal FilmEntry Own() => SiteEntry is null ? this : this with { SiteEntry = SiteEntry.Own() };
 
     internal void Validate()
     {
-        if (string.IsNullOrWhiteSpace(Id) || string.IsNullOrWhiteSpace(Title) ||
-            Kind is not ("movie" or "tv" or "source" or "group") ||
-            MetadataProvider is not (null or "tmdb" or "douban") ||
-            MetadataProvider is not null && (string.IsNullOrEmpty(MetadataId) || MetadataId.Any(character => !char.IsAsciiDigit(character))) ||
-            Season is < 0 || Episode is < 0 || GlobalEpisode is < 1 ||
-            (Season == 0 || Episode == 0) && GlobalEpisode is not null ||
-            Kind == "movie" && (Season is not null || Episode is not null || GlobalEpisode is not null) ||
-            Kind == "source" && (Source is not { ValueKind: JsonValueKind.Object } source ||
-                FilmJson.Text(source, "key").Length == 0 || !FilmJson.IsIdentity(FilmJson.Member(source, "detailId"))) ||
-            Kind == "group" && (MetadataProvider is not null || Members is not { ValueKind: JsonValueKind.Array } members ||
-                members.EnumerateArray().Any(member =>
-                    FilmJson.Text(member, "sourceKey").Length == 0 || !FilmJson.IsIdentity(FilmJson.Member(member, "detailId"))) ||
-                Source is { } selected && (selected.ValueKind != JsonValueKind.Object ||
-                    FilmJson.Text(selected, "key").Length == 0 || !FilmJson.IsIdentity(FilmJson.Member(selected, "detailId")))))
+        if (string.IsNullOrWhiteSpace(TargetId) || string.IsNullOrWhiteSpace(Keyword) || string.IsNullOrWhiteSpace(Title) ||
+            Kind is not (null or "movie" or "tv") ||
+            Tmdb is { } tmdb && (tmdb.Kind is not ("movie" or "tv") || tmdb.Id <= 0) ||
+            Douban is { } douban && (douban.Kind is not ("movie" or "tv") || string.IsNullOrWhiteSpace(douban.Id)) ||
+            SiteEntry is { } site && (string.IsNullOrWhiteSpace(site.SourceKey) || !FilmJson.IsIdentity(site.DetailId)))
             throw new FilmPlaybackException("INVALID_REQUEST");
-        // Public snapshots may contain Node's unresolved Douban wait group.
-        // Initial waiting reentry omits resume; a revoked Douban resume is sent
-        // intact so Node rejects it instead of starting a new seed lookup.
     }
-}
 
-/// <summary>Native handoff preserves the original query, loaded results/pages and raw metadata, without another cache.</summary>
-public sealed record FilmPlaybackRequest(FilmPlaybackTarget Target,
-    IReadOnlyList<JsonElement>? Sources = null, string? Query = null,
-    JsonElement? Results = null, JsonElement? Search = null, JsonElement? Metadata = null,
-    JsonElement? CacheEntries = null, JsonElement? ResultHints = null, JsonElement? SearchReference = null,
-    string? EntrySurface = null, FilmPlaybackTarget? ResumeTarget = null, JsonElement? Browsing = null)
-{
-    // Only the producer of the original source results/cache may bind this proof.
-    // Navigation persistence intentionally loses it: process-local authority is not JSON.
-    [JsonIgnore]
-    public RuntimeConnection? DataOwner { get; init; }
+    internal bool SameContent(FilmEntry? other) => other is not null &&
+        TargetId == other.TargetId && Keyword == other.Keyword && Title == other.Title &&
+        Subtitle == other.Subtitle && Poster == other.Poster && Backdrop == other.Backdrop &&
+        Score == other.Score && TextBadge == other.TextBadge && SiteLabel == other.SiteLabel &&
+        Kind == other.Kind && Year == other.Year && Season == other.Season &&
+        Episode == other.Episode && SeasonHint == other.SeasonHint &&
+        Tmdb == other.Tmdb && Douban == other.Douban &&
+        (SiteEntry is null ? other.SiteEntry is null : SiteEntry.SameContent(other.SiteEntry));
 
-    internal FilmPlaybackRequest Own() => this with
+    internal object Wire() => new
     {
-        Target = Target with { Source = Target.Source?.Clone(), Members = Target.Members?.Clone() },
-        ResumeTarget = ResumeTarget is { } resume
-            ? resume with { Source = resume.Source?.Clone(), Members = resume.Members?.Clone() } : null,
-        Sources = Sources?.Select(value => value.Clone()).ToArray(),
-        Results = Results?.Clone(), Search = Search?.Clone(), Metadata = Metadata?.Clone(), CacheEntries = CacheEntries?.Clone(),
-        ResultHints = ResultHints?.Clone(), SearchReference = SearchReference?.Clone(), Browsing = Browsing?.Clone()
+        targetId = TargetId,
+        keyword = Keyword,
+        title = Title,
+        subtitle = Subtitle,
+        poster = Poster,
+        backdrop = Backdrop,
+        score = Score,
+        textBadge = TextBadge,
+        siteLabel = SiteLabel,
+        kind = Kind,
+        year = Year,
+        season = Season,
+        episode = Episode,
+        seasonHint = SeasonHint,
+        tmdb = Tmdb is null ? null : new { kind = Tmdb.Kind, id = Tmdb.Id },
+        douban = Douban is null ? null : new { kind = Douban.Kind, id = Douban.Id },
+        siteEntry = SiteEntry is null ? null : new
+        {
+            sourceKey = SiteEntry.SourceKey,
+            installationId = SiteEntry.InstallationId,
+            siteKey = SiteEntry.SiteKey,
+            detailId = SiteEntry.DetailId,
+            rawTitle = SiteEntry.RawTitle,
+            remark = SiteEntry.Remark,
+            poster = SiteEntry.Poster
+        }
     };
+
+    internal static FilmEntry Read(JsonElement card)
+    {
+        if (card.ValueKind != JsonValueKind.Object) throw new FilmPlaybackException("INVALID_RESPONSE");
+        string title = FilmSearchJson.Text(card, "title");
+        string keyword = FilmSearchJson.Text(card, "keyword");
+        if (keyword.Length == 0) keyword = title;
+        string targetId = FilmSearchJson.Text(card, "targetId");
+        string? kind = FilmJson.Text(card, "kind") is ("movie" or "tv") and var k ? k : null;
+
+        FilmTmdbRef? tmdb = null;
+        if (FilmJson.Member(card, "tmdb") is { ValueKind: JsonValueKind.Object } tmdbObj &&
+            FilmJson.Text(tmdbObj, "kind") is ("movie" or "tv") and var tk &&
+            FilmJson.Integer(tmdbObj, "id") is > 0 and var tid)
+        {
+            tmdb = new(tk, tid);
+        }
+
+        FilmDoubanRef? douban = null;
+        if (FilmJson.Member(card, "douban") is { ValueKind: JsonValueKind.Object } doubanObj &&
+            FilmJson.Text(doubanObj, "kind") is ("movie" or "tv") and var dk &&
+            FilmJson.Text(doubanObj, "id") is { Length: > 0 } did)
+        {
+            douban = new(dk, did);
+        }
+
+        FilmSiteEntryRef? siteEntry = null;
+        if (FilmJson.Member(card, "siteEntry") is { ValueKind: JsonValueKind.Object } siteObj &&
+            FilmJson.Text(siteObj, "sourceKey") is { Length: > 0 } sourceKey &&
+            FilmJson.Member(siteObj, "detailId") is var detailId && FilmJson.IsIdentity(detailId))
+        {
+            siteEntry = new(
+                sourceKey,
+                FilmJson.Text(siteObj, "installationId") is { Length: > 0 } inst ? inst : null,
+                FilmJson.Text(siteObj, "siteKey") is { Length: > 0 } sk ? sk : null,
+                detailId.Clone(),
+                FilmSearchJson.Text(siteObj, "rawTitle"),
+                FilmSearchJson.Text(siteObj, "remark"),
+                FilmSearchJson.Text(siteObj, "poster"));
+        }
+
+        var entry = new FilmEntry(
+            targetId,
+            keyword,
+            title,
+            FilmSearchJson.Text(card, "subtitle"),
+            FilmSearchJson.Text(card, "poster"),
+            FilmSearchJson.Text(card, "backdrop"),
+            FilmSearchJson.Text(card, "score"),
+            FilmSearchJson.Text(card, "textBadge"),
+            FilmSearchJson.Text(card, "siteLabel"),
+            kind,
+            FilmJson.Integer(card, "year"),
+            FilmJson.Integer(card, "season"),
+            FilmJson.Integer(card, "episode"),
+            FilmJson.Integer(card, "seasonHint"),
+            tmdb,
+            douban,
+            siteEntry);
+        entry.Validate();
+        return entry;
+    }
 }
 
 internal static class FilmJson
@@ -209,20 +303,12 @@ internal static class FilmJson
         var member = Member(value, name);
         if (member.ValueKind != JsonValueKind.String || member.GetString()!.Length == 0)
             throw new FilmPlaybackException("INVALID_RESPONSE");
-        string result = member.GetString()!;
-        return result;
+        return member.GetString()!;
     }
     internal static bool IsIdentity(JsonElement value) => value.ValueKind == JsonValueKind.String
         ? value.GetString()!.Length > 0
         : value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out long number) &&
             number is >= -9007199254740991 and <= 9007199254740991;
-    internal static JsonElement Identity(JsonElement value, string name, bool required = false)
-    {
-        var member = Member(value, name);
-        if (!required && member.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return default;
-        if (!IsIdentity(member)) throw new FilmPlaybackException("INVALID_RESPONSE");
-        return member.Clone();
-    }
     internal static JsonElement[] Array(JsonElement value) =>
         value.ValueKind == JsonValueKind.Array ? value.EnumerateArray().ToArray() : [];
     internal static JsonElement[] Array(JsonElement value, string name) => Array(Member(value, name));
@@ -236,9 +322,6 @@ internal static class FilmJson
             !double.IsFinite(number) || number < 0) throw new FilmPlaybackException("INVALID_RESPONSE");
         return number;
     }
-    internal static string Names(JsonElement value) => string.Join(" / ", Array(value)
-        .Select(item => item.ValueKind == JsonValueKind.String ? String(item) : Text(item, "name"))
-        .Where(name => name.Length > 0));
     internal static string Time(double seconds) => TimeSpan.FromSeconds(Math.Max(0, seconds)).ToString(
         seconds >= 3600 ? @"h\:mm\:ss" : @"m\:ss", CultureInfo.InvariantCulture);
 
@@ -253,29 +336,153 @@ internal static class FilmJson
             return parsed.ToString("0.0", CultureInfo.InvariantCulture);
         return "";
     }
+}
 
-    internal static FilmPlaybackTarget Target(JsonElement value)
+public sealed record FilmSelection(string Id, string Label, string Kind = "", string Subtitle = "",
+    int? Season = null, string? Provider = null, string? State = null, string? Error = null);
+
+internal sealed record FilmWorkSnapshot(
+    string TargetId,
+    string Keyword,
+    string Kind,
+    string Title,
+    string Subtitle,
+    string Poster,
+    string Backdrop,
+    string Logo,
+    string Year,
+    string Countries,
+    string Duration,
+    int? SeasonCount,
+    int? EpisodeCount,
+    IReadOnlyList<string> Genres,
+    string Score,
+    string ScoreProvider,
+    string Directors,
+    string Cast,
+    string Summary,
+    FilmTmdbRef? Tmdb,
+    FilmDoubanRef? Douban,
+    IReadOnlyList<FilmCardItem> RelatedCards)
+{
+    internal static FilmWorkSnapshot Read(JsonElement value)
     {
-        var source = Member(value, "source");
-        return new(RequiredText(value, "id"), RequiredText(value, "kind"), RequiredText(value, "title"),
-            Text(value, "metadataProvider") is { Length: > 0 } provider ? provider : null,
-            Text(value, "metadataId") is { Length: > 0 } id ? id : null,
-            Integer(value, "year"), Integer(value, "season"), Integer(value, "episode"), Integer(value, "globalEpisode"),
-            source.ValueKind == JsonValueKind.Object ? source : null,
-            Member(value, "members").ValueKind == JsonValueKind.Array ? Member(value, "members") : null);
+        if (value.ValueKind != JsonValueKind.Object) throw new FilmPlaybackException("INVALID_RESPONSE");
+        string kind = FilmJson.Text(value, "kind") is "movie" ? "movie" : "tv";
+        var genres = FilmJson.Array(value, "genres")
+            .Select(FilmJson.String)
+            .Where(g => g.Length > 0)
+            .ToArray();
+        string cast = string.Join(" / ", FilmJson.Array(value, "cast")
+            .Select(person => FilmJson.Text(person, "name"))
+            .Where(name => name.Length > 0));
+
+        FilmTmdbRef? tmdb = null;
+        if (FilmJson.Member(value, "tmdb") is { ValueKind: JsonValueKind.Object } tmdbObj &&
+            FilmJson.Text(tmdbObj, "kind") is ("movie" or "tv") and var tk &&
+            FilmJson.Integer(tmdbObj, "id") is > 0 and var tid)
+            tmdb = new(tk, tid);
+
+        FilmDoubanRef? douban = null;
+        if (FilmJson.Member(value, "douban") is { ValueKind: JsonValueKind.Object } doubanObj &&
+            FilmJson.Text(doubanObj, "kind") is ("movie" or "tv") and var dk &&
+            FilmJson.Text(doubanObj, "id") is { Length: > 0 } did)
+            douban = new(dk, did);
+
+        var related = new List<FilmCardItem>();
+        foreach (var cardJson in FilmJson.Array(value, "relatedCards"))
+        {
+            if (cardJson.ValueKind != JsonValueKind.Object) continue;
+            try
+            {
+                string id = FilmJson.RequiredText(cardJson, "id");
+                var entry = FilmEntry.Read(cardJson);
+                related.Add(new FilmCardItem(id, entry.Title, entry.Poster, entry.Score)
+                {
+                    TextBadge = entry.TextBadge,
+                    Subtitle = entry.Subtitle,
+                    Entry = entry
+                });
+            }
+            catch (FilmPlaybackException) { }
+        }
+
+        return new(
+            FilmJson.Text(value, "targetId"),
+            FilmJson.Text(value, "keyword"),
+            kind,
+            FilmJson.Text(value, "title"),
+            FilmJson.Text(value, "subtitle"),
+            FilmJson.Text(value, "poster"),
+            FilmJson.Text(value, "backdrop"),
+            FilmJson.Text(value, "logo"),
+            FilmJson.Text(value, "year"),
+            FilmJson.Text(value, "countries"),
+            FilmJson.Text(value, "duration"),
+            FilmJson.Integer(value, "seasonCount"),
+            FilmJson.Integer(value, "episodeCount"),
+            genres,
+            FilmJson.Text(value, "score"),
+            FilmJson.Text(value, "scoreProvider"),
+            FilmJson.Text(value, "directors"),
+            cast,
+            FilmJson.Text(value, "summary"),
+            tmdb,
+            douban,
+            related);
     }
 
-    internal static FilmPlaybackTarget FileTarget(JsonElement value)
+    internal bool SameContent(FilmWorkSnapshot? other) => other is not null &&
+        TargetId == other.TargetId && Keyword == other.Keyword && Kind == other.Kind &&
+        Title == other.Title && Subtitle == other.Subtitle && Poster == other.Poster &&
+        Backdrop == other.Backdrop && Logo == other.Logo && Year == other.Year &&
+        Countries == other.Countries && Duration == other.Duration &&
+        SeasonCount == other.SeasonCount && EpisodeCount == other.EpisodeCount &&
+        Genres.SequenceEqual(other.Genres, StringComparer.Ordinal) &&
+        Score == other.Score && ScoreProvider == other.ScoreProvider &&
+        Directors == other.Directors && Cast == other.Cast && Summary == other.Summary &&
+        Tmdb == other.Tmdb && Douban == other.Douban &&
+        RelatedCards.Select(c => (c.Id, c.Title, c.Poster, c.Score))
+            .SequenceEqual(other.RelatedCards.Select(c => (c.Id, c.Title, c.Poster, c.Score)));
+}
+
+internal sealed record FilmAttemptInfo(
+    string Id,
+    string CandidateId,
+    bool PrepareOnly,
+    double Position,
+    double Duration,
+    bool Paused,
+    string Title,
+    int? Season,
+    int? Episode,
+    int? GlobalEpisode,
+    string EpisodeLabel,
+    string SourceLabel,
+    string Quality,
+    string? Provider)
+{
+    internal static FilmAttemptInfo? Read(JsonElement value, bool isCurrent)
     {
-        var target = Target(value);
-        var source = Member(value, "source");
-        if (target.Kind != "source" || source.ValueKind != JsonValueKind.Object)
-            throw new FilmPlaybackException("INVALID_RESPONSE");
-        _ = RequiredText(source, "key");
-        _ = Identity(source, "detailId", required: true);
-        _ = Identity(source, "lineId", required: true);
-        _ = RequiredText(source, "candidateId");
-        return target;
+        if (value.ValueKind != JsonValueKind.Object) return null;
+        string id = FilmJson.RequiredText(value, isCurrent ? "attemptId" : "id");
+        double pos = FilmJson.Member(value, "position") is { ValueKind: JsonValueKind.Number } p && p.TryGetDouble(out double pv) ? pv : 0;
+        double dur = isCurrent && FilmJson.Member(value, "duration") is { ValueKind: JsonValueKind.Number } d && d.TryGetDouble(out double dv) ? dv : 0;
+        return new(
+            id,
+            FilmJson.Text(value, "candidateId"),
+            !isCurrent && FilmJson.Bool(value, "prepareOnly"),
+            pos,
+            dur,
+            FilmJson.Bool(value, "paused"),
+            FilmJson.Text(value, "title"),
+            FilmJson.Integer(value, "season"),
+            FilmJson.Integer(value, "episode"),
+            FilmJson.Integer(value, "globalEpisode"),
+            FilmJson.Text(value, "episodeLabel"),
+            FilmJson.Text(value, "sourceLabel"),
+            FilmJson.Text(value, "quality"),
+            FilmJson.Text(value, "provider") is { Length: > 0 } prov ? prov : null);
     }
 }
 
@@ -287,95 +494,149 @@ internal sealed class FilmPlaybackSnapshot
             !Guid.TryParse(FilmJson.RequiredText(value, "sessionId"), out var id) ||
             FilmJson.Member(value, "sequence").ValueKind != JsonValueKind.Number ||
             !FilmJson.Member(value, "sequence").TryGetInt64(out long sequence) || sequence < 0 ||
-            FilmJson.Member(value, "entryTarget").ValueKind != JsonValueKind.Object ||
-            FilmJson.Member(value, "sources").ValueKind != JsonValueKind.Array ||
-            FilmJson.Member(value, "episodes").ValueKind != JsonValueKind.Array ||
-            FilmJson.Member(value, "candidates").ValueKind != JsonValueKind.Array ||
-            FilmJson.Member(value, "browsing").ValueKind != JsonValueKind.Object)
+            FilmJson.Member(value, "work").ValueKind != JsonValueKind.Object ||
+            FilmJson.Member(value, "sourceMenu").ValueKind != JsonValueKind.Object ||
+            FilmJson.Member(value, "lineMenu").ValueKind != JsonValueKind.Object ||
+            FilmJson.Member(value, "directory").ValueKind != JsonValueKind.Object ||
+            FilmJson.Member(value, "player").ValueKind != JsonValueKind.Object)
             throw new FilmPlaybackException("INVALID_RESPONSE");
+
         Raw = value.Clone();
         SessionId = id;
         Sequence = sequence;
-        Target = FilmJson.Target(FilmJson.Member(Raw, "target"));
-        EntryTarget = FilmJson.Target(FilmJson.Member(Raw, "entryTarget"));
-        string metadataSourceId = FilmJson.Member(Raw, "metadataSourceId") switch
+        TargetId = FilmJson.RequiredText(Raw, "targetId");
+        Keyword = FilmJson.Text(Raw, "keyword");
+        Stage = FilmJson.Text(Raw, "stage");
+        Error = FilmJson.Text(Raw, "error");
+        ErrorStage = FilmJson.Text(Raw, "errorStage");
+        ReportError = FilmJson.Text(Raw, "reportError");
+        NoSources = FilmJson.Bool(Raw, "noSources");
+        RetryMediaAttemptId = FilmJson.Text(Raw, "retryMediaAttemptId");
+        Work = FilmWorkSnapshot.Read(FilmJson.Member(Raw, "work"));
+
+        var sm = FilmJson.Member(Raw, "sourceMenu");
+        SourceSelectedId = FilmJson.Text(sm, "selectedId") is { Length: > 0 } sid ? sid : null;
+        SourcePlaceholder = FilmJson.Text(sm, "placeholder") is { Length: > 0 } ph ? ph : "选择站点源";
+        SourceDisabled = FilmJson.Bool(sm, "disabled");
+        SourceCanLoadMore = FilmJson.Bool(sm, "canLoadMore");
+        SourceLoadingMore = FilmJson.Bool(sm, "loadingMore");
+        SourceOptions = FilmJson.Array(sm, "options").Select(opt => new FilmSelection(
+            FilmJson.RequiredText(opt, "id"),
+            FilmJson.Text(opt, "label"),
+            Kind: FilmJson.Text(opt, "kind"),
+            Subtitle: FilmJson.Text(opt, "subtitle"),
+            State: FilmJson.Text(opt, "state"),
+            Error: FilmJson.Text(opt, "error") is { Length: > 0 } oe ? oe : null)).ToArray();
+
+        var lm = FilmJson.Member(Raw, "lineMenu");
+        LineVisible = FilmJson.Bool(lm, "visible");
+        LineSelectedId = FilmJson.Text(lm, "selectedId") is { Length: > 0 } lid ? lid : null;
+        LineOptions = FilmJson.Array(lm, "options").Select(opt => new FilmSelection(
+            FilmJson.RequiredText(opt, "id"),
+            FilmJson.Text(opt, "label"),
+            Provider: FilmJson.Text(opt, "provider") is { Length: > 0 } lp ? lp : null)).ToArray();
+
+        var dir = FilmJson.Member(Raw, "directory");
+        DirectoryMode = FilmJson.Text(dir, "mode") is { Length: > 0 } dm ? dm : "empty";
+        DirectoryLoading = FilmJson.Bool(dir, "loading");
+        DirectoryRefreshing = FilmJson.Bool(dir, "refreshing");
+        DirectoryError = FilmJson.Text(dir, "error");
+        DirectorySelectedSeason = FilmJson.Integer(dir, "selectedSeason");
+        DirectoryCanLoadMore = FilmJson.Bool(dir, "canLoadMore");
+        DirectoryLoadingMore = FilmJson.Bool(dir, "loadingMore");
+        PreviewEpisodes = FilmJson.Bool(dir, "previewEpisodes");
+        CanTogglePreview = FilmJson.Bool(dir, "canTogglePreview");
+        DirectorySeasons = FilmJson.Array(dir, "seasons").Select(s =>
         {
-            { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined } => "",
-            { ValueKind: JsonValueKind.String } reference => reference.GetString()!,
-            _ => throw new FilmPlaybackException("INVALID_RESPONSE")
-        };
-        SelectedMetadataSource = metadataSourceId.Length > 0
-            ? FilmJson.Array(Raw, "metadataSources").FirstOrDefault(row =>
-                FilmJson.Member(row, "id") is { ValueKind: JsonValueKind.String } identity &&
-                identity.GetString() == metadataSourceId) : default;
-        if (metadataSourceId.Length > 0 &&
-            (FilmJson.RequiredText(SelectedMetadataSource, "id") != metadataSourceId ||
-                FilmJson.RequiredText(SelectedMetadataSource, "provider") is not ("tmdb" or "douban")))
-            throw new FilmPlaybackException("INVALID_RESPONSE");
-        string contentKind = FilmJson.Text(SelectedMetadataSource, "kind");
-        ContentKind = contentKind is "movie" or "tv" ? contentKind : Target.Kind;
-        MetadataCache = FilmMetadataCache.Read(FilmJson.Member(Raw, "metadataCache"));
-        WorkInfo = FilmWorkInfo.Read(FilmJson.Member(Raw, "workInfo"));
+            int seasonNum = FilmJson.Integer(s, "season") ?? 1;
+            string label = FilmJson.Text(s, "label") is { Length: > 0 } sl ? sl : $"第{seasonNum}季";
+            return new FilmSelection($"season:{seasonNum}", label, Kind: "season", Season: seasonNum);
+        }).ToArray();
+        DirectoryItems = FilmJson.Member(dir, "items");
+        DirectoryRawItems = FilmJson.Member(dir, "rawItems");
+
+        var pl = FilmJson.Member(Raw, "player");
+        ShortVideo = FilmJson.Bool(pl, "shortVideo");
+        CanPrevious = FilmJson.Bool(pl, "canPrevious");
+        CanNext = FilmJson.Bool(pl, "canNext");
+        CanSwitchSource = FilmJson.Bool(pl, "canSwitchSource");
+        CanBlockSource = FilmJson.Bool(pl, "canBlockSource");
+        ActiveSourceLabel = FilmJson.Text(pl, "activeSourceLabel");
+        ActiveEpisodeLabel = FilmJson.Text(pl, "activeEpisodeLabel");
+        ActiveQuality = FilmJson.Text(pl, "activeQuality");
+        ActivePan = FilmJson.Text(pl, "activePan");
+        var constraint = FilmJson.Member(pl, "constraint");
+        ConstraintAction = FilmJson.Text(constraint, "action");
+        ConstraintProvider = FilmJson.Text(constraint, "provider");
+        ConstraintQuality = FilmJson.Text(constraint, "quality");
+        AvailableQualities = FilmJson.Array(pl, "availableQualities").Select(q =>
+            new FilmPlayerOption(FilmJson.RequiredText(q, "key"), FilmJson.Text(q, "label"), FilmJson.Bool(q, "active"))).ToArray();
+        AvailablePans = FilmJson.Array(pl, "availablePans").Select(p =>
+            new FilmPlayerOption(FilmJson.RequiredText(p, "provider"), FilmJson.Text(p, "label"), FilmJson.Bool(p, "active"))).ToArray();
+        Attempt = FilmAttemptInfo.Read(FilmJson.Member(pl, "attempt"), isCurrent: false);
+        Current = FilmAttemptInfo.Read(FilmJson.Member(pl, "current"), isCurrent: true);
     }
+
     internal JsonElement Raw { get; }
     internal Guid SessionId { get; }
     internal long Sequence { get; }
-    internal FilmPlaybackTarget Target { get; }
-    internal FilmPlaybackTarget EntryTarget { get; }
-    internal JsonElement SelectedMetadataSource { get; }
-    internal string ContentKind { get; }
-    internal string EntrySurface => FilmJson.Text(Raw, "entrySurface");
-    internal FilmMetadataCache? MetadataCache { get; }
-    internal FilmWorkInfo? WorkInfo { get; }
-    internal JsonElement Metadata => FilmJson.Member(Raw, "metadata");
-    internal JsonElement Browsing => FilmJson.Member(Raw, "browsing");
-    internal JsonElement Attempt => FilmJson.Member(Raw, "attempt");
-    internal JsonElement Current => FilmJson.Member(Raw, "current");
-    internal string AttemptId => FilmJson.Text(Attempt, "id");
-    internal string CurrentId => FilmJson.Text(Current, "attemptId");
+    internal string TargetId { get; }
+    internal string Keyword { get; }
+    internal string Stage { get; }
+    internal string Error { get; }
+    internal string ErrorStage { get; }
+    internal string ReportError { get; }
+    internal bool NoSources { get; }
+    internal string RetryMediaAttemptId { get; }
+    internal FilmWorkSnapshot Work { get; }
+
+    internal string? SourceSelectedId { get; }
+    internal string SourcePlaceholder { get; }
+    internal bool SourceDisabled { get; }
+    internal bool SourceCanLoadMore { get; }
+    internal bool SourceLoadingMore { get; }
+    internal IReadOnlyList<FilmSelection> SourceOptions { get; }
+
+    internal bool LineVisible { get; }
+    internal string? LineSelectedId { get; }
+    internal IReadOnlyList<FilmSelection> LineOptions { get; }
+
+    internal string DirectoryMode { get; }
+    internal bool DirectoryLoading { get; }
+    internal bool DirectoryRefreshing { get; }
+    internal string DirectoryError { get; }
+    internal int? DirectorySelectedSeason { get; }
+    internal bool DirectoryCanLoadMore { get; }
+    internal bool DirectoryLoadingMore { get; }
+    internal bool PreviewEpisodes { get; }
+    internal bool CanTogglePreview { get; }
+    internal IReadOnlyList<FilmSelection> DirectorySeasons { get; }
+    internal JsonElement DirectoryItems { get; }
+    internal JsonElement DirectoryRawItems { get; }
+
+    internal bool ShortVideo { get; }
+    internal bool CanPrevious { get; }
+    internal bool CanNext { get; }
+    internal bool CanSwitchSource { get; }
+    internal bool CanBlockSource { get; }
+    internal string ActiveSourceLabel { get; }
+    internal string ActiveEpisodeLabel { get; }
+    internal string ActiveQuality { get; }
+    internal string ActivePan { get; }
+    internal string ConstraintAction { get; }
+    internal string ConstraintProvider { get; }
+    internal string ConstraintQuality { get; }
+    internal IReadOnlyList<FilmPlayerOption> AvailableQualities { get; }
+    internal IReadOnlyList<FilmPlayerOption> AvailablePans { get; }
+    internal FilmAttemptInfo? Attempt { get; }
+    internal FilmAttemptInfo? Current { get; }
+    internal string AttemptId => Attempt?.Id ?? "";
+    internal string CurrentId => Current?.Id ?? "";
 }
-
-internal sealed record FilmWorkInfo(string Provider, string MetadataId, string Kind, string Title,
-    string Summary, int? SeasonCount, int? EpisodeCount, JsonElement Metadata)
-{
-    internal static FilmWorkInfo? Read(JsonElement value)
-    {
-        if (value.ValueKind == JsonValueKind.Null) return null;
-        if (value.ValueKind != JsonValueKind.Object ||
-            FilmJson.RequiredText(value, "provider") is not ("tmdb" or "douban") ||
-            FilmJson.RequiredText(value, "kind") is not ("movie" or "tv") ||
-            FilmJson.Member(value, "summary").ValueKind != JsonValueKind.String ||
-            FilmJson.Member(value, "metadata").ValueKind != JsonValueKind.Object)
-            throw new FilmPlaybackException("INVALID_RESPONSE");
-        int? Count(string name)
-        {
-            var count = FilmJson.Member(value, name);
-            if (count.ValueKind == JsonValueKind.Null) return null;
-            if (count.ValueKind != JsonValueKind.Number || !count.TryGetInt32(out int number) || number < 0)
-                throw new FilmPlaybackException("INVALID_RESPONSE");
-            return number;
-        }
-        return new(FilmJson.RequiredText(value, "provider"), FilmJson.RequiredText(value, "metadataId"),
-            FilmJson.RequiredText(value, "kind"), FilmJson.RequiredText(value, "title"),
-            FilmJson.Text(value, "summary"), Count("seasonCount"), Count("episodeCount"),
-            value.GetProperty("metadata").Clone());
-    }
-
-    internal bool SameContent(FilmWorkInfo? other) => other is not null &&
-        Provider == other.Provider && MetadataId == other.MetadataId && Kind == other.Kind &&
-        Title == other.Title && Summary == other.Summary && SeasonCount == other.SeasonCount &&
-        EpisodeCount == other.EpisodeCount && FilmJson.Equal(Metadata, other.Metadata);
-}
-
-public sealed record FilmSelection(string? Id, string Label, int? Season = null, JsonElement? WireId = null,
-    string? MetadataSourceId = null, string? Provider = null, string? BusinessId = null, FilmPlaybackTarget? PlaybackTarget = null);
 
 public sealed record FilmCandidateItem(string Id, string Name, string Path, string Quality,
-    string? Provider, string SourceKey, JsonElement DetailId, JsonElement LineId,
-    int? Season = null, int? Episode = null, int? GlobalEpisode = null) : INotifyPropertyChanged
+    string SourceLabel, string Image, string Overview) : INotifyPropertyChanged
 {
-    public string BusinessId { get; init; } = "";
-    public FilmPlaybackTarget? PlaybackTarget { get; init; }
     public string DisplayLabel { get; init; } = "";
     public bool IsSelected { get; private set; }
     internal void Select(bool value)
@@ -385,60 +646,25 @@ public sealed record FilmCandidateItem(string Id, string Name, string Path, stri
         PropertyChanged?.Invoke(this, new(nameof(IsSelected)));
     }
     public event PropertyChangedEventHandler? PropertyChanged;
-    public string Image { get; init; } = "";
-    public string Overview { get; init; } = "";
-    public JsonElement Resolution { get; init; }
-    public JsonElement Fps { get; init; }
-    public string Codec { get; init; } = "";
+
     internal bool SameDisplay(FilmCandidateItem other) =>
-        Id == other.Id && BusinessId == other.BusinessId && Name == other.Name && Path == other.Path && Quality == other.Quality &&
-        Provider == other.Provider && SourceKey == other.SourceKey && Season == other.Season &&
-        Episode == other.Episode && GlobalEpisode == other.GlobalEpisode && DisplayLabel == other.DisplayLabel &&
-        Image == other.Image && Overview == other.Overview && Codec == other.Codec &&
-        FilmJson.Equal(DetailId, other.DetailId) && FilmJson.Equal(LineId, other.LineId) &&
-        FilmJson.Equal(Resolution, other.Resolution) && FilmJson.Equal(Fps, other.Fps) &&
-        (PlaybackTarget is null ? other.PlaybackTarget is null : other.PlaybackTarget is { } next &&
-            (PlaybackTarget with { Source = null, Members = null }) == (next with { Source = null, Members = null }) &&
-            FilmJson.Equal(PlaybackTarget.Source ?? default, next.Source ?? default) &&
-            FilmJson.Equal(PlaybackTarget.Members ?? default, next.Members ?? default));
-    private static string QualityLabel(string quality) => quality switch
+        Id == other.Id && Name == other.Name && Path == other.Path && Quality == other.Quality &&
+        SourceLabel == other.SourceLabel && DisplayLabel == other.DisplayLabel &&
+        Image == other.Image && Overview == other.Overview;
+
+    internal static FilmCandidateItem Read(JsonElement row, string poster, string overview)
     {
-        "4k_hdr" => "4K HDR", "4k_fps" => "4K 60帧", "4k" => "4K", "1080p" => "1080P", "720p" => "720P",
-        "" => "未知画质", _ => quality
-    };
-    internal static FilmCandidateItem Read(JsonElement value)
-    {
-        var source = FilmJson.Member(value, "source");
-        var target = FilmJson.Target(value.GetProperty("playbackTarget"));
-        return new(FilmJson.RequiredText(value, "id"), FilmJson.Text(value, "name"), FilmJson.Text(value, "path"),
-            FilmJson.Text(value, "quality"), FilmJson.Text(value, "provider") is { Length: > 0 } provider ? provider : null,
-            FilmJson.RequiredText(source, "key"), FilmJson.Identity(source, "detailId", required: true), FilmJson.Identity(value, "lineId"),
-            FilmJson.Integer(value, "season"), FilmJson.Integer(value, "episode"), FilmJson.Integer(value, "globalEpisode"))
+        string id = FilmJson.RequiredText(row, "id");
+        string name = FilmJson.Text(row, "fileName");
+        if (name.Length == 0) name = FilmJson.Text(row, "title");
+        string quality = FilmJson.Text(row, "quality");
+        string sourceLabel = FilmJson.Text(row, "sourceLabel");
+        string displayLabel = quality.Length > 0 && sourceLabel.Length > 0
+            ? $"{quality} · {sourceLabel}"
+            : quality.Length > 0 ? quality : sourceLabel.Length > 0 ? sourceLabel : "未知画质";
+        return new(id, name, FilmJson.Text(row, "path"), quality, sourceLabel, poster, overview)
         {
-            BusinessId = FilmJson.RequiredText(value, "businessId"),
-            PlaybackTarget = target,
-            DisplayLabel = QualityLabel(FilmJson.Text(value, "quality")) + " · " + FilmJson.Text(source, "name"),
-            Resolution = FilmJson.Copy(FilmJson.Member(value, "resolution")),
-            Fps = FilmJson.Copy(FilmJson.Member(value, "fps")),
-            Codec = FilmJson.Text(value, "codec")
-        };
-    }
-    internal static FilmCandidateItem ReadBrowsing(JsonElement value, string sourceName, string lineProvider)
-    {
-        var target = FilmJson.FileTarget(FilmJson.Member(value, "playbackTarget"));
-        var source = target.Source ?? throw new FilmPlaybackException("INVALID_RESPONSE");
-        return new(FilmJson.RequiredText(source, "candidateId"), FilmJson.Text(value, "name"), FilmJson.Text(value, "path"),
-            FilmJson.Text(value, "quality"), lineProvider.Length > 0 ? lineProvider : null,
-            FilmJson.RequiredText(source, "key"), FilmJson.Identity(source, "detailId", required: true),
-            FilmJson.Identity(source, "lineId", required: true), FilmJson.Integer(value, "season"),
-            FilmJson.Integer(value, "episode"), FilmJson.Integer(value, "globalEpisode"))
-        {
-            BusinessId = FilmJson.RequiredText(value, "businessId"),
-            PlaybackTarget = target,
-            DisplayLabel = QualityLabel(FilmJson.Text(value, "quality")) + " · " + sourceName,
-            Resolution = FilmJson.Copy(FilmJson.Member(value, "resolution")),
-            Fps = FilmJson.Copy(FilmJson.Member(value, "fps")),
-            Codec = FilmJson.Text(value, "codec")
+            DisplayLabel = displayLabel
         };
     }
 }

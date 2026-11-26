@@ -22,36 +22,25 @@ CREATE TABLE film_source_deletions (
 
 CREATE TABLE film_favorites (
     favorite_id TEXT PRIMARY KEY NOT NULL,
-    item_id TEXT NOT NULL,
-    target_kind TEXT CHECK (target_kind IS NULL OR target_kind IN ('movie', 'tv', 'source', 'group')),
-    target_title TEXT,
-    target_year INTEGER,
-    metadata_provider TEXT,
-    metadata_id TEXT,
-    season INTEGER,
-    episode INTEGER,
-    global_episode INTEGER,
-    source_key TEXT,
-    source_engine TEXT,
-    source_installation_id TEXT,
-    source_site_id TEXT,
-    source_detail_kind TEXT CHECK (source_detail_kind IS NULL OR source_detail_kind IN ('text', 'integer')),
-    source_detail_text TEXT,
-    source_line_kind TEXT CHECK (source_line_kind IS NULL OR source_line_kind IN ('text', 'integer')),
-    source_line_text TEXT,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    keyword TEXT NOT NULL,
+    title TEXT NOT NULL,
+    poster TEXT NOT NULL DEFAULT '',
+    score TEXT NOT NULL DEFAULT '',
+    text_badge TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
+    content_kind TEXT CHECK (content_kind IS NULL OR content_kind IN ('movie', 'tv')),
+    year INTEGER,
+    tmdb_kind TEXT CHECK (tmdb_kind IS NULL OR tmdb_kind IN ('movie', 'tv')),
+    tmdb_id INTEGER CHECK (tmdb_id IS NULL OR tmdb_id > 0),
+    douban_kind TEXT CHECK (douban_kind IS NULL OR douban_kind IN ('movie', 'tv')),
+    douban_id TEXT,
     added_at_ms INTEGER NOT NULL DEFAULT 0,
-    CHECK ((source_detail_kind IS NULL) = (source_detail_text IS NULL)),
-    CHECK ((source_line_kind IS NULL) = (source_line_text IS NULL))
+    CHECK ((tmdb_kind IS NULL) = (tmdb_id IS NULL)),
+    CHECK ((douban_kind IS NULL) = (douban_id IS NULL))
 ) STRICT;
 
-CREATE TABLE film_favorite_members (
-    favorite_id TEXT NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    source_key TEXT NOT NULL,
-    detail_kind TEXT NOT NULL CHECK (detail_kind IN ('text', 'integer')),
-    detail_text TEXT NOT NULL,
-    PRIMARY KEY (favorite_id, position)
-) STRICT;
+CREATE INDEX idx_film_favorites_order ON film_favorites(position, favorite_id);
 
 -- Unified cross-platform film Cat source probes and video site configuration / detection records.
 -- Cat configuration fields (name, source_type, source_url, enabled) are owned exclusively by cat_scripts.

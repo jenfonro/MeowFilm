@@ -43,6 +43,28 @@
     String.raw`最\s*新\s*(?:一\s*集|更\s*新)`,
     String.raw`(?<=\D)\d{1,4}$`
   ];
+  const DEFAULT_SEASON_RULES = [
+    {
+      pattern: '^.*?(?:[Ss](?:eason)?\\s*0*(\\d{1,2})(?=\\b|[Ee]|\\D)|第\\s*0*(\\d{1,2})\\s*(?:季|部|篇)|(?:^|\\s)0*(\\d{1,2})\\s*季(?![度节])).*$',
+      replace: 'S$1$2$3',
+      flags: 'i'
+    },
+    {
+      pattern: '^.*?(?<!新)年\\s*番\\s*0*(\\d{1,2}).*$',
+      replace: 'S$1',
+      flags: 'i'
+    },
+    {
+      pattern: '^.*?(?<!新)年\\s*番(?!\\s*\\d).*$',
+      replace: 'S1',
+      flags: 'i'
+    },
+    {
+      pattern: '^\\s*(.*(?:[^A-Za-z0-9\\s]|\\s))\\s*0*([1-9]\\d?)\\s*$',
+      replace: 'S$2',
+      flags: 'i'
+    }
+  ];
   function normalizeRegexText(text) {
     const raw = typeof text === 'string' ? text : '';
     return raw.replace(/\\\\(?=[dDsSwWbB.()[\]{}+*?^$|\\\-_/])/g, '\\');
@@ -83,16 +105,18 @@
       episodeCleanRegexRules: cleanRows(rules.episodeCleanRegexRules),
       episodeRules: normalizeMatchRules(rules.episodeRules),
       movieRules: normalizeMatchRules(rules.movieRules),
-      aggregateRegexRules: cleanRows(rules.aggregateRegexRules)
+      aggregateRegexRules: cleanRows(rules.aggregateRegexRules),
+      seasonRules: normalizeMatchRules(rules.seasonRules)
     } };
   }
 
   function initialRules() {
     return {
       episodeCleanRegexRules: DEFAULT_EPISODE_CLEAN_RULES.slice(),
-      episodeRules: DEFAULT_EPISODE_RULES.slice(1).map(row => ({ ...row })),
+      episodeRules: DEFAULT_EPISODE_RULES.map(row => ({ ...row })),
       movieRules: DEFAULT_MOVIE_RULES.map(row => ({ ...row })),
-      aggregateRegexRules: DEFAULT_AGGREGATE_REGEX_RULES.slice()
+      aggregateRegexRules: DEFAULT_AGGREGATE_REGEX_RULES.slice(),
+      seasonRules: DEFAULT_SEASON_RULES.map(row => ({ ...row }))
     };
   }
 
@@ -108,6 +132,9 @@
         break;
       case 'search':
         rules.aggregateRegexRules = DEFAULT_AGGREGATE_REGEX_RULES;
+        break;
+      case 'season':
+        rules.seasonRules = DEFAULT_SEASON_RULES;
         break;
       default: throw new Error('Unknown film rule section');
     }
@@ -147,11 +174,17 @@
   }
 
   const MARKER_RE = /第\s*([0-9０-９]{1,5}|[一二三四五六七八九十百千万两零〇]{1,20})\s*([季集话部篇])/g;
+  const YEARBANG_RE = /(?<!新)年\s*番\s*([0-9０-９]{1,5}|[一二三四五六七八九十百千万两零〇]{1,20})/g;
   function normalizeSeasonEpisodeMarkers(text) {
-    return normalizeString(text).replace(MARKER_RE, (full, token, unit) => {
-      const value = parseChineseNumeralToInt(token);
-      return value <= 0 ? full : `第${value}${unit}`;
-    });
+    return normalizeString(text)
+      .replace(MARKER_RE, (full, token, unit) => {
+        const value = parseChineseNumeralToInt(token);
+        return value <= 0 ? full : `第${value}${unit}`;
+      })
+      .replace(YEARBANG_RE, (full, token) => {
+        const value = parseChineseNumeralToInt(token);
+        return value <= 0 ? full : `年番${value}`;
+      });
   }
 
   function normalizeReplaceTemplate(raw) {
@@ -325,17 +358,94 @@
     return result;
   }
 
+  const BRACKET_GROUP_RE = /\(([^()]*)\)|（([^（）]*)）|\[([^\[\]]*)\]|\{([^{}]*)\}|【([^【】]*)】/g;
+  const INNER_SEASON_MARKER_RE = /(?:[Ss](?:eason)?\s*0*\d{1,2}(?=\b|[Ee]|\D)|第\s*0*\d{1,2}\s*(?:季|部|篇)|(?<!新)年\s*番|(?:^|\s)0*\d{1,2}\s*季(?![度节]))/;
+  const SEASON_NOISE_RE = /(?:更新\s*中|(?:更新(?:至|到)?|更(?:至|到)?|更|首\s*更)\s*(?:第\s*)?(?:EP?|E)?\s*(?:\d{1,4}|[一二三四五六七八九十百千万两零〇]{1,20})(?:\s*(?:\+|＋|多|余))?\s*(?:集|话|期|回)?|(?:全|共)\s*\d{1,4}\s*(?:集|话|期|回)|\b\d{1,4}\s*\/\s*\d{1,4}\b|最\s*新\s*(?:一\s*集|更\s*新)|(?:HD\s*)?(?:4[kK]|8[kK])|(?:4320|2160|1080|720|540|480)[pPiI]|\b(?:60|120)\s*(?:fps|帧)|10\s*[- ]?bit|\b(?:HDR(?:10\+?)?|DV|Dolby\s*Vision|x264|x265|h\.?264|h\.?265|hevc|avc|av1|vp9|mp4|mkv|aac\d*|ac3|eac3|ddp\s*\d(?:\.\d)?|dts(?:-hd)?|truehd|atmos|web-?dl|webrip|bluray|bdrip|remux)\b|杜\s*比\s*(?:视\s*界|音\s*效)|高\s*码\s*(?:率|资源|直链)?|国\s*漫|臻\s*彩|已\s*刮\s*削|连\s*载\s*中|完\s*结|未\s*删\s*减|(?:^|\s)(?:19\d{2}|20\d{2})(?=$|\s))/gi;
+
+  function cleanSeasonInput(input) {
+    let output = normalizeSeasonEpisodeMarkers(
+      stripEmoji(sanitizeDisplayTitle(input)).replace(/[０-９]/g, (ch) => String(FULLWIDTH_DIGITS.indexOf(ch)))
+    );
+    let prev = '';
+    while (output && output !== prev) {
+      prev = output;
+      output = output.replace(BRACKET_GROUP_RE, (_full, g1, g2, g3, g4, g5) => {
+        const inner = g1 ?? g2 ?? g3 ?? g4 ?? g5 ?? '';
+        return INNER_SEASON_MARKER_RE.test(inner) ? ` ${inner} ` : ' ';
+      });
+    }
+    output = output.replace(SEASON_NOISE_RE, ' ');
+    return normalizeSeasonEpisodeMarkers(output.replace(/\s+/g, ' ').trim());
+  }
+
+  function extractRewrittenSeason(text) {
+    const raw = normalizeSeasonEpisodeMarkers(text);
+    if (!raw) return 0;
+    const match = /(?:^|[^a-z0-9])s(?:eason)?\s*0*(\d{1,3})(?=e|\b|[^a-z0-9])/i.exec(raw)
+      ?? /第\s*0*(\d{1,3})\s*(?:季|部|篇)/.exec(raw)
+      ?? /(?<!新)年\s*番\s*0*(\d{1,3})/.exec(raw)
+      ?? /^\s*0*([1-9]\d{0,2})\s*$/.exec(raw);
+    const value = match ? Number.parseInt(match[1], 10) : 0;
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
+  }
+
+  function processSeason(_request, rules, result) {
+    const cleaned = cleanSeasonInput(result.inputText);
+    result.processedText = cleaned;
+    if (!result.inputText) {
+      result.text = '请输入原始标题';
+      return result;
+    }
+    const rows = Array.isArray(rules.seasonRules) ? rules.seasonRules : [];
+    result.type = 'error';
+    if (!rows.length) {
+      result.text = '无匹配规则';
+      return result;
+    }
+    const failures = [];
+    const cache = groupCache('season', rows);
+    for (let index = 0; index < rows.length; index += 1) {
+      const rule = rows[index];
+      const regex = regexAt(cache, index, rule, false);
+      if (!regex) {
+        failures.push(invalid(result, 'season', index));
+        continue;
+      }
+      if (!regex.test(cleaned)) continue;
+      regex.lastIndex = 0;
+      result.matched = true;
+      result.matchedRuleIndex = index + 1;
+      const replace = normalizeReplaceTemplate(rule.replace || '');
+      if (replace) {
+        result.rewriteApplied = true;
+        result.rewrittenText = normalizeSeasonEpisodeMarkers(cleaned.replace(regex, replace)).trim();
+      }
+      const season = extractRewrittenSeason(result.rewrittenText ?? cleaned);
+      if (!season) {
+        result.text = `命中第 ${index + 1} 条，但未提取到有效季号`;
+        return result;
+      }
+      result.season = season;
+      result.type = 'success';
+      result.text = `命中第 ${index + 1} 条：第 ${season} 季${result.rewrittenText ? `（${result.rewrittenText}）` : ''}`;
+      return result;
+    }
+    result.text = failures.length ? `未命中（${failures.join('，')}）` : '未命中';
+    return result;
+  }
+
   function process(request, rules) {
     const input = String(request.text || '').trim();
     const result = {
       section: request.section, type: '', text: '', inputText: input, processedText: input,
       matched: false, matchedRuleIndex: null, rewriteApplied: false, rewrittenText: null,
-      groupKey: '', trailingDigits: '', errors: [], previews: []
+      season: null, groupKey: '', trailingDigits: '', errors: [], previews: []
     };
     switch (request.section) {
       case 'episode':
       case 'movie': return processMatch(request, rules, result);
       case 'search': return processSearch(request, rules, result);
+      case 'season': return processSeason(request, rules, result);
       default: throw new Error('Unknown film rule section');
     }
   }

@@ -81,7 +81,7 @@ extension NativeMusicService {
     public func canEnterSongRecommendations() async throws -> Bool {
         let d = try read()
         guard similarMode.active == nil, similarMode.queue == nil, fmPlayback == nil,
-              d.queue.similar == nil, d.queue.fm == nil,
+              d.queue.similar == nil,
               d.queue.source?.sourceType != "search-song",
               let row = d.queue.entries.first(where: { $0.id == d.queue.currentID }) else { return false }
         guard platformEnabled("wy"), accounts != nil else { return false }
@@ -284,11 +284,6 @@ extension NativeMusicService {
         do { try await restoreSimilarSessionIfNeeded() } catch {
             if MusicServiceError.sanitized(error) != .cancelled {
                 DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "restoreSimilar.error", error: error)
-            }
-        }
-        do { try await restoreFMSessionIfNeeded() } catch {
-            if MusicServiceError.sanitized(error) != .cancelled {
-                DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "restoreFM.error", error: error)
             }
         }
         guard attempt?.id == fact.attemptId, attempt?.occurrence == fact.occurrenceId else { return accepted }

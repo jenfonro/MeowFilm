@@ -7,7 +7,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>The six declared native settings capabilities on the private runtime channel.</summary>
+/// <summary>The seven declared native settings capabilities on the private runtime channel.</summary>
 public sealed class FilmRuntimeSettings : IRuntimeSettingsStore
 {
     private readonly IStorageDatabase database;
@@ -27,6 +27,7 @@ public sealed class FilmRuntimeSettings : IRuntimeSettingsStore
         "douban" => ReadDoubanSnapshotAsync(token),
         "film.rules" => ReadFilmRulesSnapshotAsync(token),
         "film.preferences" => ReadFilmPreferencesSnapshotAsync(token),
+        "film.video-sources" => ReadFilmVideoSourcesSnapshotAsync(token),
         _ => throw new BridgeException("INVALID_REQUEST")
     };
 
@@ -221,5 +222,28 @@ public sealed class FilmRuntimeSettings : IRuntimeSettingsStore
             }
         });
         return new RuntimeSettingsSnapshot(doc, rev);
+    }
+
+    private async Task<RuntimeSettingsSnapshot> ReadFilmVideoSourcesSnapshotAsync(CancellationToken token)
+    {
+        var (state, revision) = await FilmSourceStore.ReadAsync(database, token).ConfigureAwait(false);
+        if (revision == StorageRevision.Empty) return new RuntimeSettingsSnapshot(null, 0);
+        var doc = JsonSerializer.SerializeToElement(new
+        {
+            version = 1,
+            sources = state.Videos.Select((v, pos) => new
+            {
+                installationId = v.Key.InstallationId,
+                siteKey = v.Key.SiteKey,
+                name = v.Name,
+                enabled = v.Options.Enabled,
+                homeVisible = v.Options.HomeVisible,
+                searchEnabled = v.Options.SearchEnabled,
+                aggregateImages = v.Options.AggregateImages,
+                sortOrder = v.Order,
+                position = pos
+            }).ToArray()
+        });
+        return new RuntimeSettingsSnapshot(doc, revision.Revision);
     }
 }

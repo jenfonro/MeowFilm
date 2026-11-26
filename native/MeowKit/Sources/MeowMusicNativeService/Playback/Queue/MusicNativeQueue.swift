@@ -104,7 +104,7 @@ extension NativeMusicService {
     }
 
     func archive(_ queue: MusicQueueState, into d: inout MusicDomainState) throws {
-        if queue.entries.count < 2 { return }
+        if queue.entries.count < 2 || queue.source?.sourceType == "fm" { return }
         let context = queue.entries.first?.context ?? .empty
         let title = MusicModel.firstText(queue.source?.title, context.sourceTitle, context.playlist)
         let item = MusicHistoryPlaylistRecord(
@@ -283,7 +283,6 @@ extension NativeMusicService {
             if let mode = change.mode {
                 d.playback.mode = mode.rawValue
                 if d.queue.similar != nil { d.queue.similar?.continueEnabled = false }
-                if d.queue.fm != nil { d.queue.fm?.continueEnabled = false }
             }
             if let values = change.qualityEnabled {
                 try musicRequire(Set(values).count == values.count && values.allSatisfy(MusicModel.qualityOrder.contains))

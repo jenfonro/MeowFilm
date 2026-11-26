@@ -27,7 +27,7 @@
    </ListView.ItemContainerStyle>
    <ListView.ItemTemplate>
     <DataTemplate x:DataType="local:NovelShelfItem">
-     <Border Style="{StaticResource Novel.Discovery.Surface}" Padding="14,12">
+     <Border Style="{StaticResource Novel.Surface}" Padding="14,12">
       <Grid ColumnSpacing="16">
        <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto"/>

@@ -18,43 +18,36 @@ public struct FilmItemIdentity: Hashable, Codable, Sendable {
     public let sourceID: String
     public let itemID: String
     public let kind: FilmItemKind?
-    public let businessID: String?
-    public let playbackTarget: FilmPlaybackTarget?
+    public let entry: FilmEntry?
 
-    public init(sourceID: String, itemID: String, kind: FilmItemKind? = nil,
-                businessID: String? = nil, playbackTarget: FilmPlaybackTarget? = nil) {
+    public var targetID: String? { entry?.targetId }
+
+    public init(sourceID: String, itemID: String, kind: FilmItemKind? = nil, entry: FilmEntry? = nil) {
         self.sourceID = sourceID
         self.itemID = itemID
-        self.businessID = businessID; self.playbackTarget = playbackTarget
-        // TMDB has separate movie/tv ID namespaces; Douban subject IDs are global.
-        self.kind = sourceID == "tmdb" ? kind : nil
+        self.entry = entry
+        self.kind = sourceID == "tmdb" ? kind : (entry?.kind ?? kind)
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
-        if let a = lhs.businessID, let b = rhs.businessID { return a.utf8.elementsEqual(b.utf8) }
-        guard lhs.businessID == nil, rhs.businessID == nil else { return false }
+        if let a = lhs.targetID, !a.isEmpty, let b = rhs.targetID, !b.isEmpty {
+            return a.utf8.elementsEqual(b.utf8)
+        }
+        guard (lhs.targetID ?? "").isEmpty, (rhs.targetID ?? "").isEmpty else { return false }
         return lhs.sourceID.utf8.elementsEqual(rhs.sourceID.utf8) &&
             lhs.itemID.utf8.elementsEqual(rhs.itemID.utf8) && lhs.kind == rhs.kind
     }
 
     public func hash(into hasher: inout Hasher) {
-        if let businessID { hasher.combine(Data(businessID.utf8)); return }
+        if let targetID, !targetID.isEmpty {
+            hasher.combine(Data(targetID.utf8))
+            return
+        }
         hasher.combine(sourceID.utf8.count)
         for byte in sourceID.utf8 { hasher.combine(byte) }
         hasher.combine(itemID.utf8.count)
         for byte in itemID.utf8 { hasher.combine(byte) }
         hasher.combine(kind)
-    }
-
-    private enum CodingKeys: String, CodingKey { case sourceID, itemID, kind, businessID, playbackTarget }
-
-    public init(from decoder: any Decoder) throws {
-        let fields = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(sourceID: try fields.decode(String.self, forKey: .sourceID),
-                  itemID: try fields.decode(String.self, forKey: .itemID),
-                  kind: try fields.decodeIfPresent(FilmItemKind.self, forKey: .kind),
-                  businessID: try fields.decodeIfPresent(String.self, forKey: .businessID),
-                  playbackTarget: try fields.decodeIfPresent(FilmPlaybackTarget.self, forKey: .playbackTarget))
     }
 }
 
@@ -68,28 +61,26 @@ public struct FilmItem: Equatable, Codable, Sendable {
     public let largePosterURL: URL?
     public let score: String
     public let subtitle: String
-    public let metadataSeed: Data?
-    public let businessID: String?
-    public let playbackTarget: FilmPlaybackTarget?
+    public let entry: FilmEntry?
+
+    public var targetID: String? { entry?.targetId }
 
     public var identity: FilmItemIdentity {
-        FilmItemIdentity(sourceID: sourceID, itemID: id, kind: kind,
-                         businessID: businessID, playbackTarget: playbackTarget)
+        FilmItemIdentity(sourceID: sourceID, itemID: id, kind: kind, entry: entry)
     }
 
     public init(sourceID: String, id: String, title: String, kind: FilmItemKind? = nil, posterURL: URL? = nil,
-                largePosterURL: URL? = nil, score: String = "", subtitle: String = "", metadataSeed: Data? = nil,
-                businessID: String? = nil, playbackTarget: FilmPlaybackTarget? = nil) {
+                largePosterURL: URL? = nil, score: String = "", subtitle: String = "",
+                entry: FilmEntry? = nil) {
         self.sourceID = sourceID
         self.id = id
         self.title = title
-        self.kind = kind
+        self.kind = kind ?? entry?.kind
         self.posterURL = posterURL
         self.largePosterURL = largePosterURL
         self.score = score
         self.subtitle = subtitle
-        self.metadataSeed = metadataSeed
-        self.businessID = businessID; self.playbackTarget = playbackTarget
+        self.entry = entry
     }
 }
 

@@ -9,8 +9,8 @@ using System.Text.Json.Nodes;
 namespace MeowFilm.Capabilities;
 
 /// <summary>
-/// Stable native film owner. Node is the only matching/cache/library owner; this class
-/// observes snapshots, fences native publication and reports exact media occurrences.
+/// Stable native film owner. Node owns keyword-anchored sessions, source resolution, caching, and library;
+/// this class observes snapshots, fences native publication, and reports exact media occurrences.
 /// </summary>
 internal sealed partial class FilmPlaybackSession : IAsyncDisposable
 {
@@ -20,14 +20,13 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
         FilmMediaTracks? Tracks, IReadOnlyList<FilmMediaChapter> Chapters);
     private readonly record struct PublishedMediaState(string? Identity, string Title,
         bool HasOutput, bool IsPlaying, double Position, double Duration);
-    private sealed class Input(FilmMediaReceipt receipt, FilmCandidateItem candidate, FilmPlaybackTarget target, string contentKind, JsonElement source,
+    private sealed class Input(FilmMediaReceipt receipt, FilmAttemptInfo attemptInfo, string targetId, string contentKind,
         CancellationTokenSource lifetime, CancellationToken runtimeRevoked)
     {
         internal readonly FilmMediaReceipt Receipt = receipt;
-        internal readonly FilmCandidateItem Candidate = candidate;
-        internal readonly FilmPlaybackTarget Target = target;
+        internal readonly FilmAttemptInfo AttemptInfo = attemptInfo;
+        internal readonly string TargetId = targetId;
         internal readonly string ContentKind = contentKind;
-        internal readonly JsonElement Source = source;
         internal readonly CancellationTokenSource Lifetime = lifetime;
         internal readonly CancellationToken RuntimeRevoked = runtimeRevoked;
         internal INativeMediaResourceLease? Lease;
@@ -42,7 +41,7 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
     }
 
     private const long ProgressIntervalMs = 2000;
-    private readonly Func<FilmPlaybackPage, JsonElement, bool, CancellationToken, Task<FilmPlaybackOpen>> prepareOpen;
+    private readonly Func<bool, CancellationToken, Task<RuntimeConnection>> connectRuntime;
     private readonly FilmPlayback media;
     private readonly OwnerDispatcher dispatcher;
     private readonly IDisposable? leaseRegistration;
@@ -60,10 +59,6 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
     private FilmPlaybackSnapshot? snapshot;
     private FilmPlaybackPage? page;
     private (FilmPlaybackPage Page, JsonElement Parameters)? openRequest;
-    private IReadOnlyList<JsonElement> searchScope = [];
-    private FilmPlaybackTarget? searchSelection;
-    private (FilmPlaybackPage Page, JsonElement Parameters, long Generation)? searchUpdate;
-    private Task? searchUpdating;
     private CancellationTokenSource? observation;
     private CancellationTokenSource? opening;
     private CancellationTokenRegistration runtimeRevoke;
@@ -90,10 +85,10 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
     private TaskCompletionSource browseChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     internal FilmPlaybackSession(FilmPlayback media,
-        Func<FilmPlaybackPage, JsonElement, bool, CancellationToken, Task<FilmPlaybackOpen>> prepareOpen)
+        Func<bool, CancellationToken, Task<RuntimeConnection>> connectRuntime)
     {
         this.media = media;
-        this.prepareOpen = prepareOpen;
+        this.connectRuntime = connectRuntime;
         dispatcher = OwnerDispatcher.Current;
         media.PropertyChanged += MediaChanged;
         media.Failed += MediaFailed;
@@ -267,7 +262,7 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
         var retirement = CloseSessionAsync();
         long generation = ++ownerGeneration;
         DebugLog.Info(DebugCategories.FilmPlayback, "session", "session.open",
-            new { generation, targetId = targetPage.EntryTarget.Id, kind = targetPage.EntryTarget.Kind });
+            new { generation, targetId = targetPage.TargetId, keyword = targetPage.Entry.Keyword });
         return Track(PrepareAsync(targetPage, ownedParameters, token, retirement, generation, reconnect: false));
     }
 
@@ -300,25 +295,12 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
             finally { nativeWork.Release(); }
             if (generation != ownerGeneration || closed) return;
             page = targetPage; presenting = true;
-            var opening = await prepareOpen(targetPage, openParameters, reconnect, token);
-            var captured = opening.Connection;
+            var captured = await connectRuntime(reconnect, token);
             captured.Revoked.ThrowIfCancellationRequested();
             token.ThrowIfCancellationRequested();
             if (generation != ownerGeneration || closed) return;
-            // Freeze the admitted source range, not the App's future global list.
-            // Keep original rows/pages/cache provenance separate from this current scope.
-            if (!reconnect && FilmJson.Member(openParameters, "sources").ValueKind != JsonValueKind.Array)
-            {
-                var remembered = JsonNode.Parse(openParameters.GetRawText())!.AsObject();
-                remembered["sources"] = JsonSerializer.SerializeToNode(
-                    FilmPlaybackOpen.OriginalSources(openParameters, FilmJson.Array(opening.Parameters, "sources")),
-                    FilmJson.Options);
-                openRequest = (targetPage, JsonSerializer.SerializeToElement(remembered, FilmJson.Options));
-            }
             var client = new FilmPlaybackClient(captured.Client);
-            // Once session.open is admitted, obtain its receipt even if the view leaves.
-            // A cancelled observer never strands a Node session whose id was hidden by cancellation.
-            var opened = new FilmPlaybackSnapshot(await client.CallAsync("session.open", opening.Parameters, captured.Revoked));
+            var opened = new FilmPlaybackSnapshot(await client.CallAsync("session.open", openParameters, captured.Revoked));
             if (generation != ownerGeneration || token.IsCancellationRequested || closed)
             {
                 if (!captured.Revoked.IsCancellationRequested)
@@ -330,9 +312,6 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
             authority = new RuntimeMediaAuthority(captured.Revoked);
             rpc = client;
             blockedAttemptId = "";
-            searchScope = FilmJson.Array(opening.Parameters, "sources");
-            searchSelection = opened.EntryTarget;
-            targetPage.FreezeSearchScope(FilmPlaybackOpen.OriginalSources(openParameters, searchScope));
             runtimeRevoke = captured.Revoked.Register(() =>
             {
                 if (!dispatcher.IsClosing)
@@ -348,10 +327,9 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
             });
             DebugLog.Info(DebugCategories.FilmPlayback, "session", "session.opened",
                 new { generation, sessionId = opened.SessionId, sequence = opened.Sequence,
-                    targetId = opened.Target.Id, kind = opened.ContentKind, reconnect });
+                    targetId = opened.TargetId, kind = opened.Work.Kind, reconnect });
             Apply(opened);
             StartObserving();
-            targetPage.PublishSearch();
             UpdateDebugSnapshot();
         }
         catch (Exception error)
@@ -411,12 +389,10 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
         {
             if (openRequest is not { } request || closed) throw new FilmPlaybackException("STALE_SESSION");
             DebugLog.Info(DebugCategories.FilmPlayback, "session", "session.reconnect.reopen",
-                new { targetId = request.Page.EntryTarget.Id });
-            request = (request.Page, FilmPlaybackOpen.RememberResults(request.Parameters, snapshot));
+                new { targetId = request.Page.TargetId });
             var restore = JsonNode.Parse(request.Parameters.GetRawText())!.AsObject();
             restore["restoreOnly"] = true;
-            if (request.Page.CaptureRequest.Browsing is { } browsing)
-                restore["browsing"] = JsonNode.Parse(browsing.GetRawText());
+            restore.Remove("searchReference");
             request = (request.Page, JsonSerializer.SerializeToElement(restore, FilmJson.Options));
             openRequest = request;
             var retirement = CloseSessionAsync();
@@ -443,7 +419,7 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
         if (current is { Started: false, Retiring: false, TerminalReported: false } input && HasOutput)
         {
             if (latest.CurrentId == input.Receipt.AttemptId) { input.Started = true; QueueProgress(immediate: true); }
-            else if (latest.AttemptId == input.Receipt.AttemptId && !FilmJson.Bool(latest.Attempt, "prepareOnly"))
+            else if (latest.AttemptId == input.Receipt.AttemptId && latest.Attempt?.PrepareOnly != true)
             {
                 var confirmed = await client.CommandAsync(state.SessionId, "media.started",
                     new { attemptId = input.Receipt.AttemptId }, activeConnection.Revoked);
@@ -455,7 +431,6 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
         }
         if (ExecutionError.Length > 0 || releaseFailure is not null)
         {
-            // Only explicit recovery verifies both the accepted occurrence and physical drain.
             await nativeWork.WaitAsync();
             Exception? pendingDrainFailure;
             try { pendingDrainFailure = await DrainUndrainedAsync(); }
@@ -482,67 +457,6 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
         }
     }
 
-    internal void UpdateSearch(FilmPlaybackPage targetPage, long revision)
-    {
-        if (!IsCurrentPage(targetPage) || rpc is null || snapshot is null || connection is null ||
-            searchSelection is null || connection.Revoked.IsCancellationRequested) return;
-        if (FilmJson.Text(snapshot.Raw, "stage") == "stopped" ||
-            snapshot.Target.Kind == "group" && snapshot.Target.Members!.Value.GetArrayLength() == 0 &&
-            !targetPage.IsUnmatchedDoubanEntry) return;
-        if (targetPage.SearchContext is not { } context ||
-            !FilmPlaybackOpen.SameOwner(targetPage.Request.DataOwner, connection)) return;
-        var parameters = FilmJson.Encode(new
-        {
-            selectionId = searchSelection.Id, revision, searchReference = context.Reference, sources = searchScope
-        });
-        searchUpdate = (targetPage, parameters, ownerGeneration);
-        if (searchUpdating is not { IsCompleted: false }) searchUpdating = Track(PublishSearchAsync());
-    }
-
-    private async Task PublishSearchAsync()
-    {
-        // One pending update coalesces a burst of source/detail publications.
-        await Task.Yield();
-        try
-        {
-            while (searchUpdate is { } update)
-            {
-                searchUpdate = null;
-                await control.WaitAsync();
-                try
-                {
-                    if (update.Generation != ownerGeneration || !IsCurrentPage(update.Page) ||
-                        rpc is not { } client || snapshot is not { } state || connection is null) continue;
-                    var value = await client.CommandAsync(state.SessionId, "search.update", update.Parameters, connection.Revoked);
-                    if (update.Generation != ownerGeneration || !IsCurrentPage(update.Page)) continue;
-                    if (openRequest is { } original && ReferenceEquals(original.Page, update.Page))
-                    {
-                        var remembered = JsonNode.Parse(original.Parameters.GetRawText())!.AsObject();
-                        var request = update.Page.CaptureRequest;
-                        remembered["sources"] = JsonSerializer.SerializeToNode(request.Sources, FilmJson.Options);
-                        remembered["results"] = request.Results is { } results ? JsonNode.Parse(results.GetRawText()) : null;
-                        remembered["search"] = request.Search is { } search ? JsonNode.Parse(search.GetRawText()) : null;
-                        remembered["cacheEntries"] = request.CacheEntries is { } entries ? JsonNode.Parse(entries.GetRawText()) : null;
-                        openRequest = (update.Page, JsonSerializer.SerializeToElement(remembered, FilmJson.Options));
-                    }
-                    Apply(new(value));
-                }
-                catch (Exception) when (update.Generation != ownerGeneration || !IsCurrentPage(update.Page))
-                {
-                    // A retired page owns neither a late snapshot nor its error.
-                }
-                finally { control.Release(); }
-            }
-        }
-        finally
-        {
-            searchUpdating = null;
-            // Preserve a newer publication already coalesced while the failed
-            // request was awaiting its receipt. The failed request is not retried.
-            if (searchUpdate is not null && !closed) searchUpdating = Track(PublishSearchAsync());
-        }
-    }
-
     private void Apply(FilmPlaybackSnapshot next, bool scheduleMedia = true)
     {
         if (snapshot is { } previous &&
@@ -554,53 +468,42 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
         page?.SetConnectionError("");
         WakeBrowsing();
         DebugLog.Debug(DebugCategories.FilmPlayback, "session", "session.snapshot",
-            new { sessionId = next.SessionId, sequence = next.Sequence, stage = FilmJson.Text(next.Raw, "stage"),
+            new { sessionId = next.SessionId, sequence = next.Sequence, stage = next.Stage,
                 attemptId = next.AttemptId, currentId = next.CurrentId });
         if (error.Length > 0 && error != previousError)
             OperationFailed?.Invoke(this, error);
         NotifyMedia();
         string id = next.AttemptId;
         if (blockedAttemptId.Length > 0 && id != blockedAttemptId) blockedAttemptId = "";
-        // Removing a pending attempt revokes publication, not a healthy accepted donor.
         if (id != processingId && processingId.Length > 0 &&
             !(id.Length == 0 && pending is { Retiring: true }))
             pendingPublication?.Cancel();
         if (current is { Retiring: false, TerminalReported: false } accepted &&
             id != accepted.Receipt.AttemptId && next.CurrentId != accepted.Receipt.AttemptId)
         {
-            // The authoritative owner explicitly dropped the accepted resource (scope/stop).
             RevokeMedia(cancelPending: false);
         }
         if (scheduleMedia) SchedulePendingMedia(next);
     }
 
-    private static string DisplayError(FilmPlaybackSnapshot value) =>
-        FilmJson.Text(value.Raw, "errorStage") is "prepare" or "playback" &&
-            FilmJson.Text(value.Raw, "error") is { Length: > 0 } native ? native :
-        FilmJson.Text(value.Raw, "metadataError") is { Length: > 0 } metadata ? metadata :
-        value.MetadataCache?.ErrorCode is { Length: > 0 } cache ? cache :
-        FilmJson.Text(value.Browsing, "error") is { Length: > 0 } browsing ? browsing :
-        FilmJson.Text(value.Raw, "error");
+    private static string DisplayError(FilmPlaybackSnapshot value)
+    {
+        if (value.NoSources || value.Error == "NO_VIDEO_SOURCES") return "";
+        if (value.ErrorStage is "prepare" or "playback" && value.Error.Length > 0) return value.Error;
+        if (value.DirectoryError.Length > 0) return value.DirectoryError;
+        return value.Error;
+    }
 
     internal Task LeaveAsync(bool retainedOwner)
     {
         presenting = false;
-        if (retainedOwner && CanRetainMedia && HasOutput) return RetainAsync();
+        if (retainedOwner && CanRetainMedia && HasOutput) return Task.CompletedTask;
         return CloseSessionAsync();
-    }
-    private Task RetainAsync()
-    {
-        // Keep the Node session live while the independent PiP window owns playback so
-        // automatic next-episode continuation and stream failure recovery stay active
-        // until the PiP window closes (EndRetainedOwnerAsync -> CloseSessionAsync).
-        searchUpdate = null;
-        return Task.CompletedTask;
     }
 
     internal Task CloseSessionAsync()
     {
         ownerGeneration++; intentGeneration++;
-        searchUpdate = null; searchScope = []; searchSelection = null;
         opening?.Cancel();
         pendingPublication?.Cancel();
         if (closing is not null) return closing;

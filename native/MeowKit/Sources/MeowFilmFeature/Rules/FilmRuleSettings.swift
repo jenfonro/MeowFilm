@@ -9,7 +9,8 @@ enum FilmRuleSettings {
             episodeCleanRegexRules: record.episodeCleanRegexRules,
             episodeRules: record.episodeRules.map { FilmMatchRule(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) },
             movieRules: record.movieRules.map { FilmMatchRule(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) },
-            aggregateRegexRules: record.aggregateRegexRules
+            aggregateRegexRules: record.aggregateRegexRules,
+            seasonRules: record.seasonRules.map { FilmMatchRule(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) }
         )
     }
 
@@ -18,7 +19,8 @@ enum FilmRuleSettings {
             episodeCleanRegexRules: rules.episodeCleanRegexRules,
             episodeRules: rules.episodeRules.map { FilmRuleEntryRecord(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) },
             movieRules: rules.movieRules.map { FilmRuleEntryRecord(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) },
-            aggregateRegexRules: rules.aggregateRegexRules
+            aggregateRegexRules: rules.aggregateRegexRules,
+            seasonRules: rules.seasonRules.map { FilmRuleEntryRecord(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) }
         )
     }
 
@@ -38,7 +40,8 @@ enum FilmRuleSettings {
         }
         return .init(episodeCleanRegexRules: clean(rules.episodeCleanRegexRules),
             episodeRules: matches(rules.episodeRules), movieRules: matches(rules.movieRules),
-            aggregateRegexRules: clean(rules.aggregateRegexRules))
+            aggregateRegexRules: clean(rules.aggregateRegexRules),
+            seasonRules: matches(rules.seasonRules))
     }
 
     private static let escapedRegexUnits = Set("dDsSwWbB.()[]{}+*?^$|\\-_/".utf16)
@@ -82,10 +85,12 @@ enum FilmRuleSettings {
             #"(?:19\d{2}|20\d{2})(?=\s*(?:(?:HD\s*)?(?:4[kK]|8[kK])|(?:更新|更)))"#,
             #"最\s*新\s*(?:一\s*集|更\s*新)"#,
             #"(?<=\D)\d{1,4}$"#,
+        ],
+        seasonRules: [
+            .init(pattern: #"(?:第\s*0*([0-9]{1,2}|[一二三四五六七八九十百两〇零]{1,5})\s*(?:季|部|篇))"#, replace: "$1", flags: ""),
+            .init(pattern: #"(?:^|[\s\[\(\{【（._-])[Ss](?:eason)?\s*0*([0-9]{1,2})(?=$|[\s\]\)\}】）._EexX-])"#, replace: "$1", flags: "i"),
+            .init(pattern: #"(?<!新)年\s*番\s*0*([0-9]{1,2}|[一二三四五六七八九十]{1,3})"#, replace: "$1", flags: ""),
+            .init(pattern: #"(?<=[\u4e00-\u9fa5A-Za-z])\s*0*([1-9][0-9]?)\s*$"#, replace: "$1", flags: ""),
         ])
-    static var initial: FilmRuleSet {
-        var rules = restore
-        rules.episodeRules.removeFirst()
-        return rules
-    }
+    static var initial: FilmRuleSet { restore }
 }

@@ -87,7 +87,6 @@ extension NativeMusicService {
                     }
                 }
                 d.queue.similar = session.saved
-                d.queue.fm = nil
                 d.queue.revision += 1
                 if selected != old.currentID { d.resetPosition() }
                 return stateDTO(d)
@@ -187,7 +186,6 @@ extension NativeMusicService {
                 let keep = d.queue.currentID == old.currentID
                 try self.archive(old, into: &d)
                 d.queue.similar = nil
-                d.queue.fm = nil
                 d.queue.revision += 1
                 if !keep { d.resetPosition() }
                 return (self.stateDTO(d), keep)
@@ -393,7 +391,6 @@ extension NativeMusicService {
     func similarWillChangeQueue(_ change: MusicNativeSimilarQueueChange, queue: inout MusicQueueState) {
         if change == .replace || change == .clear || queue.entries.isEmpty {
             queue.similar = nil
-            queue.fm = nil
         }
         if change == .select, similarMode.queue != nil,
            queue.entries.first(where: { $0.id == queue.currentID })?.context.sourceType == "queue-recommendations" {
@@ -409,12 +406,12 @@ extension NativeMusicService {
 
     func similarDidChangeQueue(_ change: MusicNativeSimilarQueueChange) {
         if change == .replace || change == .clear {
-            clearFMPlayback(); fmRestored = true; clearSimilarRuntime(); similarMode.restorationState = .restored
+            clearFMPlayback(); clearSimilarRuntime(); similarMode.restorationState = .restored
             return
         }
         guard let d = try? read() else { return }
         if d.queue.entries.isEmpty {
-            clearFMPlayback(); fmRestored = true; clearSimilarRuntime(); similarMode.restorationState = .restored; return
+            clearFMPlayback(); clearSimilarRuntime(); similarMode.restorationState = .restored; return
         }
         discardSimilarPreview()
         if change == .select {

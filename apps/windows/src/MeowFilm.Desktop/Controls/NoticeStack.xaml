@@ -3,18 +3,19 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="using:MeowFilm.Desktop"
  MaxWidth="460"
- HorizontalAlignment="Right"
- VerticalAlignment="Bottom"
+ HorizontalAlignment="Center"
+ VerticalAlignment="Top"
  IsTabStop="False">
  <ItemsControl x:Name="NoticeItems" IsTabStop="False">
   <ItemsControl.ItemTemplate>
    <DataTemplate x:DataType="local:NoticeEntry">
     <Border Padding="16,10,10,10" Margin="0,0,0,8" CornerRadius="10" BorderThickness="1"
-            HorizontalAlignment="Right" Translation="0,0,16"
+            HorizontalAlignment="Center" Translation="0,0,16"
             Background="{ThemeResource MeowFilm.Brush.FloatingSurface}"
             BorderBrush="{ThemeResource MeowFilm.Brush.Border}"
             PointerEntered="OnCardPointerEntered" PointerExited="OnCardPointerExited"
             Loaded="OnCardLoaded">
+     <Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
      <Border.Shadow><ThemeShadow/></Border.Shadow>
      <Grid ColumnSpacing="12">
       <Grid.ColumnDefinitions>

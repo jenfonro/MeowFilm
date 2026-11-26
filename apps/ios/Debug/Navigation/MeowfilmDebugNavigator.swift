@@ -362,16 +362,39 @@ final class MeowfilmDebugNavigator {
             }
 
         // --- Novel Targets ---
-        case "novel.home", "novel.categories":
+        case "novel.home":
             let main = try await resetToPrimaryRoot(.novel)
-            if let novelHome = main.contentViewController(for: .novel) as? NovelHomeViewController {
-                novelHome.debugApplyFilter(
-                    sourceId: params["sourceId"]?.stringValue,
-                    channelIndex: params["channelIndex"]?.intValue,
-                    kindUrl: params["kindUrl"]?.stringValue,
-                    kindIndex: params["kindIndex"]?.intValue
-                )
+            if let novelHome = main.contentViewController(for: .novel) as? NovelHomeViewController,
+               let sourceId = params["sourceId"]?.stringValue, !sourceId.isEmpty {
+                novelHome.discovery.selectSource(id: sourceId)
             }
+
+        case "novel.data":
+            let coordinator = try requireCoordinator()
+            let main = try await resetToPrimaryRoot(.novel)
+            guard let novelHome = main.contentViewController(for: .novel) as? NovelHomeViewController else {
+                throw DebugAPIError.invalidState("NovelHomeViewController is unavailable")
+            }
+            if let sourceId = params["sourceId"]?.stringValue, !sourceId.isEmpty {
+                novelHome.discovery.selectSource(id: sourceId)
+            }
+            if novelHome.discovery.sections.isEmpty || novelHome.discovery.loading {
+                _ = try await uiWait(["condition": .string("idle"), "timeoutMs": .int(timeoutMs)])
+            }
+            let category = params["category"]?.stringValue ?? params["sectionId"]?.stringValue
+            let sectionIdx = params["sectionIndex"]?.intValue
+            guard let catModel = novelHome.debugCategoryModel(category: category, sectionIndex: sectionIdx) else {
+                throw DebugAPIError.notFound("Novel section not available: \(category ?? sectionIdx.map(String.init) ?? "default")")
+            }
+            let catVC = NovelCategoryViewController(
+                model: catModel,
+                feature: novelHome.discovery.feature,
+                themeProvider: coordinator.assembly.appearance
+            )
+            catVC.onSelectItem = { [weak coordinator] book in
+                coordinator?.showNovel(book, animated: false)
+            }
+            coordinator.navigation.pushViewController(catVC, animated: false)
 
         case "novel.book":
             let coordinator = try requireCoordinator()

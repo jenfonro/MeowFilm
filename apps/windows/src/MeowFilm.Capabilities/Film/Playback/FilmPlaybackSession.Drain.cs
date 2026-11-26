@@ -321,24 +321,4 @@ internal sealed partial class FilmPlaybackSession
         }
         finally { nativeWork.Release(); }
     }
-
-    internal void SourcesChanged(IReadOnlyList<JsonElement> available)
-    {
-        if (snapshot is { } state && state.AttemptId == processingId &&
-            !Available(FilmJson.Member(FilmJson.Member(state.Attempt, "candidate"), "source")))
-            pendingPublication?.Cancel();
-        foreach (var input in new[] { pending, current }.OfType<Input>())
-        {
-            if (input.Retiring) continue;
-            if (!Available(input.Source))
-            {
-                if (ReferenceEquals(input, current)) RevokeMedia(cancelPending: false);
-                else input.Lifetime.Cancel();
-            }
-        }
-        // The snapshot already owns an attempt while its receipt RPC is in flight.
-        // Formal source/pan account epochs are invalidated by their Node owner.
-        bool Available(JsonElement expected) => FilmJson.Text(expected, "engine") != "cat" ||
-            available.Any(value => FilmPlaybackOpen.SourceEquals(value, expected));
-    }
 }

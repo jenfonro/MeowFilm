@@ -36,7 +36,7 @@
   <Grid.RowDefinitions><RowDefinition Height="8"/><RowDefinition Height="72"/></Grid.RowDefinitions>
   <Grid Grid.Row="1"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="232"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
    <Grid x:Name="MetadataPanel" Margin="30,0,0,0" HorizontalAlignment="Left"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-    <Button x:Name="ArtworkButton" Click="Lyrics_Click" Width="60" Height="60" Padding="0" Margin="0,0,12,0" AutomationProperties.Name="打开歌曲与歌词">
+    <Button x:Name="ArtworkButton" Click="Lyrics_Click" Width="60" Height="60" CornerRadius="30" Padding="0" Margin="0,0,12,0" AutomationProperties.Name="打开歌曲与歌词">
      <local:MusicRecordView x:Name="RecordView" Width="60" Height="60" Address="{x:Bind Playback.CurrentArtwork,Mode=OneWay}" ArtworkIdentity="{x:Bind Playback.CurrentArtworkIdentity,Mode=OneWay}" TrackIdentity="{x:Bind Playback.CurrentTrackIdentity,Mode=OneWay}"/>
     </Button>
     <StackPanel x:Name="MetadataText" Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0" MaxWidth="180"><TextBlock x:Name="MetadataTitleText" Text="{x:Bind Playback.CurrentTitle,Mode=OneWay}" FontSize="14" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="MetadataArtistText" Text="{x:Bind Playback.CurrentArtist,Mode=OneWay}" FontSize="12" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/></StackPanel>

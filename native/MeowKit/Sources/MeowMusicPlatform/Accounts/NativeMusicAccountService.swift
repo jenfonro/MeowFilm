@@ -44,7 +44,7 @@ public actor NativeMusicAccountService {
     var displayProfileDeadlines: [MusicAccountPlatform: Date] = [:]
     var profileRequests: [MusicAccountPlatform: UUID] = [:]
     var publicationAuthorizations: [MusicAccountPlatform: MusicQueueAuthorization] = [:]
-    var revisions: [MusicAccountPlatform: Int] = [:]
+    var revisions: [MusicAccountPlatform: Int] = Dictionary(uniqueKeysWithValues: MusicAccountPlatform.allCases.map { ($0, 1) })
     var accountEpochs: [MusicAccountPlatform: UUID] = [:]
     var restoring = Set<MusicAccountPlatform>()
 

@@ -13,7 +13,9 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
 {
     private readonly FilmPlaybackPage page;
     private readonly FrameworkElement owner;
-    private readonly JsonElement browsing;
+    private readonly string? sourceId;
+    private readonly string? lineId;
+    private readonly JsonElement rawItems;
     private readonly FilmDirectory directory;
     private CancellationTokenSource? lifetime;
     private string currentPath = "/";
@@ -33,8 +35,10 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
     {
         this.owner = owner;
         this.page = page;
-        browsing = page.RawBrowsing.Clone();
-        directory = new(browsing, page.CurrentCandidateId);
+        sourceId = page.SourceId;
+        lineId = page.LineId;
+        rawItems = page.DirectoryRawItems.Clone();
+        directory = new(rawItems, page.ActiveItemId);
         InitializeComponent();
         Populate();
     }
@@ -65,20 +69,20 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
     internal void Hide() => lifetime?.Cancel();
 
     internal bool IsCurrent(FilmPlaybackPage value) => ReferenceEquals(page, value) &&
-        JsonElement.DeepEquals(FilmJson.Member(browsing, "sourceId"), FilmJson.Member(value.RawBrowsing, "sourceId")) &&
-        JsonElement.DeepEquals(FilmJson.Member(browsing, "lineId"), FilmJson.Member(value.RawBrowsing, "lineId")) &&
-        JsonElement.DeepEquals(FilmJson.Member(browsing, "originalEpisodes"), FilmJson.Member(value.RawBrowsing, "originalEpisodes")) &&
-        value.CanBrowseRaw;
+        value.CanBrowseRaw &&
+        sourceId == value.SourceId &&
+        lineId == value.LineId &&
+        FilmJson.Equal(rawItems, value.DirectoryRawItems);
 
     internal void RefreshCurrent()
     {
-        if (!directory.UpdateCurrent(page.CurrentCandidateId)) return;
+        if (!directory.UpdateCurrent(page.ActiveItemId)) return;
         var selected = FileList.SelectedItem as FilmDirectoryRow;
         rows = directory.Rows;
         Changed(nameof(Rows));
         if (selected is not null)
             FileList.SelectedItem = rows.FirstOrDefault(row =>
-                row.IsDirectory == selected.IsDirectory && row.CandidateId == selected.CandidateId && row.Path == selected.Path);
+                row.IsDirectory == selected.IsDirectory && row.ItemId == selected.ItemId && row.Path == selected.Path);
     }
 
     private void Back_Click(object sender, RoutedEventArgs e)
@@ -89,7 +93,7 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
 
     private void FileList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        bool next = FileList.SelectedItem is FilmDirectoryRow { IsDirectory: false, PlaybackTarget: not null, CandidateId: not null };
+        bool next = FileList.SelectedItem is FilmDirectoryRow { IsDirectory: false, ItemId: { Length: > 0 } };
         if (canPlay == next) return;
         canPlay = next;
         Changed(nameof(CanPlay));
@@ -115,9 +119,9 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
 
     private async void Play_Click(object sender, RoutedEventArgs e)
     {
-        if (FileList.SelectedItem is not FilmDirectoryRow { IsDirectory: false, PlaybackTarget: { } target, CandidateId: not null } || !IsCurrent(page)) return;
+        if (FileList.SelectedItem is not FilmDirectoryRow { IsDirectory: false, ItemId: { Length: > 0 } itemId } || !IsCurrent(page)) return;
         ClearError();
-        try { await page.SelectOriginalTargetAsync(target); }
+        try { await page.SelectItemAsync(itemId); }
         catch (OperationCanceledException) { }
         catch (Exception error)
         {

@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 namespace MeowFilm.Capabilities.Film.Rules;
 
 [JsonConverter(typeof(JsonStringEnumConverter<FilmRuleSection>))]
-public enum FilmRuleSection { Episode, Movie, Search }
+public enum FilmRuleSection { Episode, Movie, Search, Season }
 
 public sealed record FilmMatchRule(string Pattern, string Replace = "", string Flags = "");
 
@@ -14,11 +14,12 @@ public sealed record FilmRuleSet
     public IReadOnlyList<FilmMatchRule> EpisodeRules { get; init; } = [];
     public IReadOnlyList<FilmMatchRule> MovieRules { get; init; } = [];
     public IReadOnlyList<string> AggregateRegexRules { get; init; } = [];
+    public IReadOnlyList<FilmMatchRule> SeasonRules { get; init; } = [];
 }
 
 public sealed record FilmRuleRequest(FilmRuleSection Section, string Text, string? Query = null);
 
-/// <param name="Group">episodeClean, episode, movie or search.</param>
+/// <param name="Group">episodeClean, episode, movie, search or season.</param>
 /// <param name="RuleIndex">One-based index in that group.</param>
 public sealed record FilmRuleError(string Group, int RuleIndex, string Text);
 
@@ -37,6 +38,7 @@ public sealed record FilmRuleResult
     public bool RewriteApplied { get; init; }
     /// <summary>Null means no replacement; an empty string means replacement failed.</summary>
     public string? RewrittenText { get; init; }
+    public int? Season { get; init; }
     public string GroupKey { get; init; } = "";
     public string TrailingDigits { get; init; } = "";
     public IReadOnlyList<FilmRuleError> Errors { get; init; } = [];

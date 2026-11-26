@@ -1,245 +1,189 @@
 import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
-import { checkSource, checkTarget, clone, fields, identity, isIdentifier, object, requireValue,
-  resultDetailId, sourceIdentity, text } from './identity.js';
-import { candidateIdentity, candidateResourceIdentity } from './recognition.js';
+import { checkSource, clone, isIdentifier, normalizeWorkKey, object, requireValue, resultDetailId, text, workTargetId } from './identity.js';
 
-const MAX_PERSISTED_GROUPS = 2048;
-const metadataId = (provider, kind, id) => `${provider}:${kind}:${id}`;
-const positiveMetadataId = value => /^[1-9][0-9]*$/.test(String(value));
-const stableId = id => /^(?:tmdb|douban):(?:movie|tv):[1-9][0-9]*$|^(?:source|group):[a-f0-9]{64}$/.test(id);
-const coordinate = value => Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-
-function sourceMember(source, detailId) {
-  requireValue(source && ['cat', 'source'].includes(source.engine ?? 'cat') &&
-    text(source.installationId) && text(source.siteId) && isIdentifier(detailId));
-  return identity(sourceIdentity(source), detailId);
+function cleanKeywordFallback(title, kind) {
+  let base = text(title)
+    .replace(/[（(]\s*(?:18|19|20|21)\d{2}\s*[)）]\s*$/, '')
+    .trim();
+  if (!base) return '';
+  if (kind === 'movie') return base;
+  base = base
+    .replace(/第\s*(?:\d+|[０-９]+|[一二三四五六七八九十百千两零〇]+)\s*(?:季|部|篇)/gi, ' ')
+    .replace(/(?:^|\s)(?:\d+|[０-９]+)\s*季(?![度节])/gi, ' ')
+    .replace(/\b(?:s|season)\s*\d{1,3}\b/gi, ' ')
+    .replace(/(?<!新)年\s*番\s*(?:\d+|[０-９]+|[一二三四五六七八九十百千两零〇]+)?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const strippedDigits = base.replace(/^(.*(?:[^A-Za-z0-9\s]|\s))\s*0*[1-9]\d?\s*$/, '$1').trim();
+  return strippedDigits || base || text(title);
 }
 
-function indexGroups(groups) {
-  const byKey = new Map();
-  const byId = new Map();
-  const byMember = new Map();
-  for (const row of groups) {
-    if (!object(row)) continue;
-    if (typeof row.id === 'string' && !byId.has(row.id)) byId.set(row.id, row);
-    if (Array.isArray(row.keys)) {
-      for (const key of row.keys) if (key && !byKey.has(key)) byKey.set(key, row);
-    }
-    if (Array.isArray(row.members)) {
-      for (const member of row.members) if (member && !byMember.has(member)) byMember.set(member, row);
-    }
+function formatScore(value) {
+  const num = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  return num.toFixed(1).replace(/\.0$/, '.0');
+}
+
+function pickDoubanPoster(record) {
+  if (!object(record)) return '';
+  const pic = record.pic;
+  if (object(pic)) return text(pic.large) || text(pic.normal) || '';
+  return text(record.cover_url) || text(record.cover?.url) || text(record.poster) || '';
+}
+
+function pickTMDBLogo(metadata) {
+  const logos = metadata?.images?.logos;
+  if (!Array.isArray(logos) || !logos.length) return '';
+  const zh = logos.find(item => item?.iso_639_1 === 'zh' || item?.iso_639_1 === 'cn');
+  const en = logos.find(item => item?.iso_639_1 === 'en');
+  const chosen = zh ?? en ?? logos[0];
+  return text(chosen?.file_path);
+}
+
+function formatMinutes(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return `${Math.round(value)}分钟`;
+  if (typeof value === 'string' && value.trim()) {
+    const raw = value.trim();
+    if (/^\d+$/.test(raw)) return `${raw}分钟`;
+    return raw;
   }
-  return { byKey, byId, byMember };
+  return '';
 }
 
-function findGroupRecord(index, identities, key, preferred) {
-  if (key && index.byKey.has(key)) return index.byKey.get(key);
-  if (preferred && index.byId.has(preferred)) return index.byId.get(preferred);
-  for (const member of identities) {
-    if (index.byMember.has(member)) return index.byMember.get(member);
+function parseYear(record) {
+  for (const raw of [record?.year, record?.release_date, record?.first_air_date,
+    Array.isArray(record?.pubdate) ? record.pubdate[0] : undefined]) {
+    const match = /^((?:18|19|20|21)\d{2})/.exec(String(raw ?? '').trim());
+    if (match) return Number(match[1]);
   }
   return undefined;
 }
 
-function groupNeedsMutation(record, identities, key, persistNew) {
-  if (!record) return persistNew;
-  requireValue(/^group:[a-f0-9]{64}$/.test(record.id) && Array.isArray(record.keys) &&
-    Array.isArray(record.members), 'CORRUPT_STORAGE');
-  if (key && !record.keys.includes(key)) return true;
-  return identities.some(member => !record.members.includes(member));
-}
-
-function registerGroup(identities, groups, index, key, preferred, { persistNew = true } = {}) {
-  let record = findGroupRecord(index, identities, key, preferred);
-  if (!record) {
-    const id = `group:${identity('group', identities[0])}`;
-    if (!persistNew) return id;
-    record = { id, keys: [], members: [] };
-    groups.push(record);
-    index.byId.set(id, record);
-  }
-  requireValue(/^group:[a-f0-9]{64}$/.test(record.id) && Array.isArray(record.keys) &&
-    Array.isArray(record.members), 'CORRUPT_STORAGE');
-  if (key && !record.keys.includes(key)) {
-    record.keys.push(key);
-    if (!index.byKey.has(key)) index.byKey.set(key, record);
-  }
-  for (const member of identities) {
-    if (!record.members.includes(member)) {
-      record.members.push(member);
-      if (!index.byMember.has(member)) index.byMember.set(member, record);
-    }
-  }
-  while (groups.length > MAX_PERSISTED_GROUPS) {
-    const evicted = groups.shift();
-    if (!object(evicted)) continue;
-    if (typeof evicted.id === 'string' && index.byId.get(evicted.id) === evicted) {
-      index.byId.delete(evicted.id);
-    }
-    if (Array.isArray(evicted.keys)) {
-      for (const evictedKey of evicted.keys) {
-        if (index.byKey.get(evictedKey) === evicted) index.byKey.delete(evictedKey);
-      }
-    }
-    if (Array.isArray(evicted.members)) {
-      for (const evictedMember of evicted.members) {
-        if (index.byMember.get(evictedMember) === evicted) index.byMember.delete(evictedMember);
-      }
-    }
-  }
-  return record.id;
-}
-
-/** Stable content addressing belongs to the film owner, not a search session or a view. */
-export function createFilmCatalog({ library } = {}) {
-  requireValue(library && typeof library.read === 'function' && typeof library.update === 'function');
-
-  function memberIdentities(members, sources) {
-    requireValue(Array.isArray(members) && members.length);
-    const identities = [...new Set(members.map(member =>
-      sourceMember(sources.find(source => source.key === member.sourceKey), member.detailId)))].sort();
-    requireValue(identities.length);
-    return identities;
+/**
+ * Normalizes cards, metadata, and work details into clean UI projections so
+ * Windows & iOS never parse raw TMDB/Douban JSON or touch underlying script IDs.
+ */
+export function createFilmCatalog() {
+  function buildCardFromMetadata(provider, record, defaultKind) {
+    if (!object(record)) return null;
+    const idValue = record.id ?? record.target_id;
+    if (!/^[1-9]\d*$/.test(String(idValue ?? ''))) return null;
+    const kind = ['movie', 'tv'].includes(record.media_type) ? record.media_type
+      : ['movie', 'tv'].includes(record.type) ? record.type
+      : ['movie', 'tv'].includes(defaultKind) ? defaultKind : 'tv';
+    const title = text(record.title ?? record.name);
+    if (!title) return null;
+    const keyword = cleanKeywordFallback(title, kind) || title;
+    const targetId = workTargetId(keyword);
+    const year = parseYear(record);
+    const poster = provider === 'tmdb' ? text(record.poster_path) : pickDoubanPoster(record);
+    const backdrop = provider === 'tmdb' ? text(record.backdrop_path) : '';
+    const score = provider === 'tmdb'
+      ? formatScore(record.vote_average)
+      : formatScore(record.rating?.value);
+    const subtitle = provider === 'douban'
+      ? (text(record.episodes_info) || text(record.card_subtitle))
+      : (year ? String(year) : '');
+    const textBadge = provider === 'douban'
+      ? text(record.episodes_info)
+      : (year ? String(year) : '');
+    return {
+      id: `${provider}:${kind}:${idValue}`,
+      targetId,
+      keyword,
+      title,
+      subtitle,
+      poster,
+      backdrop,
+      score,
+      textBadge,
+      siteLabel: provider === 'tmdb' ? 'TMDB' : '豆瓣',
+      kind,
+      ...(year ? { year } : {}),
+      tmdb: provider === 'tmdb' ? { kind, id: Number(idValue) } : null,
+      douban: provider === 'douban' ? { kind, id: String(idValue) } : null,
+      siteEntry: null,
+    };
   }
 
-  function resolveNonGroupTarget(value, sources) {
-    const result = clone(value);
-    if (value.metadataProvider) {
-      requireValue(['tmdb', 'douban'].includes(value.metadataProvider) && positiveMetadataId(value.metadataId));
-      result.id = metadataId(value.metadataProvider, value.kind, value.metadataId);
-    } else if (value.kind === 'source') {
-      if (value.source?.engine === 'pan') {
-        const manual = library.read().manual.find(row => row?.share && row.enabled !== false &&
-          `manual:${row.id}` === value.source.key && row.id === value.source.detailId && row.targetId === value.id);
-        requireValue(manual, 'SOURCE_NOT_FOUND');
-        result.source = { ...value.source, engine: 'pan' };
-      } else {
-        const source = sources.find(source => source.key === value.source?.key);
-        const member = sourceMember(source, value.source?.detailId);
-        result.id = stableId(value.id ?? '') ? value.id : `source:${member}`;
-        result.source = { ...fields(source, ['key', 'engine', 'installationId', 'siteId']), ...value.source };
-      }
-    } else requireValue(false);
-    return checkTarget(result);
-  }
-
-  async function resolve(value, sources = []) {
-    requireValue(Array.isArray(sources));
-    requireValue(object(value) && text(value.title) && ['movie', 'tv', 'source', 'group'].includes(value.kind));
-    if (value.kind !== 'group') return resolveNonGroupTarget(value, sources);
-    const identities = memberIdentities(value.members, sources);
-    const currentGroups = library.read().groups;
-    const readIndex = indexGroups(currentGroups);
-    const existing = findGroupRecord(readIndex, identities, undefined, value.id);
-    if (existing && !groupNeedsMutation(existing, identities, undefined, true)) {
-      return checkTarget({ ...clone(value), id: existing.id });
-    }
-    let resolvedId;
-    await library.update(document => {
-      const writeIndex = indexGroups(document.groups);
-      resolvedId = registerGroup(identities, document.groups, writeIndex, undefined, value.id, { persistNew: true });
-    });
-    return checkTarget({ ...clone(value), id: resolvedId });
-  }
-
-  async function search(cards, sources, revision) {
-    const readIndex = indexGroups(library.read().groups);
-    const pendingGroups = [];
-    const result = cards.map((card, cardIndex) => {
-      const members = (card.aggregateItems?.length ? card.aggregateItems : card.sourceKind === 'site' ? [card] : [])
-        .map(row => ({ sourceKey: row.siteKey, detailId: row.detailId }));
-      const raw = card.sourceKind === 'site' && card.displayKey.startsWith('site:');
-      const value = card.sourceKind === 'tmdb' ? { kind: card.tmdbType, title: text(card.title),
-        metadataProvider: 'tmdb', metadataId: String(card.tmdbId), ...(members.length ? { members } : {}) }
-        : raw ? { kind: 'source', title: text(card.title), source: { key: card.siteKey, detailId: card.detailId } }
-          : { kind: 'group', title: text(card.title), members };
-      if (value.kind !== 'group') {
-        const resolved = resolveNonGroupTarget(value, sources);
-        return { ...card, businessId: resolved.id, playbackTarget: resolved };
-      }
-      requireValue(text(value.title));
-      const identities = memberIdentities(value.members, sources);
-      const key = identity('aggregation', revision, card.groupKey);
-      const persistNew = identities.length > 1;
-      const existing = findGroupRecord(readIndex, identities, key, value.id);
-      if (groupNeedsMutation(existing, identities, key, persistNew)) {
-        pendingGroups.push({ cardIndex, value, identities, key, persistNew });
-      }
-      const id = existing ? existing.id : `group:${identity('group', identities[0])}`;
-      const resolved = checkTarget({ ...clone(value), id });
-      return { ...card, businessId: resolved.id, playbackTarget: resolved };
-    });
-    if (pendingGroups.length) {
-      await library.update(document => {
-        const writeIndex = indexGroups(document.groups);
-        for (const item of pendingGroups) {
-          const id = registerGroup(item.identities, document.groups, writeIndex, item.key, item.value.id,
-            { persistNew: item.persistNew });
-          const resolved = checkTarget({ ...clone(item.value), id });
-          result[item.cardIndex] = { ...result[item.cardIndex], businessId: resolved.id, playbackTarget: resolved };
+  function searchCards(cards) {
+    return (Array.isArray(cards) ? cards : []).map(card => {
+      const title = text(card.title);
+      const isTmdb = card.sourceKind === 'tmdb' && Number.isSafeInteger(card.tmdbId) && card.tmdbId > 0;
+      const kind = isTmdb ? card.tmdbType : (card.raw?.type_name === '电影' ? 'movie' : undefined);
+      const keyword = text(card.keyword) || cleanKeywordFallback(title, kind) || title;
+      const targetId = workTargetId(keyword);
+      const isRawSite = card.sourceKind === 'site' && typeof card.displayKey === 'string' && card.displayKey.startsWith('site:');
+      const isSingleSite = card.sourceKind === 'site' && !card.aggregateItems?.length;
+      const siteEntry = (isRawSite || isSingleSite) && text(card.siteKey) && isIdentifier(card.detailId)
+        ? {
+          sourceKey: card.siteKey,
+          installationId: card.installationId,
+          siteKey: card.siteId,
+          detailId: card.detailId,
+          rawTitle: text(card.rawTitle) || title,
+          remark: text(card.textBadge),
+          poster: text(card.poster),
         }
-      });
-    }
-    return result;
+        : null;
+      return {
+        id: card.displayKey,
+        displayKey: card.displayKey,
+        targetId,
+        keyword,
+        sourceKind: card.sourceKind,
+        title,
+        subtitle: text(card.textBadge),
+        poster: text(card.poster),
+        backdrop: text(card.backdrop),
+        score: '',
+        textBadge: text(card.textBadge),
+        siteLabel: text(card.siteLabel) || text(card.siteName),
+        siteKey: text(card.siteKey),
+        siteName: text(card.siteName),
+        ...(Number.isSafeInteger(card.aggregateSourceCount) && card.aggregateSourceCount > 0
+          ? { aggregateSourceCount: card.aggregateSourceCount } : {}),
+        ...(Number.isSafeInteger(card.seasonHint) && card.seasonHint > 0
+          ? { seasonHint: card.seasonHint, seasonHintLabel: text(card.seasonHintLabel) } : {}),
+        ...(kind ? { kind } : {}),
+        ...(Number.isSafeInteger(card.year) && card.year > 0 ? { year: card.year } : {}),
+        tmdb: isTmdb ? { kind: card.tmdbType, id: card.tmdbId } : null,
+        douban: null,
+        siteEntry,
+      };
+    });
   }
 
-  function metadata(provider, path, value, contentTarget) {
-    const detail = /^\/(?:3|rexxar\/api\/v2)\/(movie|tv)\/([1-9]\d*)(?:\/season\/(\d+))?$/.exec(path);
-    const lane = /\/(?:search|discover|recent_hot|trending)\/(movie|tv)(?:\/|$)/.exec(path)?.[1];
-    function row(record, kind, id = record?.id, parent, season, episode) {
-      if (!object(record) || !['movie', 'tv'].includes(kind) || !positiveMetadataId(id)) return record;
-      const title = text(parent?.title ?? parent?.name ?? record.title ?? record.name ?? contentTarget?.title);
-      if (!title) return record;
-      const base = metadataId(provider, kind, id);
-      const playbackTarget = { id: base, kind, title, metadataProvider: provider, metadataId: String(id),
-        ...(season === undefined ? {} : { season }), ...(episode === undefined ? {} : { episode }) };
-      const businessId = base + (season === undefined ? '' : `:season:${season}`) +
-        (episode === undefined ? '' : `:episode:${episode}`);
-      const projected = { ...record, businessId, playbackTarget };
-      if (kind === 'tv' && Array.isArray(record.seasons)) projected.seasons = record.seasons.map(item => {
-        if (!object(item)) return item;
-        const seasonNum = coordinate(item.season_number ?? item.season);
-        return seasonNum === undefined ? item : row(item, kind, id, record, seasonNum);
+  function metadata(provider, path, value) {
+    if (!object(value) && !Array.isArray(value)) return value;
+    const lane = /\/(?:search|discover|recent_hot|trending)\/(movie|tv)(?:\/|$)/.exec(path)?.[1]
+      ?? (/movie/.test(path) ? 'movie' : /tv/.test(path) ? 'tv' : undefined);
+    if (Array.isArray(value)) {
+      return value.map(item => {
+        const card = buildCardFromMetadata(provider, item, lane);
+        return card ? { ...item, card } : item;
       });
-      if (kind === 'tv' && Array.isArray(record.doubanSeasons)) projected.doubanSeasons = record.doubanSeasons.map(item => {
-        if (!object(item)) return item;
-        const seasonNum = coordinate(item.season_number ?? item.season);
-        return seasonNum === undefined ? item : row(item, kind, item.metadataId ?? id, record, seasonNum);
-      });
-      if (kind === 'tv' && Array.isArray(record.episodes) && season !== undefined) projected.episodes = record.episodes.map(item => {
-        if (!object(item)) return item;
-        const episodeNum = coordinate(item.episode_number ?? item.episode);
-        return episodeNum === undefined ? item : row(item, kind, id, parent ?? record, season, episodeNum);
-      });
-      for (const name of ['last_episode_to_air', 'next_episode_to_air']) {
-        if (object(record[name])) {
-          const epSeason = coordinate(record[name].season_number);
-          const epNumber = coordinate(record[name].episode_number);
-          if (epSeason !== undefined && epNumber !== undefined) {
-            projected[name] = row(record[name], kind, id, record, epSeason, epNumber);
-          }
-        }
-      }
-      for (const name of ['similar', 'recommendations']) {
-        const related = record[name];
-        if (object(related) && Array.isArray(related.results)) projected[name] = {
-          ...related, results: related.results.map(item => row(item, item.media_type ?? kind)),
-        };
-      }
-      return projected;
     }
-    if (!object(value)) return value;
-    let result = detail ? row(value, detail[1], detail[2], undefined,
-      detail[3] === undefined ? undefined : coordinate(Number(detail[3]))) : value;
-    if (Array.isArray(value.results)) result = { ...result,
-      results: value.results.map(item => row(item, item.media_type ?? lane)) };
-    if (Array.isArray(value.items)) result = { ...result,
-      items: value.items.map(item => row(item, item.type ?? lane)) };
-    if (provider === 'douban' && Array.isArray(value.subjects?.items)) result = { ...result,
-      subjects: { ...value.subjects, items: value.subjects.items.map(item => {
-        const projected = row(item.target, item.target_type ?? item.target?.type, item.target_id ?? item.target?.id);
-        return projected === item.target ? item : { ...item, target: projected };
-      }) } };
+    const result = { ...value };
+    if (Array.isArray(value.results)) {
+      result.results = value.results.map(item => {
+        const card = buildCardFromMetadata(provider, item, item?.media_type ?? lane);
+        return card ? { ...item, card } : item;
+      });
+    }
+    if (Array.isArray(value.items)) {
+      result.items = value.items.map(item => {
+        const inner = object(item?.subject) ? item.subject : item;
+        const card = buildCardFromMetadata(provider, inner, inner?.type ?? lane);
+        return card ? { ...item, card } : item;
+      });
+    }
+    if (Array.isArray(value.subject_collection_items)) {
+      result.subject_collection_items = value.subject_collection_items.map(item => {
+        const card = buildCardFromMetadata(provider, item, item?.type ?? lane);
+        return card ? { ...item, card } : item;
+      });
+    }
     return result;
   }
 
@@ -248,70 +192,213 @@ export function createFilmCatalog({ library } = {}) {
     source = checkSource(source);
     const name = Array.isArray(value.list) ? 'list' : Array.isArray(value.items) ? 'items' : null;
     if (!name) return value;
-    return { ...value, [name]: value[name].map(row => {
-      const detailId = resultDetailId(row);
-      const title = text(row?.vod_name ?? row?.title ?? row?.name);
-      if (!object(row) || !isIdentifier(detailId) || !title) return row;
-      const playbackTarget = { id: `source:${sourceMember(source, detailId)}`, kind: 'source', title,
-        source: { ...fields(source, ['key', 'engine', 'installationId', 'siteId']), detailId } };
-      return { ...row, businessId: playbackTarget.id, playbackTarget };
-    }) };
+    return {
+      ...value,
+      [name]: value[name].map(row => {
+        const detailId = resultDetailId(row);
+        const title = text(row?.vod_name ?? row?.title ?? row?.name);
+        if (!object(row) || !isIdentifier(detailId) || !title) return row;
+        const kind = row?.type_name === '电影' ? 'movie' : undefined;
+        const keyword = cleanKeywordFallback(title, kind) || title;
+        const targetId = workTargetId(keyword);
+        const poster = text(row?.vod_pic ?? row?.pic);
+        const remark = text(row?.vod_remarks ?? row?.remark);
+        const card = {
+          id: `site:${source.key}:${String(detailId)}`,
+          targetId,
+          keyword,
+          title,
+          subtitle: remark,
+          poster,
+          backdrop: '',
+          score: '',
+          textBadge: remark,
+          siteLabel: text(source.name) || source.siteId,
+          ...(kind ? { kind } : {}),
+          tmdb: null,
+          douban: null,
+          siteEntry: {
+            sourceKey: source.key,
+            installationId: source.installationId,
+            siteKey: source.siteId,
+            detailId,
+            rawTitle: title,
+            remark,
+            poster,
+          },
+        };
+        return { ...row, card };
+      }),
+    };
   }
 
-  function candidate(parent, item) {
-    const source = item.source;
-    const playbackTarget = { id: parent.id, kind: 'source', title: parent.title,
-      ...fields(item, ['season', 'episode', 'globalEpisode']),
-      source: { ...fields(source, ['key', 'engine', 'installationId', 'siteId']),
-        detailId: item.detailId ?? source.detailId, lineId: item.lineId, candidateId: item.id } };
-    return { businessId: item.id, playbackTarget };
-  }
+  function formatWorkInfo({ fallbackTitle, fallbackPoster = '', fallbackKind = 'tv', keyword, targetId, tmdbRow, doubanRow }) {
+    const primary = tmdbRow ?? doubanRow;
+    const raw = primary?.metadata ?? null;
+    const doubanRaw = doubanRow?.metadata ?? null;
+    const kind = primary?.kind ?? fallbackKind ?? 'tv';
+    const title = text(raw?.title ?? raw?.name) || text(doubanRaw?.title ?? doubanRaw?.name) || text(fallbackTitle);
+    const poster = (tmdbRow ? text(tmdbRow.metadata?.poster_path) : '') ||
+      (doubanRow ? pickDoubanPoster(doubanRow.metadata) : '') ||
+      text(fallbackPoster);
+    const backdrop = (tmdbRow ? text(tmdbRow.metadata?.backdrop_path) : '') || poster;
+    const logo = tmdbRow ? pickTMDBLogo(tmdbRow.metadata) : '';
+    const yearNum = parseYear(raw) ?? parseYear(doubanRaw);
+    const year = yearNum ? String(yearNum) : '';
 
-  function source(parent, value, title = parent.title) {
-    const id = value.engine === 'pan' ? identity('pan', value.key, value.detailId) : sourceMember(value, value.detailId);
-    const playbackTarget = { id: parent.id, kind: 'source', title,
-      source: { ...fields(value, ['key', 'engine', 'installationId', 'siteId']), detailId: value.detailId } };
-    return { businessId: `source:${id}`, playbackTarget };
-  }
+    // Countries / Regions
+    const countriesList = Array.isArray(raw?.origin_country) && raw.origin_country.length
+      ? raw.origin_country
+      : Array.isArray(raw?.production_countries) && raw.production_countries.length
+        ? raw.production_countries.map(c => text(c?.name ?? c?.iso_3166_1)).filter(Boolean)
+        : Array.isArray(raw?.countries) && raw.countries.length
+          ? raw.countries.map(c => text(c)).filter(Boolean)
+          : Array.isArray(doubanRaw?.countries)
+            ? doubanRaw.countries.map(c => text(c)).filter(Boolean)
+            : [];
+    const countries = countriesList.join(' / ');
 
-  function line(parent, value) {
-    return { businessId: `line:${identity(parent.businessId, value.id)}`,
-      playbackTarget: { ...parent.playbackTarget, source: { ...parent.playbackTarget.source, lineId: value.id } } };
-  }
+    // Duration
+    const runtimeVal = raw?.runtime
+      ?? (Array.isArray(raw?.episode_run_time) ? raw.episode_run_time[0] : undefined)
+      ?? (Array.isArray(raw?.durations) ? raw.durations[0] : undefined)
+      ?? (Array.isArray(doubanRaw?.durations) ? doubanRaw.durations[0] : undefined);
+    const duration = formatMinutes(runtimeVal);
 
-  function file(parent, source, lineId, value) {
-    const scope = [source.key, source.engine ?? null, source.installationId ?? null, source.siteId ?? null];
-    const resource = candidateResourceIdentity(value.file, value.share, scope, source.detailId, lineId, value.playId);
-    return candidate(parent, { ...fields(value, ['season', 'episode', 'globalEpisode']),
-      id: candidateIdentity(scope, source.detailId, lineId, resource), source, lineId });
-  }
+    // Season & Episode counts
+    const intCount = val => {
+      const n = typeof val === 'string' && /^\d+$/.test(val.trim()) ? Number(val.trim()) : val;
+      return Number.isSafeInteger(n) && n > 0 ? n : null;
+    };
+    let seasonCount = null;
+    let episodeCount = null;
+    if (kind === 'tv') {
+      if (tmdbRow?.metadata) {
+        const ordinary = (tmdbRow.metadata.seasons ?? []).filter(s => intCount(s?.season_number) > 0 && intCount(s?.episode_count) > 0);
+        seasonCount = ordinary.length || intCount(tmdbRow.metadata.number_of_seasons);
+        episodeCount = intCount(tmdbRow.metadata.number_of_episodes) ??
+          (ordinary.length ? ordinary.reduce((sum, s) => sum + intCount(s.episode_count), 0) : null);
+      } else if (doubanRow) {
+        const seasons = (doubanRow.seasons ?? doubanRow.metadata?.doubanSeasons ?? []).filter(s => intCount(s?.season) > 0);
+        seasonCount = seasons.length || (intCount(doubanRow.metadata?.episodes_count) ? 1 : null);
+        episodeCount = seasons.length
+          ? seasons.reduce((sum, s) => sum + (intCount(s.episodeCount) ?? 0), 0) || intCount(doubanRow.metadata?.episodes_count)
+          : intCount(doubanRow.metadata?.episodes_count);
+      }
+    }
 
-  function content(value) {
-    const match = /^(tmdb|douban):(movie|tv):([1-9][0-9]*)$/.exec(value.id);
-    return match ? { id: value.id, kind: match[2], title: value.title,
-      metadataProvider: match[1], metadataId: match[3] } : null;
+    // Genres
+    const rawGenres = Array.isArray(raw?.genres) ? raw.genres : (Array.isArray(doubanRaw?.genres) ? doubanRaw.genres : []);
+    const genres = rawGenres.map(g => typeof g === 'string' ? g.trim() : text(g?.name)).filter(Boolean);
+
+    // Score (prefer Douban score when available, otherwise TMDB vote_average)
+    const doubanScore = formatScore(doubanRaw?.rating?.value);
+    const tmdbScore = formatScore(tmdbRow?.metadata?.vote_average);
+    const score = doubanScore || tmdbScore;
+    const scoreProvider = doubanScore ? 'douban' : (tmdbScore ? 'tmdb' : '');
+
+    // Directors
+    const tmdbDirectors = (tmdbRow?.metadata?.credits?.crew ?? [])
+      .filter(p => p?.job === 'Director' || p?.department === 'Directing' && p?.job === 'Series Director')
+      .map(p => text(p?.name))
+      .filter(Boolean);
+    const tmdbCreators = (tmdbRow?.metadata?.created_by ?? []).map(p => text(p?.name)).filter(Boolean);
+    const doubanDirectors = (doubanRaw?.directors ?? []).map(p => text(p?.name)).filter(Boolean);
+    const directors = [...new Set(tmdbDirectors.length ? tmdbDirectors : tmdbCreators.length ? tmdbCreators : doubanDirectors)].slice(0, 4).join(' / ');
+
+    // Cast
+    const castSource = Array.isArray(tmdbRow?.metadata?.credits?.cast) && tmdbRow.metadata.credits.cast.length
+      ? tmdbRow.metadata.credits.cast.slice(0, 20).map((person, idx) => ({
+        id: `tmdb-cast:${person.id ?? idx}`,
+        name: text(person.name),
+        role: text(person.character),
+        avatar: text(person.profile_path),
+      }))
+      : Array.isArray(doubanRaw?.actors)
+        ? doubanRaw.actors.slice(0, 20).map((person, idx) => ({
+          id: `douban-cast:${person.id ?? idx}`,
+          name: text(person.name),
+          role: text(person.character ?? (Array.isArray(person.roles) ? person.roles[0] : '')),
+          avatar: text(person.avatar?.large ?? person.avatar?.normal ?? person.cover_url),
+        }))
+        : [];
+    const cast = castSource.filter(item => item.name);
+
+    // Summary (never site junk; only TMDB overview or Douban intro)
+    const summary = text(tmdbRow?.metadata?.overview) || text(doubanRaw?.intro) || text(doubanRaw?.summary) || '';
+
+    // Related / Similar cards
+    const relatedRaw = tmdbRow?.metadata?.similar?.results ?? tmdbRow?.metadata?.recommendations?.results ?? [];
+    const relatedCards = Array.isArray(relatedRaw)
+      ? relatedRaw.slice(0, 18).map(item => buildCardFromMetadata('tmdb', item, item?.media_type ?? kind)).filter(Boolean)
+      : [];
+
+    const resolvedKeyword = text(keyword) || cleanKeywordFallback(title, kind) || title;
+    const resolvedTargetId = text(targetId) || (resolvedKeyword ? `work:${normalizeWorkKey(resolvedKeyword)}` : '');
+
+    return {
+      targetId: resolvedTargetId,
+      keyword: resolvedKeyword,
+      kind,
+      title,
+      subtitle: [year, countries, duration].filter(Boolean).join(' · '),
+      poster,
+      backdrop,
+      logo,
+      year,
+      countries,
+      duration,
+      seasonCount,
+      episodeCount,
+      genres,
+      score,
+      scoreProvider,
+      directors,
+      cast,
+      summary,
+      tmdb: tmdbRow ? { kind: tmdbRow.kind, id: Number(tmdbRow.metadataId) } : null,
+      douban: doubanRow ? { kind: doubanRow.kind, id: String(doubanRow.metadataId) } : null,
+      relatedCards,
+    };
   }
 
   function history(value) {
     if (!object(value)) return { errorCode: 'CORRUPT_STORAGE' };
     if (value.errorCode) return cloneJSONValue(value);
-    return { ...cloneJSONValue(value), businessId: value.targetId };
+    const cloned = cloneJSONValue(value);
+    const episodeText = cloned.episode?.episode > 0
+      ? (cloned.episode.season > 1 ? `第${cloned.episode.season}季 第${cloned.episode.episode}集` : `第${cloned.episode.episode}集`)
+      : cloned.fileName || '';
+    return {
+      ...cloned,
+      card: {
+        id: cloned.targetId,
+        targetId: cloned.targetId,
+        keyword: cloned.keyword,
+        title: cloned.title,
+        subtitle: episodeText,
+        poster: cloned.poster ?? '',
+        backdrop: '',
+        score: '',
+        textBadge: episodeText,
+        siteLabel: cloned.lineLabel || '',
+        ...(cloned.kind ? { kind: cloned.kind } : {}),
+        ...(cloned.year ? { year: cloned.year } : {}),
+        tmdb: cloned.tmdb ?? null,
+        douban: cloned.douban ?? null,
+        siteEntry: null,
+      },
+    };
   }
 
-  function directory(source, value) {
-    source = checkSource(source);
-    const detailId = value.detailId ?? source.detailId;
-    const raw = Array.isArray(value.raw?.list)
-      ? value.raw.list.find(row => (row?.vod_id ?? row?.id) === detailId) : value.raw;
-    const title = text(raw?.vod_name ?? raw?.title ?? raw?.name) || source.name;
-    const parent = { id: `source:${sourceMember(source, detailId)}`, kind: 'source', title,
-      source: { ...fields(source, ['key', 'engine', 'installationId', 'siteId']), detailId } };
-    const projected = { businessId: parent.id, playbackTarget: parent };
-    return { ...value, businessId: parent.id, playbackTarget: parent, lines: value.lines.map(valueLine => ({
-      ...valueLine, ...line(projected, valueLine),
-      episodes: valueLine.episodes.map(item => ({ ...item, ...file(parent, { ...source, detailId }, valueLine.id, item) })),
-    })) };
-  }
-
-  return { resolve, search, metadata, sourceRows, candidate, source, line, file, content, history, directory };
+  return {
+    cleanKeywordFallback,
+    buildCardFromMetadata,
+    searchCards,
+    metadata,
+    sourceRows,
+    formatWorkInfo,
+    history,
+    directory: (_source, value) => clone(value),
+  };
 }

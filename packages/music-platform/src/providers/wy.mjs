@@ -15,8 +15,7 @@ const integerArray = values => {
   return encodeProtocolJSON(values.map(protocolInteger));
 };
 function idOf(song) { return song.sources[0]?.musicInfo.songmid ?? ''; }
-function wyBatch(c, kind, source, context, extra = {}, algorithms = {}, feedbackSources = {}, defaultSource = '') {
-  const items = source.map(wySong);
+function wyBatch(c, kind, source, context, extra = {}, algorithms = {}, feedbackSources = {}, defaultSource = '', items = source.map(wySong)) {
   return { platform: 'wy', kind, items, count: items.length, empty: items.length === 0,
     context, recommendations: items.map((song, index) => {
       const raw = source[index] ?? {}, nested = first(raw.songInfo, raw.songData, raw.song) ?? {}, id = idOf(song);
@@ -78,6 +77,17 @@ async function favorite(c) {
     offset += lists.length;
   }
 }
+const wySceneRuleIds = {
+  CHINESE: '1370000', SWEET: '575000', JINGDIAN: '24002', ENGLISH: '1372000',
+  ELECTRONIC: '40000', YINGSHI: '1373000', RAP: '37002', MANYAO: '38000',
+  YUEYU: '32000', EXERCISE: '34000', GUOFENG: '39000', RHYTHM_BLUES: '28000',
+  FOLK: '27000', ROCK: '27001', ACG: '27002', K_POP: '1371000',
+  COMMUTE: '579001', GUDIAN: '37001', JAZZ: '29000', COUNTRY: '577000',
+  PUNK: '579000', BLUE: '578000', GAMES: '566000', LIGHT: '41000',
+  RELAX: '568000', JAPANESE: '37003', FRANCH: '567000', DANCE: '569000',
+  LATIN: '43000', GLOBAL: '574000', FOCUS: '29001', SLEEP_HELP: '37000',
+};
+
 export const wyProvider = {
   async search(c, { keyword, kind = 'songs', page: current = 1, limit = 30, pages = 1 }) {
     keyword = input(keyword); current = pageNumber(current); limit = pageNumber(limit, 30); pages = pageNumber(pages);
@@ -240,18 +250,40 @@ export const wyProvider = {
     }, branch === 'style' ? 60000 : 600000);
   },
   async fm(c, { mode = 'default', submode = '', preview = false, ruleId = '', tabTagId = '', unplaySongIds = [] }) {
-    if (ruleId || tabTagId) {
-      const params = { ruleType: 1, ruleId, tabTagId, firstSongId: '', firstSongAlg: '', ...(preview ? {} : { limit: 5 }) };
-      const data = await c.wy(preview ? '/api/tag/tab/fm/cover' : '/api/tag/tab/fm/recommends', params, false,
-        { dataStatus: true });
-      return preview ? { platform: 'wy', kind: 'fm-preview', preview: true, cover: image(data?.data?.cover),
-        context: { provider: 'rule', ruleId, tabTagId } } : wyBatch(c, 'fm', array(data?.data), { provider: 'rule', ruleId, tabTagId });
-    }
+    const isContinuation = !preview && unplaySongIds.length > 0;
     const protocolMode = { default: 'DEFAULT', familiar: 'FAMILIAR', explore: 'EXPLORE', puzzle: 'PUZZLE_MODE_RCMD', scene: 'SCENE_RCMD' }[mode] ?? input(mode);
-    const data = await c.wy('/api/v1/radio/get', { mode: protocolMode, subMode: submode, limit: preview ? '1' : '3',
-      openAidj: 'false', aidjReqTimes: '0', unplaySongIds: integerArray(unplaySongIds) }, false, { dataStatus: true });
-    return wyBatch(c, 'fm', array(Array.isArray(data?.data) ? data.data : data?.data?.songs),
-      { mode: protocolMode, submode, preview }, {}, {}, {}, 'userfm');
+    const sub = text(submode), explicitRule = Boolean(ruleId || tabTagId);
+    const rule = scalar(ruleId) || (!c.account && protocolMode === 'SCENE_RCMD' ? wySceneRuleIds[sub] ?? '' : '');
+    const tab = scalar(tabTagId);
+    if (rule || tab) {
+      const cacheKey = explicitRule ? ['fm', 'rule', rule, tab] : ['fm', 'mode', protocolMode, sub];
+      const context = explicitRule ? { provider: 'rule', ruleId: rule, tabTagId: tab } : { mode: protocolMode, submode: sub };
+      const unplaySet = isContinuation ? new Set(unplaySongIds.map(scalar).filter(Boolean)) : null;
+      const load = async fc => {
+        const requestLimit = unplaySet?.size ? Math.min(25, 5 + unplaySet.size) : 5;
+        const data = await fc.wy('/api/tag/tab/fm/recommends', { ruleType: 1, ruleId: rule, tabTagId: tab,
+          firstSongId: '', firstSongAlg: '', limit: requestLimit }, false, { dataStatus: true });
+        let rawRows = array(data?.data).map(record);
+        if (unplaySet?.size) rawRows = rawRows.filter(row => !unplaySet.has(scalar(row.id))).slice(0, 5);
+        const ids = [...new Set(rawRows.map(row => scalar(row.id)).filter(Boolean))];
+        const byId = new Map((ids.length ? await wyDetails(fc, ids) : []).map(song => [idOf(song), song]));
+        const matched = rawRows.filter(row => byId.has(scalar(row.id)));
+        const items = matched.map(row => byId.get(scalar(row.id)));
+        return wyBatch(fc, 'fm', matched, context,
+          { cover: image(items[0]?.cover_url) }, {}, {}, '', items);
+      };
+      return isContinuation ? load(c) : c.cached(cacheKey, load, 3600000);
+    }
+    const unplay = integerArray(unplaySongIds);
+    const load = async fc => {
+      const data = await fc.wy('/api/v1/radio/get', { mode: protocolMode, subMode: sub, limit: '3',
+        openAidj: 'false', aidjReqTimes: '0', unplaySongIds: unplay }, false, { dataStatus: true });
+      const rawRows = array(Array.isArray(data?.data) ? data.data : data?.data?.songs);
+      const items = rawRows.map(wySong);
+      return wyBatch(fc, 'fm', rawRows, { mode: protocolMode, submode: sub },
+        { cover: image(items[0]?.cover_url) }, {}, {}, 'userfm', items);
+    };
+    return isContinuation ? load(c) : c.cached(['fm', 'mode', protocolMode, sub], load, 3600000);
   },
   async similar(c, { sourceIds, sourceType = 'song', unplaySongIds = [] }) {
     if (!Array.isArray(sourceIds) || !sourceIds.length) fail('INVALID_REQUEST');

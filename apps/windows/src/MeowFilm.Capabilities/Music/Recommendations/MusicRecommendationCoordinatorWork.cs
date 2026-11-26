@@ -71,8 +71,7 @@ public sealed partial class MusicRecommendationCoordinator
             }
             var response = await readAsync(request, token).ConfigureAwait(false);
             Check(s, generation, epoch, token);
-            IEnumerable<string> known = initial && s.InitialAppend && s.Config.Kind == "fm" ? [] :
-                initial && !s.InitialAppend && (s.Config.Kind != "queue" || s.Config.Restore)
+            IEnumerable<string> known = initial && (s.Config.Kind != "queue" || s.Config.Restore)
                 ? before.Entries.Where(e => e.Id == seed).Select(e => NativeId(e.Song))
                 : before.Entries.Select(e => NativeId(e.Song));
             var songs = ParseSongs(response, known).ToArray();
@@ -132,9 +131,9 @@ public sealed partial class MusicRecommendationCoordinator
             }
             if (songs.Length == 0) throw new RecommendationException("EMPTY_RECOMMENDATIONS");
             var operation = new PendingOperation(
-                initial && !s.InitialAppend ? "enter" : "append", songs, request, seed,
-                initial && (seed.Length == 0 || s.InitialAppend), automatic, epoch,
-                initial && s.InitialAppend ? 0 : null, hasMore, heartbeat, offset, navigation,
+                initial ? "enter" : "append", songs, request, seed,
+                initial && seed.Length == 0, automatic, epoch,
+                null, hasMore, heartbeat, offset, navigation,
                 !initial ? modeIntent : null);
             bool committed = await CommitBatchAsync(s, operation, before, generation, epoch, token).ConfigureAwait(false);
             MusicRecommendationSelection? selection = null;
@@ -153,8 +152,6 @@ public sealed partial class MusicRecommendationCoordinator
                 {
                     s.Error = deadline.IsCancellationRequested ? "TIMEOUT" : ErrorCode(error);
                     s.Status = s.Error == "EMPTY_RECOMMENDATIONS" ? "empty" : "error";
-                    if (s.PreviousConfiguration is { } previousConfig)
-                    { s.Config = previousConfig; s.PreviousConfiguration = null; s.InitialPending = false; }
                     s.Failures++;
                     if (s.PreviousSession is { } previous)
                     {
@@ -281,7 +278,7 @@ public sealed partial class MusicRecommendationCoordinator
         }
         if (operation.Action == "enter")
             Require(actual.Version == before.Version && actual.CurrentId == before.CurrentId, "STALE_QUEUE");
-        if (operation.Action == "append" && !(s.Config.Kind == "fm" && s.InitialAppend && s.InitialPending))
+        if (operation.Action == "append")
         {
             var known = actual.Entries.Select(entry => NativeId(entry.Song)).ToHashSet(StringComparer.Ordinal);
             string? selected = operation.SelectIndex is { } index ? operation.Songs[index].NativeId : null;
@@ -449,7 +446,7 @@ public sealed partial class MusicRecommendationCoordinator
                 { Context = operation.Songs[i].Context, Metadata = operation.Songs[i].Metadata };
             }
             s.Anchor = ids[^1]; s.Queue = after; s.QueueEpoch = epoch; s.Failures = 0;
-            s.InitialPending = false; s.PreviousConfiguration = null;
+            s.InitialPending = false;
             if (s.Config.Kind == "queue")
             {
                 s.RecommendationStarted |= operation.Action == "enter" || s.Feedback.ContainsKey(after.CurrentId);

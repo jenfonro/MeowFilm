@@ -365,8 +365,8 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | | `film.data` | `{ category? }` | `film` / `film-data` | `FilmCategoryViewController` / `FilmDirectoryViewController` |
 | | `film.detail` | `{ id? }` | 当前/指定影片详情（与播放页统一或切至详情区） | `FilmDetailViewController` |
 | | `film.playback` | `{}` | `film` / `film-playback` | `FilmPlayerViewController` |
-| **小说** | `novel.home` | `{ kindUrl?, kindIndex? }` | `novel` / `novel-home` | Primary `.novel`（`NovelHomeViewController`） |
-| | `novel.categories` | `{ kindUrl?, kindIndex? }` | `novel` / `novel-categories` | 小说分类浏览页 |
+| **小说** | `novel.home` | `{ sourceId? }` | `novel` / `novel-home` | Primary `.novel`（`NovelHomeViewController`） |
+| | `novel.data` | `{ sourceId?, category?, sectionId?, sectionIndex? }` | `novel` / `novel-data` | `NovelCategoryViewController` |
 | | `novel.shelf` | — | `novel` / `novel-shelf`（独立书架视图） | 小说书架视图 |
 | | `novel.history` | — | `novel` / `novel-history`（独立阅读历史视图） | 平台可选（当前 Windows 已支持） |
 | | `novel.book` | `{ bookId? }` | `novel` / `novel-book` | `NovelDetailViewController` |

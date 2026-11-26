@@ -1,5 +1,4 @@
 using Microsoft.UI.Dispatching;
-using System.Text.Json;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 
@@ -13,6 +12,7 @@ public sealed partial class FilmCapability
         {
             ActiveData = selected;
             Changed(nameof(ActiveData));
+            Changed(nameof(BrowseActiveData));
         }
         await NavigateAsync(DataRoute, cancellationToken);
     }
@@ -33,6 +33,7 @@ public sealed partial class FilmCapability
         this.route = route;
         Changed(nameof(IsHome));
         Changed(nameof(IsData));
+        Changed(nameof(IsBrowse));
         Changed(nameof(IsPlayback));
         Changed(nameof(Heading));
         if (route == PlaybackRoute)
@@ -89,8 +90,6 @@ public sealed partial class FilmCapability
     {
         navigationGeneration++;
         RetireRequests();
-        // Ordinary covers retire presentation reads, not the active page's execution.
-        // The explicit tray policy still drains preparations without accepted output.
         if (hiddenToTray && filmPlayback is { HasOutput: false } owner)
             ObservePresentationLeave(owner.LeaveAsync(owner.CanRetainMedia));
     }
@@ -145,9 +144,9 @@ public sealed partial class FilmCapability
         if (!DesktopVisual.IsVisible(view)) return;
         if (IsPlayback) ResumePresentation();
         else if (IsHome)
-            await Task.WhenAll(Sections.Where(section => section.State is not FilmSectionState.Ready)
+            await Task.WhenAll(Sections.Where(section => section.State is not CatalogSectionState.Ready)
                 .Select(section => StartSectionLoad(section, navigationGeneration, lifetime.Token)));
-        else if (IsData && ActiveData.State is not FilmSectionState.Ready)
+        else if (IsData && ActiveData.State is not CatalogSectionState.Ready)
             await StartDataLoad(ActiveData, navigationGeneration, NextDataLimit(ActiveData), lifetime.Token);
     }
 
@@ -161,6 +160,7 @@ public sealed partial class FilmCapability
         {
             ActiveData = selected;
             Changed(nameof(ActiveData));
+            Changed(nameof(BrowseActiveData));
         }
         if (NavigationRequested is not { } requested)
             return NavigateAsync(DataRoute, lifetime.Token);
@@ -172,7 +172,7 @@ public sealed partial class FilmCapability
     {
         ArgumentNullException.ThrowIfNull(item);
         if (stopping || disposed || (!IsHome && !IsData)) return;
-        if (!await SelectPlaybackAsync(item, lifetime.Token, IsHome ? "home" : "search")) return;
+        if (!await SelectPlaybackAsync(item, lifetime.Token)) return;
         if (NavigationRequested is not { } requested)
         {
             await NavigateAsync(PlaybackRoute, lifetime.Token);
@@ -181,28 +181,31 @@ public sealed partial class FilmCapability
         requested(this, new(PlaybackRoute));
     }
 
-    public async Task ReceiveSearchPlaybackAsync(FilmCardItem item, CancellationToken token = default)
+    public Task ReceiveSearchPlaybackAsync(FilmCardItem item, CancellationToken token = default)
     {
         ArgumentNullException.ThrowIfNull(item);
+        token.ThrowIfCancellationRequested();
         if (stopping || disposed) throw new InvalidOperationException("CLOSED");
-        var request = item.PlaybackContext ?? throw new ArgumentException("Missing film business identity.", nameof(item));
+        var entry = (item.Entry ?? item.SearchContext?.Entry)?.Own()
+            ?? throw new ArgumentException("Missing film business identity.", nameof(item));
+        entry.Validate();
+        navigationGeneration++;
         var context = item.SearchContext;
-        long ticket = ++navigationGeneration;
         var page = context is null ? null : playbackPages.Values.FirstOrDefault(candidate =>
             ReferenceEquals(candidate.SearchContext, context));
-        if (context is not null) request = await context.HandoffAsync(token);
-        token.ThrowIfCancellationRequested();
-        if (ticket != navigationGeneration) throw new OperationCanceledException(token);
-        if (stopping || disposed) throw new FilmPlaybackException("CLOSED");
         if (page is null)
         {
-            page = new FilmPlaybackPage(item with { PlaybackContext = request }, request.Own(), filmPlayback, library, business);
+            page = new FilmPlaybackPage(item with { Entry = entry }, entry, filmPlayback, library, business);
             playbackPages.Add(page.NavigationIdentity, page);
         }
-        else page.UpdateItem(item with { PlaybackContext = request });
+        else
+        {
+            page.UpdateItem(item with { Entry = entry });
+        }
         Playback = page;
         ReleaseUnreachablePages();
         Changed(nameof(Playback)); Changed(nameof(HasPlayback));
+        return Task.CompletedTask;
     }
 
     public void RetainNavigationLocations(IReadOnlySet<string> locations)
@@ -225,7 +228,7 @@ public sealed partial class FilmCapability
     {
         ArgumentNullException.ThrowIfNull(item);
         if (stopping || disposed || !IsPlayback || Playback is null) return;
-        if (!await SelectPlaybackAsync(item, lifetime.Token, Playback.EntrySurface)) return;
+        if (!await SelectPlaybackAsync(item, lifetime.Token)) return;
         if (NavigationRequested is not { } requested)
         {
             await NavigateAsync(PlaybackRoute, lifetime.Token);
@@ -234,23 +237,23 @@ public sealed partial class FilmCapability
         requested(this, new(PlaybackRoute));
     }
 
-    public async Task OpenPlaybackAsync(FilmCardItem item, FilmPlaybackRequest request, CancellationToken token = default)
+    public async Task OpenPlaybackAsync(FilmCardItem item, FilmEntry entry, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
         if (stopping || disposed) return;
-        request = request with { EntrySurface = IsHome ? "home" : "search" };
-        if (!await SelectPlaybackAsync(item with { PlaybackContext = request }, token)) return;
+        if (!await SelectPlaybackAsync(item with { Entry = entry }, token)) return;
         if (NavigationRequested is { } requested) requested(this, new(PlaybackRoute));
         else await NavigateAsync(PlaybackRoute, token);
     }
 
-    private async Task<bool> SelectPlaybackAsync(FilmCardItem item, CancellationToken token, string? entrySurface = null)
+    private async Task<bool> SelectPlaybackAsync(FilmCardItem item, CancellationToken token)
     {
-        if (item.PlaybackContext is not { } request)
+        if (item.Entry is not { } entry)
             throw new FilmPlaybackException("CAPABILITY_UNAVAILABLE");
         long ticket = ++navigationGeneration;
-        request = (request with { EntrySurface = entrySurface ?? request.EntrySurface ?? "search" }).Own();
-        var selected = new FilmPlaybackPage(item with { PlaybackContext = request }, request, filmPlayback, library, business);
+        entry = entry.Own();
+        entry.Validate();
+        var selected = new FilmPlaybackPage(item with { Entry = entry }, entry, filmPlayback, library, business);
         playbackPages.Add(selected.NavigationIdentity, selected);
         Playback = selected;
         ReleaseUnreachablePages();
@@ -263,60 +266,29 @@ public sealed partial class FilmCapability
     {
         long ticket = navigationGeneration;
         if (!ReferenceEquals(Playback, page) || stopping || disposed) return;
-        var request = page.CaptureRequest;
         await filmPlayback.OpenAsync(page, new
         {
-            platform = "windows", entrySurface = request.EntrySurface, restoreOnly = restoreOnly || page.HasPlaybackSnapshot,
-            target = request.Target.Wire(), resumeTarget = request.ResumeTarget?.Wire(), sources = request.Sources,
-            query = request.Query, results = request.Results, search = request.Search, metadata = request.Metadata,
-            cacheEntries = request.CacheEntries, resultHints = request.ResultHints, searchReference = request.SearchReference,
-            browsing = request.Browsing
+            platform = "windows",
+            restoreOnly = restoreOnly || page.HasPlaybackSnapshot,
+            entry = page.Entry.Wire(),
+            searchReference = page.SearchContext?.Reference
         }, token);
         if (ticket == navigationGeneration && ReferenceEquals(Playback, page) && !stopping && !disposed)
             await page.LoadFavoriteAsync();
     }
 
-    internal static async Task<FilmPlaybackOpen> PreparePlaybackOpenAsync(FilmSourceService sources,
-        Func<CancellationToken, Task<RuntimeConnection>> capture, FilmPlaybackPage page, JsonElement parameters,
-        bool reconnect, CancellationToken token)
+    internal static async Task<RuntimeConnection> ConnectPlaybackRuntimeAsync(FilmSourceService sources,
+        Func<CancellationToken, Task<RuntimeConnection>> capture, bool reconnect, CancellationToken token)
     {
-        // Only an explicit retry may recover a failed App epoch. Ordinary capture,
-        // navigation and an event-stream reconnect never restart it.
         if (reconnect) await sources.RefreshAsync(token);
         var borrowed = await capture(token);
         borrowed.Revoked.ThrowIfCancellationRequested();
         await sources.StartAsync(token);
         var verified = await capture(token);
-        if (!FilmPlaybackOpen.SameOwner(borrowed, verified)) throw new FilmPlaybackException("STALE_SESSION");
-        return new(borrowed, FilmPlaybackOpen.ParametersFor(page, parameters, borrowed, PlaybackSources(sources)));
-    }
-
-    private IReadOnlyList<JsonElement> PlaybackSources() => PlaybackSources(sources);
-
-    private static IReadOnlyList<JsonElement> PlaybackSources(FilmSourceService sources)
-    {
-        var (cats, videos) = sources.ReadSnapshot();
-        return videos.Where(video => video.Options.Enabled)
-            .Select(video => new { Video = video, Cat = cats.FirstOrDefault(cat => cat.InstallationId == video.Key.InstallationId) })
-            .Where(row => row.Cat is { Enabled: true, State: "ready", Generation: > 0 })
-            .Select(row => FilmJson.Encode(new
-            {
-                key = JsonSerializer.Serialize(new[] { row.Video.Key.InstallationId, row.Video.Key.SiteKey }),
-                engine = "cat", installationId = row.Video.Key.InstallationId, siteId = row.Video.Key.SiteKey,
-                generation = row.Cat!.Generation, name = row.Video.Name, enabled = row.Video.Options.Enabled,
-                searchable = row.Video.Options.SearchEnabled
-            })).ToArray();
-    }
-
-    private void PlaybackSourcesChanged(object? sender, EventArgs args)
-    {
-        if (dispatcher.IsClosing) return;
-        if (dispatcher.HasThreadAccess) Apply();
-        else _ = dispatcher.EnqueueAsync(Apply);
-        void Apply()
-        {
-            if (!stopping && !disposed) filmPlayback.SourcesChanged(PlaybackSources());
-        }
+        if (verified.Revoked.IsCancellationRequested || !ReferenceEquals(borrowed.Client, verified.Client) ||
+            borrowed.Revoked != verified.Revoked)
+            throw new FilmPlaybackException("STALE_SESSION");
+        return borrowed;
     }
 
     private void PlaybackFailed(object? sender, string error) =>
@@ -325,7 +297,7 @@ public sealed partial class FilmCapability
     private void PlaybackMediaChanged(object? sender, EventArgs args)
     {
         Changed(nameof(PlaybackMedia));
-        string identity = Playback?.EntryTarget.Id ?? "";
+        string identity = Playback?.TargetId ?? "";
         if (identity != favoriteTargetId)
         {
             favoriteTargetId = identity;
@@ -358,8 +330,6 @@ public sealed partial class FilmCapability
 
     private void ObservePresentationLeave(Task operation, string failure = "停止播放失败")
     {
-        // The notification owns the business error; shutdown owns completion of
-        // that observation, not the original operation's success.
         var settled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         operations.Add(settled.Task);
         _ = SettleAsync();
