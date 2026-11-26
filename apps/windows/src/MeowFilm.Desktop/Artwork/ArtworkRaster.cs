@@ -41,8 +41,9 @@ internal static unsafe class ArtworkRaster
         CheckDimensions(size.Width, size.Height);
         try
         {
-            IntPtr native = ArtworkPixels.DecodeToNativeBgra(codec, size, width, height, out int byteCount);
-            return new ArtworkPixels(width, height, native, byteCount);
+            IntPtr native = ArtworkPixels.DecodeToNativeBgra(codec, size, width, height,
+                out int byteCount, out int thumbWidth, out int thumbHeight, out int thumbByteCount);
+            return new ArtworkPixels(width, height, native, byteCount, thumbWidth, thumbHeight, thumbByteCount);
         }
         catch (ArtworkException) { throw; }
         catch { throw new ArtworkException("ARTWORK_FORMAT"); }

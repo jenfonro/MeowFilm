@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Desktop;
 
@@ -14,6 +15,7 @@ internal sealed class NoticeEntry(object source, string message, DispatcherTimer
     public bool Persistent { get; } = persistent;
     public Visibility DismissVisibility => Persistent ? Visibility.Collapsed : Visibility.Visible;
     public bool Hovered { get; set; }
+    public bool Presented { get; set; }
     public Border? Card { get; set; }
 }
 
@@ -56,6 +58,16 @@ public sealed partial class NoticeStack : UserControl
     {
         if (sender is not Border { DataContext: NoticeEntry entry } card) return;
         entry.Card = card;
+        if (!entry.Presented)
+        {
+            entry.Presented = true;
+            if (DesktopVisual.CanAnimate(card) && card.RenderTransform is TranslateTransform transform)
+            {
+                card.Opacity = 0;
+                DesktopVisual.AnimateDouble(transform, "Y", -20, 0, TimeSpan.FromMilliseconds(220));
+                DesktopVisual.AnimateDouble(card, "Opacity", 0, 1, TimeSpan.FromMilliseconds(180), () => card.Opacity = 1);
+            }
+        }
         if (AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged) &&
             DesktopVisual.Descendant<TextBlock>(card) is { } text)
             FrameworkElementAutomationPeer.CreatePeerForElement(text)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);

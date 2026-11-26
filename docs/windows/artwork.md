@@ -2,7 +2,7 @@
 
 唯一 AppHost 创建默认 `ArtworkService`，通过 `ArtworkScope.SetLoader` 显式注入 WinUI 能力视图；音乐能力在自身作用域注入使用 `IArtworkByteCache` 的服务。WinUI 没有 WPF 的属性继承语义，`ArtworkScope` 沿当前 visual parent 查找最近的本地 owner；显式本地 `null` 阻断外层注入。owner 更新只通知其负责的后代，不越过其他显式作用域。`ArtworkService.AcquireAsync`、可释放租约和 `ArtworkImage` 不识别业务领域，不使用全局默认服务；未注入不发网。
 
-`ArtworkImage` 是普通 WinUI `Grid`，内部图片、重试按钮、剪裁与页面处于同一可视树。`Source` 为 WinUI `BitmapSource`，各取色属性为 WinUI `Brush`；`Address`、`DisplayIdentity`、`Stretch`、`ShowRetry`、`AspectRatio`、`HasTopPalette`、准备租约及完成事件保持原有职责。`IArtworkLease.Image` 返回不可变的 `ArtworkPixels`：后台 Skia 解码／缩放直接落入原生非托管内存（`NativeMemory` + `SKPixmap`，零托管 LOH `byte[]` 分配，不创建中间 `SKBitmap` 或重复复制 `SKData`），一次计算取色结果。首次呈现由该条目的 `GetSource(DispatcherQueue)` 在应用 UI 线程经 `IBufferByteAccess` 无锁直拷至共享 `WriteableBitmap` 并立即释放原生暂存缓冲；后续租约复用同一实例，不在每个控件重复解码，也没有第二个 UI 图片缓存 owner。借用的 `Source` 不得由消费者改写；XAML 图源不跨 UI 线程共享。
+`ArtworkImage` 是普通 WinUI `Grid`，内部图片、重试按钮、剪裁与页面处于同一可视树。`Source` 为 WinUI `BitmapSource`，各取色属性为 WinUI `Brush`；`Address`、`DisplayIdentity`、`Stretch`、`ShowRetry`、`AspectRatio`、`HasTopPalette`、准备租约及完成事件保持原有职责。`IArtworkLease.Image` 返回不可变的 `ArtworkPixels`：后台 Skia 解码／缩放使用 `SKMipmapMode.Linear` 预滤波直接落入原生非托管内存（`NativeMemory` + `SKPixmap`，零托管 LOH `byte[]` 分配，不创建中间 `SKBitmap` 或重复复制 `SKData`），对大于 80px 的图片一并产出小尺寸预滤波 mip 缓冲，并一次计算取色结果。首次呈现由该条目的 `GetSource(DispatcherQueue, renderedMaxPixels)` 在应用 UI 线程经 `IBufferByteAccess` 无锁直拷至共享 `WriteableBitmap`（含小尺寸预滤波 mip 图源，供底栏小黑胶等 `<= 96px` 槽位直接选用以消除 D3D11 单级纹理 >10× 下采样摩尔纹）并立即释放原生暂存缓冲；后续租约复用同一实例，不在每个控件重复解码，也没有第二个 UI 图片缓存 owner。借用的 `Source` 不得由消费者改写；XAML 图源不跨 UI 线程共享。
 
 当前消费者是目录/歌单卡片、歌曲封面及播放器背景，以及影视海报和卡片。当前歌曲只按已保存元数据平台策略选择精确录音已有的公开封面；不按标题猜另一个版本，不读取未保存草稿，不改变实际播放或歌词来源。
 

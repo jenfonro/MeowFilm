@@ -91,7 +91,7 @@
       <ContentControl x:Name="SidebarContributionHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Top" IsTabStop="False"/>
      </StackPanel>
     </ScrollViewer>
-    <Grid x:Name="HeaderChrome" Grid.Column="1" Margin="34,0,150,0" VerticalAlignment="Top" Height="64">
+    <Grid x:Name="HeaderChrome" Grid.Column="1" Margin="34,0,136,0" VerticalAlignment="Top" Height="64">
      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <local:DesktopPageHeader x:Name="PageHeaderHost" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}">
       <local:DesktopPageHeader.Navigation>
@@ -134,7 +134,7 @@
      <Border.Shadow><ThemeShadow/></Border.Shadow>
      <ContentControl x:Name="QueueHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
     </Border>
-    <StackPanel x:Name="WindowCaptionButtons" Grid.ColumnSpan="2" Canvas.ZIndex="45" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Height="64" RequestedTheme="Light">
+    <StackPanel x:Name="WindowCaptionButtons" Grid.ColumnSpan="2" Canvas.ZIndex="45" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,14,0" Spacing="4" RequestedTheme="Light">
      <Button x:Name="MinimizeCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionButton}" Content="&#xE921;" Click="OnMinimizeCaptionClick" AutomationProperties.Name="最小化"/>
      <Button x:Name="MaximizeCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionButton}" Content="&#xE922;" Click="OnMaximizeCaptionClick" AutomationProperties.Name="最大化"/>
      <Button x:Name="CloseCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionCloseButton}" Content="&#xE8BB;" Click="OnCloseCaptionClick" AutomationProperties.Name="关闭"/>
@@ -147,8 +147,9 @@
    </ContentControl>
    <local:DesktopModalHost x:Name="SystemDialogHost" Style="{StaticResource MeowFilm.DialogHost}" Canvas.ZIndex="90"/>
    <ContentControl x:Name="NotificationInteractionGate" Canvas.ZIndex="100" IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
-   <StackPanel x:Name="NotificationOverlay" HorizontalAlignment="Right" VerticalAlignment="Bottom" MaxWidth="460" Margin="24,16,24,84">
-    <Border x:Name="StatusPanel" Style="{StaticResource MeowFilm.FloatingSurface}" Translation="0,0,16" Margin="0,0,0,8" Padding="14,10" CornerRadius="10" Visibility="Collapsed">
+   <StackPanel x:Name="NotificationOverlay" HorizontalAlignment="Center" VerticalAlignment="Top" MaxWidth="460" Margin="24,16,24,16">
+    <Border x:Name="StatusPanel" Style="{StaticResource MeowFilm.FloatingSurface}" HorizontalAlignment="Center" Translation="0,0,16" Margin="0,0,0,8" Padding="14,10" CornerRadius="10" Visibility="Collapsed">
+     <Border.RenderTransform><TranslateTransform x:Name="StatusPanelTransform"/></Border.RenderTransform>
      <Border.Shadow><ThemeShadow/></Border.Shadow>
      <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <TextBlock x:Name="StatusText" Text="{x:Bind State.Status,Mode=OneWay}" TextWrapping="Wrap" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
