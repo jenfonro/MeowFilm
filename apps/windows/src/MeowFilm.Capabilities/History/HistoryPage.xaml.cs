@@ -15,7 +15,7 @@ public sealed partial class HistoryPageView : UserControl
         NovelBrowseHost.Content = new CatalogBrowseView(page.NovelController);
     }
 
-    internal void PostNotice(string message) => Notices.Post(message);
+    internal void PostNotice(string message) => MeowFilm.Desktop.NoticeOutlet.Post(this, message);
 
     private async void Tab_Click(object sender, RoutedEventArgs e)
     {

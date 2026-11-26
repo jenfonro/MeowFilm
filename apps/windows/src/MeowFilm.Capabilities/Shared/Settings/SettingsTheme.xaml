@@ -28,14 +28,15 @@
  <Style x:Key="Settings.PrimaryButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.PrimaryButton}">
   <Setter Property="MinHeight" Value="32"/><Setter Property="Height" Value="32"/><Setter Property="Padding" Value="12,5"/><Setter Property="FontSize" Value="13"/>
  </Style>
- <Style x:Key="Settings.DangerButton" TargetType="Button" BasedOn="{StaticResource Settings.Button}">
+ <Style x:Key="Settings.DangerButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}">
+  <Setter Property="MinHeight" Value="32"/><Setter Property="Height" Value="32"/><Setter Property="Padding" Value="14,5"/>
+  <Setter Property="Margin" Value="0"/><Setter Property="FontSize" Value="13"/><Setter Property="CornerRadius" Value="10"/>
   <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Error}"/>
-  <Setter Property="Background" Value="Transparent"/>
   <Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Error}"/>
-  <Setter Property="Template" Value="{StaticResource MeowFilm.ManagementDeleteButtonTemplate}"/>
+  <Setter Property="BorderThickness" Value="1"/>
  </Style>
  <Style x:Key="Settings.TextBox" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
-  <Setter Property="Height" Value="40"/><Setter Property="MinHeight" Value="0"/><Setter Property="FontSize" Value="14"/><Setter Property="Padding" Value="12,6"/>
+  <Setter Property="Height" Value="40"/>
  </Style>
  <Style x:Key="Settings.PopupSurface" TargetType="Border">
   <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Surface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/>

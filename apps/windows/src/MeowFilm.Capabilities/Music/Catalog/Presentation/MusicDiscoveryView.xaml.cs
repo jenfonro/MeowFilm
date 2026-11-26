@@ -1,3 +1,6 @@
+using System.Collections.Specialized;
+using System.ComponentModel;
+using MeowFilm.Desktop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -7,14 +10,50 @@ public partial class MusicDiscoveryView : UserControl
 {
     public MusicDiscoveryController? Discovery { get; private set; }
     public MusicSettingsController? Settings { get; private set; }
+    private MusicDiscoveryController? observed;
 
-    public MusicDiscoveryView() => InitializeComponent();
+    public MusicDiscoveryView()
+    {
+        InitializeComponent();
+        Loaded += (_, _) => Observe(Discovery);
+        Unloaded += (_, _) => { if (!IsLoaded) Observe(null); };
+    }
 
     internal void Bind(MusicDiscoveryController discovery, MusicSettingsController settings)
     {
         Discovery = discovery;
         Settings = settings;
+        if (IsLoaded) Observe(discovery);
         Bindings.Update();
+    }
+
+    private void Observe(MusicDiscoveryController? next)
+    {
+        if (ReferenceEquals(observed, next)) return;
+        if (observed is not null)
+        {
+            observed.PropertyChanged -= DiscoveryChanged;
+            observed.DiscoveryFailures.CollectionChanged -= FailuresChanged;
+        }
+        observed = next;
+        if (observed is not null)
+        {
+            observed.PropertyChanged += DiscoveryChanged;
+            observed.DiscoveryFailures.CollectionChanged += FailuresChanged;
+        }
+    }
+
+    private void DiscoveryChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (observed is not null && e.PropertyName == nameof(MusicDiscoveryController.DiscoveryStatus))
+            NoticeOutlet.Post(this, observed.DiscoveryStatus, observed);
+    }
+
+    private void FailuresChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.NewItems is null) return;
+        foreach (MusicDiscoveryFailure failure in e.NewItems)
+            NoticeOutlet.Post(this, failure.Text, failure);
     }
 
     private async void RunUiAction(Func<Task> action)

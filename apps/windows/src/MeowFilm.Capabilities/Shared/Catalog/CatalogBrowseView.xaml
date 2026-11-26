@@ -5,6 +5,24 @@
     <ResourceDictionary x:Key="Default">
      <SolidColorBrush x:Key="Catalog.FilterBorder" Color="Transparent" />
      <Thickness x:Key="Catalog.FilterBorderThickness">0</Thickness>
+     <StaticResource x:Key="ToggleButtonBackgroundPointerOver" ResourceKey="MeowFilm.Brush.Hover" />
+     <StaticResource x:Key="ToggleButtonBackgroundPressed" ResourceKey="MeowFilm.Brush.Pressed" />
+     <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="MeowFilm.Brush.Muted" />
+     <StaticResource x:Key="ToggleButtonForegroundPressed" ResourceKey="MeowFilm.Brush.Muted" />
+     <SolidColorBrush x:Key="ToggleButtonBorderBrushPointerOver" Color="Transparent" />
+     <SolidColorBrush x:Key="ToggleButtonBorderBrushPressed" Color="Transparent" />
+     <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="MeowFilm.Brush.AccentSoft" />
+     <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="MeowFilm.Brush.AccentSoft" />
+     <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="MeowFilm.Brush.AccentSoft" />
+     <StaticResource x:Key="ToggleButtonBackgroundCheckedDisabled" ResourceKey="MeowFilm.Brush.AccentSoft" />
+     <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="MeowFilm.Brush.AccentText" />
+     <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="MeowFilm.Brush.AccentText" />
+     <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="MeowFilm.Brush.AccentText" />
+     <StaticResource x:Key="ToggleButtonForegroundCheckedDisabled" ResourceKey="MeowFilm.Brush.AccentText" />
+     <SolidColorBrush x:Key="ToggleButtonBorderBrushChecked" Color="Transparent" />
+     <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPointerOver" Color="Transparent" />
+     <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPressed" Color="Transparent" />
+     <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedDisabled" Color="Transparent" />
     </ResourceDictionary>
     <ResourceDictionary x:Key="HighContrast">
      <SolidColorBrush x:Key="Catalog.FilterBorder" Color="{ThemeResource SystemColorWindowTextColor}" />
@@ -41,42 +59,7 @@
     <Setter Property="BorderBrush" Value="{ThemeResource Catalog.FilterBorder}" />
     <Setter Property="BorderThickness" Value="{ThemeResource Catalog.FilterBorderThickness}" />
    </Style>
-   <Style x:Key="Catalog.FilterChip" TargetType="ToggleButton" BasedOn="{StaticResource MeowFilm.FilterChip}">
-    <Setter Property="Template">
-     <Setter.Value>
-      <ControlTemplate TargetType="ToggleButton">
-       <Grid>
-        <VisualStateManager.VisualStateGroups>
-         <VisualStateGroup x:Name="CommonStates">
-          <VisualState x:Name="Normal" />
-          <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="CatalogFilterContent.Background" Value="{ThemeResource MeowFilm.Brush.Hover}" /></VisualState.Setters></VisualState>
-          <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="CatalogFilterContent.Background" Value="{ThemeResource MeowFilm.Brush.Pressed}" /></VisualState.Setters></VisualState>
-          <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="CatalogFilterContent.Opacity" Value="0.6" /></VisualState.Setters></VisualState>
-          <VisualState x:Name="Checked"><VisualState.Setters>
-           <Setter Target="CatalogFilterContent.Background" Value="{ThemeResource MeowFilm.Brush.AccentSoft}" />
-           <Setter Target="CatalogFilterContent.Foreground" Value="{ThemeResource MeowFilm.Brush.AccentText}" />
-          </VisualState.Setters></VisualState>
-          <VisualState x:Name="CheckedPointerOver"><VisualState.Setters>
-           <Setter Target="CatalogFilterContent.Background" Value="{ThemeResource MeowFilm.Brush.AccentSoft}" />
-           <Setter Target="CatalogFilterContent.Foreground" Value="{ThemeResource MeowFilm.Brush.AccentText}" />
-          </VisualState.Setters></VisualState>
-          <VisualState x:Name="CheckedPressed"><VisualState.Setters>
-           <Setter Target="CatalogFilterContent.Background" Value="{ThemeResource MeowFilm.Brush.AccentSoft}" />
-           <Setter Target="CatalogFilterContent.Foreground" Value="{ThemeResource MeowFilm.Brush.AccentText}" />
-          </VisualState.Setters></VisualState>
-          <VisualState x:Name="CheckedDisabled"><VisualState.Setters>
-           <Setter Target="CatalogFilterContent.Background" Value="{ThemeResource MeowFilm.Brush.AccentSoft}" />
-           <Setter Target="CatalogFilterContent.Foreground" Value="{ThemeResource MeowFilm.Brush.AccentText}" />
-           <Setter Target="CatalogFilterContent.Opacity" Value="0.6" />
-          </VisualState.Setters></VisualState>
-         </VisualStateGroup>
-        </VisualStateManager.VisualStateGroups>
-        <ContentPresenter x:Name="CatalogFilterContent" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" Padding="{TemplateBinding Padding}" CornerRadius="{TemplateBinding CornerRadius}" Background="{TemplateBinding Background}" Foreground="{TemplateBinding Foreground}" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" />
-       </Grid>
-      </ControlTemplate>
-     </Setter.Value>
-    </Setter>
-   </Style>
+   <Style x:Key="Catalog.FilterChip" TargetType="ToggleButton" BasedOn="{StaticResource MeowFilm.FilterChip}" />
    <local:CatalogActionNameConverter x:Key="Catalog.ActionName" />
   </ResourceDictionary>
  </UserControl.Resources>

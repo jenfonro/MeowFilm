@@ -100,7 +100,7 @@ public sealed class MusicAccountDetailsViewModel(MusicAccountOwner source) : INo
         var selected = account; var ticket = ++epoch; var previous = requests;
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(visible.Token);
         Cancel(expiration); Cancel(request); request = cancellation;
-        busy = true; status = refresh ? "正在刷新" : "正在读取"; Notify();
+        busy = true; status = ""; Notify();
         return requests = Run();
 
         async Task Run()
@@ -124,14 +124,14 @@ public sealed class MusicAccountDetailsViewModel(MusicAccountOwner source) : INo
                     throw new MusicOperationException("STALE_SESSION");
                 snapshot = result;
                 status = result.ErrorCode is { Length: > 0 } code ? Error(code) :
-                    result.VerificationDeferred ? "等待平台验证" : "";
+                    refresh && result.VerificationDeferred ? "等待平台验证" : "";
                 foreach (var observer in Observed?.GetInvocationList() ?? [])
                 {
                     try { ((Action<MusicAccountDetails>)observer)(result); }
                     catch { /* A display observer cannot alter the authoritative read/CAS outcome. */ }
                 }
             }
-            catch (OperationCanceledException) { if (Current()) status = "已取消"; }
+            catch (OperationCanceledException) { if (refresh && Current()) status = "已取消"; }
             catch (Exception error)
             {
                 if (!Current()) return;

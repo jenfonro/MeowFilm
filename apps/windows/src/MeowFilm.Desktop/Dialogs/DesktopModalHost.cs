@@ -27,6 +27,7 @@ public sealed class DesktopModalHost : Grid
         public UIElement? PriorFocus;
         public IDisposable? VisibilityObserver;
         public bool DismissOnOutside;
+        public bool ShowScrim;
         public bool PropagatedDataContext;
         public object? OriginalMaxWidth;
         public object? OriginalMaxHeight;
@@ -85,7 +86,8 @@ public sealed class DesktopModalHost : Grid
         bool dismissOnOutside = true,
         Action? onCloseRequested = null,
         Func<bool>? canRestoreFocus = null,
-        bool stack = false)
+        bool stack = false,
+        bool showScrim = true)
     {
         if (!stack) CloseAll();
         else if (active is { } previous)
@@ -108,6 +110,7 @@ public sealed class DesktopModalHost : Grid
             CanRestoreFocus = canRestoreFocus,
             PriorFocus = DesktopVisual.Focused(owner) as UIElement,
             DismissOnOutside = dismissOnOutside,
+            ShowScrim = showScrim,
             PropagatedDataContext = propagated,
             OriginalMaxWidth = content.ReadLocalValue(MaxWidthProperty),
             OriginalMaxHeight = content.ReadLocalValue(MaxHeightProperty)
@@ -116,6 +119,7 @@ public sealed class DesktopModalHost : Grid
         content.HorizontalAlignment = HorizontalAlignment.Center;
         content.VerticalAlignment = VerticalAlignment.Center;
         Children.Add(content);
+        SyncBackdrop();
         Visibility = Visibility.Visible;
         ConstrainPanel();
         var observation = DesktopVisual.ObserveVisibility(owner, visible =>
@@ -281,6 +285,12 @@ public sealed class DesktopModalHost : Grid
 
     private void CancelPress() => dismissPointer = null;
 
+    private void SyncBackdrop()
+    {
+        if (modals.Any(item => item.ShowScrim)) ClearValue(BackgroundProperty);
+        else Background = DesktopVisual.TransparentBrush;
+    }
+
     public void RequestClose()
     {
         if (active is null) return;
@@ -345,9 +355,11 @@ public sealed class DesktopModalHost : Grid
             var top = modals[^1];
             top.Content.IsHitTestVisible = true;
             top.Content.Opacity = 1;
+            SyncBackdrop();
         }
         else
         {
+            ClearValue(BackgroundProperty);
             Visibility = Visibility.Collapsed;
         }
         if (restoreFocus &&

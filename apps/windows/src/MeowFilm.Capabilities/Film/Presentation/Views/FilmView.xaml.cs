@@ -37,7 +37,7 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
         };
     }
 
-    private void OnModuleOperationFailed(object? sender, string message) => Notices.Message = message;
+    private void OnModuleOperationFailed(object? sender, string message) => NoticeOutlet.Post(this, message);
     private void UpdatePresentation()
     {
         if (!DesktopVisual.IsVisible(this)) module.SuspendPresentation(
@@ -62,6 +62,6 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
         try { await module.OpenRecommendationAsync(e.Item); }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
-        catch (Exception error) { Notices.Message = module.OperationErrorText(error); }
+        catch (Exception error) { NoticeOutlet.Post(this, module.OperationErrorText(error)); }
     }
 }

@@ -109,7 +109,6 @@
    <Grid x:Name="LyricViewport" Grid.Row="2" Margin="-76,0,0,0">
     <Grid x:Name="LyricFadeViewport">
    <local:MusicLyricList x:Name="LyricList" Background="Transparent" BorderThickness="0" Padding="0" Position="{x:Bind Lyrics.LyricPositionSeconds,Mode=OneWay}" IsPlaying="{x:Bind Playback.IsPlaying,Mode=OneWay}" PlaybackRate="{x:Bind Playback.AcceptedPlaybackRate,Mode=OneWay}" PresentationKey="{x:Bind Playback.PlaybackPresentationKey,Mode=OneWay}" ItemsSource="{x:Bind Lyrics.Lyrics}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Hidden" AutomationProperties.Name="歌词">
-     <ListView.Header><Border x:Name="LyricLeadingSpace" Height="0"/></ListView.Header><ListView.Footer><Border x:Name="LyricTrailingSpace" Height="0"/></ListView.Footer>
      <ListView.ItemContainerStyle><Style TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.ContentListItem}"><Setter Property="IsHitTestVisible" Value="False"/></Style></ListView.ItemContainerStyle>
      <ListView.ItemTemplate><DataTemplate x:DataType="local:MusicLyricRow"><local:MusicLyricRowView/></DataTemplate></ListView.ItemTemplate>
     </local:MusicLyricList>

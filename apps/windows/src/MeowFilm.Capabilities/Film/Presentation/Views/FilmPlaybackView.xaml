@@ -217,7 +217,21 @@
             <TextBlock Text="播放" FontSize="{StaticResource MeowFilm.Font.Size.Body}" VerticalAlignment="Center" Foreground="{ThemeResource MeowFilm.Brush.OnAccent}" />
            </StackPanel>
           </Button>
-          <CheckBox x:Name="ShortVideoButton" Content="短视频" Style="{StaticResource Film.ShortVideo}" MinWidth="0" IsChecked="{x:Bind Page.ShortVideo, Mode=OneWay, FallbackValue=False}" Click="ShortVideo_Click" Margin="0,0,12,0" VerticalAlignment="Center" AutomationProperties.Name="短视频模式" />
+          <ToggleButton x:Name="ShortVideoButton" Content="短视频" Style="{StaticResource Film.ShortVideo}" MinWidth="0" IsChecked="{x:Bind Page.ShortVideo, Mode=OneWay, FallbackValue=False}" Click="ShortVideo_Click" Margin="0,0,12,0" VerticalAlignment="Center" AutomationProperties.Name="短视频模式">
+           <ToggleButton.Resources><ResourceDictionary><ResourceDictionary.ThemeDictionaries><ResourceDictionary x:Key="Default">
+            <StaticResource x:Key="ToggleButtonBackgroundPointerOver" ResourceKey="MeowFilm.Brush.Pressed" />
+            <StaticResource x:Key="ToggleButtonBackgroundPressed" ResourceKey="MeowFilm.Brush.Pressed" />
+            <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="MeowFilm.Brush.Hover" />
+            <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="MeowFilm.Brush.Pressed" />
+            <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="MeowFilm.Brush.Pressed" />
+            <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="MeowFilm.Brush.Accent" />
+            <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="MeowFilm.Brush.Accent" />
+            <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="MeowFilm.Brush.Accent" />
+            <StaticResource x:Key="ToggleButtonBorderBrushChecked" ResourceKey="MeowFilm.Brush.Accent" />
+            <StaticResource x:Key="ToggleButtonBorderBrushCheckedPointerOver" ResourceKey="MeowFilm.Brush.Accent" />
+            <StaticResource x:Key="ToggleButtonBorderBrushCheckedPressed" ResourceKey="MeowFilm.Brush.Accent" />
+           </ResourceDictionary></ResourceDictionary.ThemeDictionaries></ResourceDictionary></ToggleButton.Resources>
+          </ToggleButton>
           <desktop:FavoriteButton x:Name="FavoriteButton" IsFavorited="{x:Bind Page.IsFavorite, Mode=OneWay, FallbackValue=False}" IsEnabled="{x:Bind Page.CanFavorite, Mode=OneWay, FallbackValue=False}" Width="44" Height="44" CornerRadius="22" IconSize="20" VerticalAlignment="Center" Click="Favorite_Changed" />
          </desktop:WrapPanel>
          <Grid MinHeight="32">
@@ -372,7 +386,5 @@
     </ScrollViewer>
    </StackPanel>
   </ScrollViewer>
-  <desktop:NoticeOutlet Message="{x:Bind Page.ReportErrorMessage, Mode=OneWay}" />
-  <desktop:NoticeOutlet x:Name="Notices" />
  </Grid>
 </UserControl>

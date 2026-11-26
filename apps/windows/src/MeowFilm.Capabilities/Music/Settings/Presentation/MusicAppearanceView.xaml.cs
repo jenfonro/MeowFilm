@@ -18,16 +18,25 @@ public partial class MusicAppearanceView : UserControl
             .Select(option => new ColorPreset(option.Key, option.Name, option.Color)).ToArray();
         Loaded += (_, _) =>
         {
+            Settings.PropertyChanged -= SettingsChanged;
+            Settings.PropertyChanged += SettingsChanged;
             visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible => _ = UpdateActivation());
         };
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
+            Settings.PropertyChanged -= SettingsChanged;
             visibility?.Dispose();
             visibility = null;
             _ = UpdateActivation();
         };
+    }
+
+    private void SettingsChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MusicSettingsController.AppearanceStatus))
+            NoticeOutlet.Post(this, Settings.AppearanceStatus, (Settings, "appearance"));
     }
 
     private async Task UpdateActivation()

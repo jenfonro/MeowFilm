@@ -61,7 +61,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     public event PropertyChangedEventHandler? PropertyChanged;
     private bool Active => initialized && IsLoaded && DesktopVisual.IsVisible(this);
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
-    private void Notify(string message) => Notices.Message = message;
+    private void Notify(string message) => NoticeOutlet.Post(this, message);
 
     private async Task ActivateCurrentGuardedAsync()
     {
@@ -291,8 +291,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     {
         if (!initialized) return;
         ContentFrame.Margin = e.NewSize.Width < 700 || e.NewSize.Height < 450
-            ? new(16, 0, 16, 8) : new(32, 0, 32, 12);
-        if (compactSources != (e.NewSize.Width < 850)) UpdateSourceColumns(e.NewSize.Width < 850);
+            ? new(16, 0, 0, 0) : new(32, 0, 0, 0);
         if (popupOpen) UpdatePopupSize();
     }
 

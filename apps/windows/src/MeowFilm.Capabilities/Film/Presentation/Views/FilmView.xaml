@@ -1,6 +1,5 @@
 <UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:desktop="using:MeowFilm.Desktop" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmView" Background="Transparent" UseLayoutRounding="True" x:Name="FilmRoot">
  <Grid Background="Transparent">
-  <desktop:NoticeOutlet x:Name="Notices" />
   <ContentControl x:Name="BrowseHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" Visibility="{x:Bind Module.IsBrowse, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" />
   <Grid x:Name="PlaybackPage" Background="Transparent" Visibility="{x:Bind Module.IsPlayback, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
    <local:FilmPlaybackView x:Name="PlaybackView" DataContext="{x:Bind Module.Playback, Mode=OneWay}" Visibility="{x:Bind Module.HasPlayback, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" RecommendationRequested="Playback_RecommendationRequested" />

@@ -41,8 +41,10 @@ public partial class MusicQueueView : UserControl
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
                 themeObserver?.Dispose(); themeObserver = null;
+                Queue.PropertyChanged -= QueueChanged;
                 if (queueScroll is not null) queueScroll.ViewChanged -= QueueList_ViewChanged;
                 if (!visible) { scrollIntent.Clear(); return; }
+                Queue.PropertyChanged += QueueChanged;
                 queueScroll ??= DesktopVisual.Descendant<ScrollViewer>(QueueList);
                 if (queueScroll is not null) { queueScroll.ViewChanged += QueueList_ViewChanged; scrollIntent.Attach(queueScroll); }
                 themeObserver = DesktopTheme.Observe(this, RefreshRows);
@@ -51,12 +53,19 @@ public partial class MusicQueueView : UserControl
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
+            Queue.PropertyChanged -= QueueChanged;
             visibility?.Dispose(); visibility = null;
             themeObserver?.Dispose(); themeObserver = null;
             scrollIntent.Clear();
             if (queueScroll is not null) queueScroll.ViewChanged -= QueueList_ViewChanged;
             queueScroll = null;
         };
+    }
+
+    private void QueueChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MusicQueueController.QueueSurfaceStatus))
+            NoticeOutlet.Post(this, Queue.QueueSurfaceStatus, Queue);
     }
 
     private void RefreshRows()

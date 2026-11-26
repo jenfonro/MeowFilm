@@ -105,6 +105,8 @@ public partial class PanAccountsView : UserControl
     private void OwnerChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (!ReferenceEquals(sender, observed)) return;
+        if (e.PropertyName == nameof(PanAccounts.Notice) && observed is { } accounts)
+            NoticeOutlet.Post(this, accounts.Notice, accounts);
         if (logout is { } confirmation &&
             (!confirmation.Row.CanLogout || confirmation.Row.Revision != confirmation.Revision))
             RetireLogoutDialog();
@@ -149,9 +151,24 @@ public partial class PanAccountsView : UserControl
         if (sender is not Control { Tag: PanCredentialField field } control) return;
         bool activeControl = field.IsSecret ? control is PasswordBox : control is TextBox;
         if (!activeControl) return;
+        if (control is PasswordBox secret) SyncSecretReveal(secret, reveal: false);
         if (!mountedInputs.Contains(control)) mountedInputs.Add(control);
         control.Unloaded -= CredentialInput_Unloaded;
         control.Unloaded += CredentialInput_Unloaded;
+    }
+    private void RevealSecret_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Parent: Grid grid } && grid.Children.OfType<PasswordBox>().FirstOrDefault() is { } secret)
+            SyncSecretReveal(secret, secret.PasswordRevealMode != PasswordRevealMode.Visible);
+    }
+    private static void SyncSecretReveal(PasswordBox secret, bool reveal)
+    {
+        secret.PasswordRevealMode = reveal ? PasswordRevealMode.Visible : PasswordRevealMode.Hidden;
+        if (secret.Parent is Grid grid && grid.Children.OfType<Button>().FirstOrDefault() is { } toggle)
+        {
+            toggle.Content = reveal ? "\uE7B3" : "\uED1A";
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(toggle, reveal ? "隐藏密码" : "显示密码");
+        }
     }
     private void CredentialInput_Unloaded(object sender, RoutedEventArgs e)
     {

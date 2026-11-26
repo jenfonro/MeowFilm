@@ -17,16 +17,25 @@ public partial class MusicHomeSourceSettingsView : UserControl
         InitializeComponent();
         Loaded += (_, _) =>
         {
+            Settings.PropertyChanged -= SettingsChanged;
+            Settings.PropertyChanged += SettingsChanged;
             visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible => _ = UpdateActivation());
         };
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
+            Settings.PropertyChanged -= SettingsChanged;
             visibility?.Dispose();
             visibility = null;
             _ = UpdateActivation();
         };
+    }
+
+    private void SettingsChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MusicSettingsController.CatalogSourceStatus))
+            NoticeOutlet.Post(this, Settings.CatalogSourceStatus, (Settings, "catalog-source"));
     }
 
     private async Task UpdateActivation()

@@ -12,7 +12,7 @@
    </Grid.RowDefinitions>
    <TextBlock x:Name="HeadingText" Style="{StaticResource MeowFilm.SectionHeading}" FontSize="18" Margin="0"
               TextWrapping="Wrap" Visibility="Collapsed"/>
-   <ScrollViewer x:Name="BodyScroller" Grid.Row="1" Style="{StaticResource MeowFilm.SettingsScrollViewer}" Visibility="Collapsed"/>
+   <ScrollViewer x:Name="BodyScroller" Grid.Row="1" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Visibility="Collapsed"/>
    <StackPanel x:Name="ActionsRow" Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
     <Button x:Name="CloseButton" Style="{StaticResource MeowFilm.GhostButton}" MinWidth="72" Visibility="Collapsed" Click="OnCloseClick"/>
     <Button x:Name="SecondaryButton" Style="{StaticResource MeowFilm.Button}" MinWidth="72" Visibility="Collapsed" Click="OnSecondaryClick"/>

@@ -201,6 +201,8 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
 
     private void LibraryChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(MusicLibraryController.Status))
+            NoticeOutlet.Post(this, Library.Status, Library);
         if (e.PropertyName is nameof(MusicLibraryController.IsLocalLibraryPage) or nameof(MusicLibraryController.IsArchives) or
             nameof(MusicLibraryController.IsSongList))
             content.Show(CurrentContentPage);
@@ -243,6 +245,8 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
 
     private void SearchChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(MusicSearchController.SearchStatus))
+            NoticeOutlet.Post(this, Search.SearchStatus, Search);
         if (e.PropertyName is nameof(MusicSearchController.IsSearchPage) or nameof(MusicSearchController.IsSearchSongs) or
             nameof(MusicSearchController.SearchTab))
         {

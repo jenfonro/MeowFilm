@@ -86,7 +86,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     };
 
     public event EventHandler? HeaderChanged;
-    internal void PostNotice(string text) => NoticeHost.Post(text);
+    internal void PostNotice(string text) => NoticeOutlet.Post(this, text);
 
     private string CurrentDataScrollKey =>
         module.ExploreSource is { } src && module.DataSections.Contains(module.ActiveNovelData)

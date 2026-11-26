@@ -45,7 +45,7 @@
  </UserControl.Resources>
  <Grid x:Name="Root">
   <StackPanel>
-   <ScrollViewer x:Name="AccountTableScroll" Style="{StaticResource MeowFilm.SettingsScrollViewer}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+   <ScrollViewer x:Name="AccountTableScroll" Style="{StaticResource MeowFilm.OverlayScrollViewer}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
                  IsTabStop="False" SizeChanged="AccountTableScroll_SizeChanged"
                  AutomationProperties.Name="平台账号表">
     <Grid x:Name="AccountTable" MinWidth="640">
@@ -125,7 +125,6 @@
                    AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=登录}"/>
            <TextBlock Style="{StaticResource Account.Dash}" Visibility="{x:Bind Source.ShowActionDash,Mode=OneWay,Converter={StaticResource MeowFilm.Visible},FallbackValue=Visible}"/>
           </Grid>
-          <desktop:NoticeOutlet Message="{x:Bind Source.DetailsStatus,Mode=OneWay,FallbackValue=''}"/>
          </Grid>
         </Border>
        </DataTemplate></ItemsControl.ItemTemplate>
@@ -142,9 +141,6 @@
            Visibility="{x:Bind Accounts.LibrarySync.NeedsAccountRebind,Mode=OneWay,Converter={StaticResource MeowFilm.Visible},FallbackValue=Collapsed}"
            IsEnabled="{x:Bind Accounts.LibrarySync.CanEdit,Mode=OneWay,FallbackValue=False}"
            AutomationProperties.Name="重置同步账号"/>
-   <desktop:NoticeOutlet Message="{x:Bind Accounts.AccountNotice,Mode=OneWay,TargetNullValue=''}"/>
-   <desktop:NoticeOutlet Message="{x:Bind Settings.FeedbackStatus,Mode=OneWay,TargetNullValue=''}"/>
-   <desktop:NoticeOutlet Message="{x:Bind Accounts.LibrarySync.Status,Mode=OneWay,TargetNullValue=''}"/>
   </StackPanel>
 
   <Grid x:Name="ModalStash" Visibility="Collapsed">

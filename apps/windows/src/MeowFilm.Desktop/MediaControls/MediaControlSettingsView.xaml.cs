@@ -79,6 +79,8 @@ public partial class MediaControlSettingsView : UserControl
         if (!settings.IsAvailable || !settings.IsRecording) EndRecording();
         if (e.PropertyName == nameof(IDesktopMediaControlSettings.Preferences))
             foreach (var row in rows) row.SetDraftErrors("", "");
+        if (e.PropertyName == nameof(IDesktopMediaControlSettings.Status))
+            NoticeOutlet.Post(this, settings.Status, settings);
         QueueRefresh();
     }
     private void QueueRefresh()
@@ -126,7 +128,6 @@ public partial class MediaControlSettingsView : UserControl
         // A previous session may have lost its KeyUp outside this window.
         consumedKeys.Clear();
         row.SetDraftErrors("", "");
-        EditorNotice.Message = "";
         recordingRow = row; recordingGlobal = column == "global"; recordingButton = button;
         button.Focus(FocusState.Programmatic);
         settings.SetRecording(true);
@@ -197,7 +198,6 @@ public partial class MediaControlSettingsView : UserControl
     private async Task SaveGesture(MediaShortcutRow row, bool global, MediaShortcutGesture? gesture)
     {
         row.SetDraftErrors("", "");
-        EditorNotice.Message = "";
         var draft = settings.Preferences with
         {
             Bindings = settings.Preferences.Bindings.Select(binding => binding.Action != row.Action ? binding :
@@ -206,7 +206,7 @@ public partial class MediaControlSettingsView : UserControl
         if (MediaShortcutGestures.ValidationError(draft) is { } error)
         {
             row.SetDraftErrors(global ? "" : error, global ? error : "");
-            EditorNotice.Message = error;
+            NoticeOutlet.Post(this, error);
             Refresh();
             return;
         }
@@ -224,11 +224,11 @@ public partial class MediaControlSettingsView : UserControl
         }
         catch (ArgumentException)
         {
-            if (subscribed) EditorNotice.Message = "快捷键设置无效";
+            if (subscribed) NoticeOutlet.Post(this, "快捷键设置无效");
         }
         catch
         {
-            if (subscribed) EditorNotice.Message = failureMessage;
+            if (subscribed) NoticeOutlet.Post(this, failureMessage);
         }
         if (subscribed) Refresh();
     }

@@ -417,7 +417,7 @@ public partial class MusicPlayerView : UserControl
         fmGeneration++;
         FmPanel.Populate(Queue.PlaybackFmModes, catalog.CatalogFmScenes);
         fmHost = host;
-        host.Show(this, FmPanel, CloseFm);
+        host.Show(this, FmPanel, CloseFm, showScrim: false);
     }
 
     private void CloseFm()

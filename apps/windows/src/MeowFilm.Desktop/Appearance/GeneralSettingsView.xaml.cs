@@ -11,7 +11,6 @@ public partial class GeneralSettingsView : UserControl
     private readonly IDesktopAppearance appearance;
     private readonly IDesktopClosePreferences? closePreferences;
     private readonly Action? resetUserData;
-    private readonly NoticeOutlet fallbackNotice = new();
     private string currentArea = "appearance";
     internal string CurrentArea => currentArea;
     public GeneralSettingsView(IDesktopAppearance appearance, IEnumerable<IDesktopGeneralSettingsSource> sources,
@@ -25,6 +24,15 @@ public partial class GeneralSettingsView : UserControl
         UserDataSection.Visibility = resetUserData is null ? Visibility.Collapsed : Visibility.Visible;
         ThemeSelection.Presets = [new(AppearanceColors.DefaultColor, "浅蓝", AppearanceColors.DefaultColor)];
         WindowBehaviorPage.DataContext = closePreferences;
+        Loaded += (_, _) =>
+        {
+            appearance.PropertyChanged -= AppearanceChanged;
+            appearance.PropertyChanged += AppearanceChanged;
+        };
+        Unloaded += (_, _) =>
+        {
+            if (!IsLoaded) appearance.PropertyChanged -= AppearanceChanged;
+        };
         if (closePreferences is not null)
         {
             Unloaded += (_, _) =>
@@ -54,10 +62,18 @@ public partial class GeneralSettingsView : UserControl
             if (source.CacheSettingsView is { } cacheView) CacheContributions.Children.Add(cacheView);
         }
     }
+    private void AppearanceChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+    {
+        if (args.PropertyName == nameof(IDesktopAppearance.Status))
+            NoticeOutlet.Post(this, appearance.Status, appearance);
+    }
     private void ClosePreferenceChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
     {
-        if (closePreferences is not null && args.PropertyName is null or "" or nameof(IDesktopClosePreferences.Behavior))
+        if (closePreferences is null) return;
+        if (args.PropertyName is null or "" or nameof(IDesktopClosePreferences.Behavior))
             RestoreCloseBehavior();
+        if (args.PropertyName == nameof(IDesktopClosePreferences.Status))
+            NoticeOutlet.Post(this, closePreferences.Status, closePreferences);
     }
     private void RestoreCloseBehavior() => CloseBehaviorSelection.SelectedItem = CloseBehaviorSelection.Items
         .OfType<ComboBoxItem>().Single(item => Equals(item.Tag, closePreferences!.Behavior.ToString()));
@@ -206,7 +222,7 @@ public partial class GeneralSettingsView : UserControl
         catch (OperationCanceledException) { }
         catch
         {
-            if (IsLoaded) NoticeOutlet.Publish(this, new DesktopNoticeEventArgs(fallbackNotice, "设置操作失败，请重试", transient: true));
+            if (IsLoaded) NoticeOutlet.Post(this, "设置操作失败，请重试");
         }
     }
 }

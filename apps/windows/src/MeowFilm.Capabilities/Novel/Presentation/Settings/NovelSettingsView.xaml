@@ -5,7 +5,7 @@
  <Grid>
   <Grid Style="{StaticResource MeowFilm.SettingsPage}">
    <Grid.RowDefinitions>
-    <RowDefinition Height="36"/>
+    <RowDefinition Height="Auto"/>
     <RowDefinition Height="*"/>
    </Grid.RowDefinitions>
    <Border Style="{StaticResource MeowFilm.SettingsNavigationBar}">
@@ -27,11 +27,10 @@
              AutomationProperties.Name="阅读排版" Click="Appearance_Click"/>
     </Grid>
    </Border>
-   <Grid Grid.Row="1" Margin="0,8,12,0">
+   <Grid Grid.Row="1" Style="{StaticResource MeowFilm.SettingsBody}">
     <desktop:ManagementList x:Name="SourceList" AutomationProperties.Name="书源列表"/>
     <desktop:ManagementList x:Name="RuleList" Visibility="Collapsed" AutomationProperties.Name="替换规则列表"/>
    </Grid>
   </Grid>
-  <desktop:NoticeOutlet x:Name="NoticeHost"/>
  </Grid>
 </UserControl>

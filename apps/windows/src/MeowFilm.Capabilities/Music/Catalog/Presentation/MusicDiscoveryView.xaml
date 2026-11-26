@@ -4,7 +4,6 @@
  <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
   <StackPanel>
    <StackPanel Orientation="Horizontal"><Button Content="换一组" Click="Rotate_Click" IsEnabled="{x:Bind Discovery.CanRotateDiscovery,Mode=OneWay,FallbackValue=False}"/><Button Content="取消" Click="Cancel_Click" IsEnabled="{x:Bind Discovery.CanCancelDiscovery,Mode=OneWay,FallbackValue=False}"/></StackPanel>
-   <desktop:NoticeOutlet Message="{x:Bind Discovery.DiscoveryStatus,Mode=OneWay,TargetNullValue=''}"/><ItemsControl ItemsSource="{x:Bind Discovery.DiscoveryFailures,Mode=OneWay}"><ItemsControl.ItemTemplate><DataTemplate x:DataType="local:MusicDiscoveryFailure"><desktop:NoticeOutlet Message="{x:Bind Text}"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
   </StackPanel>
   <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel>
    <TextBlock Text="推荐搜索" Style="{StaticResource MeowFilm.SectionHeading}" Margin="0,12"/>

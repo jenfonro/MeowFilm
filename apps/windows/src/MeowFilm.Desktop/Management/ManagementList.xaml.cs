@@ -9,7 +9,8 @@ namespace MeowFilm.Desktop;
 public sealed record ManagementRow(string Id, string Title, string Detail, bool Enabled,
     Action? Edit = null, Action<bool>? Toggle = null, MenuFlyout? Menu = null, bool Failed = false,
     Func<IReadOnlyList<FrameworkElement>>? Cells = null, object? CellsIdentity = null);
-public sealed record ManagementColumn(string Header, GridLength Width, double MaxWidth = double.PositiveInfinity);
+public sealed record ManagementColumn(string Header, GridLength Width, double MinWidth = 0,
+    double MaxWidth = double.PositiveInfinity, HorizontalAlignment Alignment = HorizontalAlignment.Center);
 
 /// <summary>Virtualized settings rows; native ListView owns drag, auto-scroll and keyboard reordering.</summary>
 public sealed partial class ManagementList : UserControl
@@ -21,6 +22,7 @@ public sealed partial class ManagementList : UserControl
     public event Action? SelectionChanged;
     public event Action? Delete;
     public event Action<IReadOnlyList<string>>? OrderChanged;
+    internal event Action? ColumnsChanged;
 
     private bool enableRowDrag;
     public bool EnableRowDrag { get => enableRowDrag; set { enableRowDrag = value; UpdateDragAdmission(); } }
@@ -31,16 +33,13 @@ public sealed partial class ManagementList : UserControl
         set { FloatingBar.Visibility = value ? Visibility.Visible : Visibility.Collapsed; Card.Padding = new(8, 8, 8, value ? 76 : 8); Count(); }
     }
 
-    private IReadOnlyList<ManagementColumn> columns = [new("名称", new(1, GridUnitType.Star)), new("启用", GridLength.Auto), new("", GridLength.Auto), new("", GridLength.Auto)];
+    private IReadOnlyList<ManagementColumn> columns = [new("名称", new(1, GridUnitType.Star), Alignment: HorizontalAlignment.Left), new("启用", GridLength.Auto), new("", GridLength.Auto), new("", GridLength.Auto)];
     private readonly HashSet<string> selected = [];
     private readonly ObservableCollection<ManagementRowState> items = [];
     private IReadOnlyList<ManagementRow> rows = [];
     private int total;
     private string[]? draggingOrder;
     private IDisposable? visibility;
-    private readonly HashSet<Grid> columnRows = [];
-    private double[] sharedWidths = [];
-    private bool measuringColumns, columnsQueued;
 
     public ManagementList()
     {
@@ -54,50 +53,6 @@ public sealed partial class ManagementList : UserControl
             draggingOrder = null; List.CanDragItems = List.CanReorderItems = false;
         };
         IsEnabledChanged += (_, _) => UpdateDragAdmission();
-    }
-
-    private void QueueColumns()
-    {
-        if (columnsQueued) return;
-        columnsQueued = DispatcherQueue.TryEnqueue(() => { columnsQueued = false; MeasureColumns(); });
-    }
-
-    private void ColumnSizeChanged(object sender, SizeChangedEventArgs args) => QueueColumns();
-
-    private void MeasureColumns()
-    {
-        if (measuringColumns) return;
-        measuringColumns = true;
-        try
-        {
-            var widths = new double[columns.Count];
-            foreach (var grid in columnRows.Prepend(Header))
-                foreach (var cell in grid.Children.OfType<FrameworkElement>())
-                {
-                    if (cell.Visibility == Visibility.Collapsed) continue;
-                    int index = Grid.GetColumn(cell) - 1;
-                    if (index < 0 || index >= columns.Count || !columns[index].Width.IsAuto) continue;
-                    cell.Measure(new Windows.Foundation.Size(columns[index].MaxWidth, double.PositiveInfinity));
-                    widths[index] = Math.Min(columns[index].MaxWidth, Math.Max(widths[index], cell.DesiredSize.Width));
-                }
-            if (sharedWidths.SequenceEqual(widths)) return;
-            sharedWidths = widths;
-            foreach (var grid in columnRows.Prepend(Header))
-                for (int index = 0; index < columns.Count && index + 1 < grid.ColumnDefinitions.Count; index++)
-                    if (columns[index].Width.IsAuto && widths[index] > 0) grid.ColumnDefinitions[index + 1].Width = new GridLength(widths[index]);
-        }
-        finally { measuringColumns = false; }
-    }
-
-    internal void AttachColumns(Grid row)
-    {
-        if (columnRows.Add(row)) { row.SizeChanged += ColumnSizeChanged; QueueColumns(); }
-    }
-
-    internal void DetachColumns(Grid row)
-    {
-        if (!columnRows.Remove(row)) return;
-        row.SizeChanged -= ColumnSizeChanged; QueueColumns();
     }
 
     private bool CanDragRows => EnableRowDrag && IsEnabled && DesktopVisual.IsVisible(this) && rows.Count == total;
@@ -133,7 +88,8 @@ public sealed partial class ManagementList : UserControl
     public void SetColumns(IReadOnlyList<ManagementColumn> value)
     {
         if (Header.Visibility == Visibility.Visible && columns.SequenceEqual(value)) return;
-        columns = value.ToArray(); sharedWidths = []; ApplyColumns(Header);
+        columns = value.ToArray();
+        ApplyColumns(Header);
         while (Header.Children.Count > columns.Count + 1) Header.Children.RemoveAt(Header.Children.Count - 1);
         var mutedStyle = DesktopVisual.TryAppStyle("MeowFilm.MutedText");
         for (int index = 0; index < columns.Count; index++)
@@ -146,11 +102,10 @@ public sealed partial class ManagementList : UserControl
                 Grid.SetColumn(title, index + 1); Header.Children.Add(title);
             }
             title.Text = columns[index].Header;
-            title.HorizontalAlignment = columns[index].Width.IsStar ? HorizontalAlignment.Left : HorizontalAlignment.Center;
+            title.HorizontalAlignment = columns[index].Alignment;
         }
         Header.Visibility = Visibility.Visible;
-        foreach (var grid in columnRows) ApplyColumns(grid);
-        QueueColumns();
+        ColumnsChanged?.Invoke();
     }
 
     internal void ApplyColumns(Grid grid)
@@ -162,7 +117,8 @@ public sealed partial class ManagementList : UserControl
             var column = columns[index];
             if (grid.ColumnDefinitions.Count <= index + 1) grid.ColumnDefinitions.Add(new());
             var definition = grid.ColumnDefinitions[index + 1];
-            definition.Width = column.Width.IsAuto && index < sharedWidths.Length && sharedWidths[index] > 0 ? new GridLength(sharedWidths[index]) : column.Width;
+            definition.Width = column.Width;
+            definition.MinWidth = column.MinWidth;
             definition.MaxWidth = column.MaxWidth;
         }
     }

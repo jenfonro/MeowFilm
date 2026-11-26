@@ -55,6 +55,8 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
 
     private void View_Loaded(object sender, RoutedEventArgs e)
     {
+        Settings.PropertyChanged -= SettingsChanged;
+        Settings.PropertyChanged += SettingsChanged;
         visibility?.Dispose();
         visibility = DesktopVisual.ObserveVisibility(this, visible =>
         {
@@ -67,6 +69,7 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
     private async void View_Unloaded(object sender, RoutedEventArgs e)
     {
         if (IsLoaded) return;
+        Settings.PropertyChanged -= SettingsChanged;
         visibility?.Dispose();
         visibility = null;
         active = false;
@@ -102,9 +105,25 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
     {
         UpdateLayoutMetrics();
     }
+    private void SettingsChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        switch (e.PropertyName)
+        {
+            case nameof(MusicSettingsController.SearchPreferenceStatus):
+                NoticeOutlet.Post(this, Settings.SearchPreferenceStatus, (Settings, "search"));
+                break;
+            case nameof(MusicSettingsController.QualityStatus):
+                NoticeOutlet.Post(this, Settings.QualityStatus, (Settings, "quality"));
+                break;
+            case nameof(MusicSettingsController.Status):
+                NoticeOutlet.Post(this, Settings.Status, (Settings, "status"));
+                break;
+        }
+    }
+
     private void UpdateLayoutMetrics()
     {
-        double width = Math.Min(1248, Math.Max(0, SettingsScroller.ViewportWidth - 12));
+        double width = Math.Min(1248, Math.Max(0, SettingsScroller.ViewportWidth));
         if (width > 0 && (double.IsNaN(SectionsStack.Width) || Math.Abs(SectionsStack.Width - width) > .5)) SectionsStack.Width = width;
         double space = Math.Max(0, SettingsScroller.ViewportHeight - MetadataSection.ActualHeight);
         if (Math.Abs(EndSpace.Height - space) > .5) EndSpace.Height = space;

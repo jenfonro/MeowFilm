@@ -73,6 +73,8 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
             item => FilmPlaybackPoster.ArtworkResources(((FilmSearchCardItem)item).Poster));
         Loaded += (_, _) =>
         {
+            page.PropertyChanged -= PageChanged;
+            page.PropertyChanged += PageChanged;
             filmVisibility?.Dispose();
             filmVisibility = DesktopVisual.ObserveVisibility(FilmItems, FilmVisibilityChanged);
             SizeFilmCards();
@@ -89,6 +91,7 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
+            page.PropertyChanged -= PageChanged;
             filmVisibility?.Dispose();
             filmVisibility = null;
             hiddenAnchor = null;
@@ -99,6 +102,12 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
             }
             novelBooksDirty = novelStatesDirty = true;
         };
+    }
+
+    private void PageChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SearchResultsPage.Error))
+            NoticeOutlet.Post(this, page.Error, page);
     }
 
     private void FilmVisibilityChanged(bool visible)

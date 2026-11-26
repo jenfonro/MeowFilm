@@ -15,7 +15,6 @@
             Visibility="{x:Bind Settings.HasCatalogSourceError,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"
             IsEnabled="{x:Bind Settings.CanReadCatalogSource,Mode=OneWay}" Click="CatalogSourceRetry_Click"/>
    </StackPanel>
-   <desktop:NoticeOutlet Message="{x:Bind Settings.CatalogSourceStatus,Mode=OneWay}"/>
   </StackPanel>
  </Border>
 </UserControl>

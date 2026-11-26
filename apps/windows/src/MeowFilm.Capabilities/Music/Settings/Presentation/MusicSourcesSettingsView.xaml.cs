@@ -127,8 +127,12 @@ public partial class MusicSourcesSettingsView : UserControl
             }).ToArray();
 
     private void SetColumns() => SourceList.SetColumns([
-        new("启用", new(48)), new("名称", new(1, GridUnitType.Star)), new("类型", new(48)),
-        new("状态", new(100)), new("平台", new(compactColumns ? 0 : 332)), new("操作", new(224))
+        new("启用", new(1, GridUnitType.Star), 52),
+        new("名称", new(1, GridUnitType.Star), 96, Alignment: HorizontalAlignment.Left),
+        new("类型", new(1, GridUnitType.Star), 56),
+        new("状态", new(1, GridUnitType.Star), 76),
+        new("平台", compactColumns ? new(0) : new(1, GridUnitType.Star), compactColumns ? 0 : 312),
+        new("操作", new(1, GridUnitType.Star), 204)
     ]);
 
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)

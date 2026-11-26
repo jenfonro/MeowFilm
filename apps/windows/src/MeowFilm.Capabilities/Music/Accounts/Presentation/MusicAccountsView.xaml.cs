@@ -141,10 +141,23 @@ public partial class MusicAccountsView : UserControl
 
     private void RebuildTableRows()
     {
+        foreach (var existing in tableRows)
+            if (existing.Source is { } oldSource) oldSource.PropertyChanged -= PlatformRowChanged;
         tableRows.Clear();
         if ((tableSource ?? Owner?.PlatformSettings) is { } rows)
-            foreach (var source in rows) tableRows.Add(new(source));
+            foreach (var source in rows)
+            {
+                source.PropertyChanged -= PlatformRowChanged;
+                source.PropertyChanged += PlatformRowChanged;
+                tableRows.Add(new(source));
+            }
         foreach (var row in publicCatalogs) tableRows.Add(row);
+    }
+
+    private void PlatformRowChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (sender is MusicPlatformSettingsRow row && e.PropertyName == nameof(MusicPlatformSettingsRow.DetailsStatus))
+            NoticeOutlet.Post(this, row.DetailsStatus, row);
     }
 
     private void PlatformSettingsChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -227,7 +240,12 @@ public partial class MusicAccountsView : UserControl
     {
         if (observed is not null) return;
         observed = Owner;
-        if (observed is not null) observed.PropertyChanged += OwnerChanged;
+        if (observed is not null)
+        {
+            observed.PropertyChanged += OwnerChanged;
+            observed.LibrarySync.PropertyChanged += LibrarySyncChanged;
+        }
+        if (Settings is not null) Settings.PropertyChanged += AccountSettingsChanged;
         ObserveTableRows();
         window = DesktopWindow.GetWindow(this);
         if (window is not null)
@@ -245,7 +263,14 @@ public partial class MusicAccountsView : UserControl
         var old = observed;
         var retiringLogin = loginOwner;
         observed = null;
-        if (old is not null) old.PropertyChanged -= OwnerChanged;
+        if (old is not null)
+        {
+            old.PropertyChanged -= OwnerChanged;
+            old.LibrarySync.PropertyChanged -= LibrarySyncChanged;
+        }
+        if (Settings is not null) Settings.PropertyChanged -= AccountSettingsChanged;
+        foreach (var existing in tableRows)
+            if (existing.Source is { } oldSource) oldSource.PropertyChanged -= PlatformRowChanged;
         if (tableSource is not null)
             tableSource.CollectionChanged -= PlatformSettingsChanged;
         tableSource = null;
@@ -272,9 +297,23 @@ public partial class MusicAccountsView : UserControl
 
     private void WindowChanged(object? sender, EventArgs e) => VisibilityChanged();
 
+    private void AccountSettingsChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (Settings is not null && e.PropertyName == nameof(MusicSettingsController.FeedbackStatus))
+            NoticeOutlet.Post(this, Settings.FeedbackStatus, (Settings, "feedback"));
+    }
+
+    private void LibrarySyncChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (observed is { } owner && e.PropertyName == nameof(owner.LibrarySync.Status))
+            NoticeOutlet.Post(this, owner.LibrarySync.Status, owner.LibrarySync);
+    }
+
     private void OwnerChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (!ReferenceEquals(sender, observed)) return;
+        if (e.PropertyName == nameof(MusicAccountsController.AccountNotice) && observed is { } owner)
+            NoticeOutlet.Post(this, owner.AccountNotice, owner);
         if (logoutConfirmation is { } confirmation &&
             (!ReferenceEquals(observed, confirmation.Owner) || !confirmation.Owner.CanLogoutAccount(confirmation.Account)))
             RetireLogoutPopup();

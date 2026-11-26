@@ -98,7 +98,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         ApplyTabVisuals();
     }
 
-    internal void PostNotice(string text) => NoticeHost.Post(text);
+    internal void PostNotice(string text) => NoticeOutlet.Post(this, text);
 
     private void Tab_Checked(object sender, RoutedEventArgs e)
     {

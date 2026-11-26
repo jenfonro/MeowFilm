@@ -9,7 +9,6 @@ public partial class FilmSettingsView
 {
     private CancellationTokenSource? sourceOperation;
     private bool sourcesLoaded, sourcesBusy, sourcesFailed;
-    private string sourceWork = "";
     private IReadOnlyDictionary<string, bool>? panInterception;
     public bool CanEditPanInterception => panInterception is not null && !sourcesBusy;
     public ObservableCollection<FilmSettingsCatRow> CatRows { get; } = [];
@@ -19,8 +18,6 @@ public partial class FilmSettingsView
     public bool SourcesIdle => !sourcesBusy;
     public bool SourcesFailed => sourcesFailed;
     public bool CanEditSources => sourcesLoaded && !sourcesBusy;
-    public string SourceWork => sourceWork;
-    public bool HasSourceWork => SourcesBusy || SourcesFailed;
     public bool CanDeleteCats => CanEditSources && CatRows.Any(row => row.Selected);
     public bool CanDeleteVideos => CanEditSources && VideoRows.Any(row => row.Selected);
     public bool CanDetectVideos => CanEditSources && VideoRows.Any(row => row.Selected) &&
@@ -29,7 +26,7 @@ public partial class FilmSettingsView
     private void SourceStateChanged()
     {
         foreach (string name in new[] { nameof(SourcesLoaded), nameof(SourcesBusy), nameof(SourcesIdle),
-            nameof(SourcesFailed), nameof(HasSourceWork), nameof(CanEditSources), nameof(SourceWork),
+            nameof(SourcesFailed), nameof(CanEditSources),
             nameof(CanDeleteCats), nameof(CanDeleteVideos), nameof(CanDetectVideos),
             nameof(CanEditPanInterception) }) Changed(name);
     }
@@ -43,7 +40,7 @@ public partial class FilmSettingsView
         foreach (var control in PanInterceptionSwitches) control.IsChecked = saved[(string)control.Tag];
     }
 
-    private Task LoadPanInterceptionAsync() => RunSourcesAsync("正在读取网盘接管设置…", async token =>
+    private Task LoadPanInterceptionAsync() => RunSourcesAsync(async token =>
     {
         var saved = await sources.ReadPanInterceptionAsync(token);
         ReplacePanInterception(saved);
@@ -53,25 +50,24 @@ public partial class FilmSettingsView
     {
         if (!Active || section != "pan-routing" || !CanEditPanInterception || sender is not CheckBox { Tag: string provider } control) return;
         bool enabled = control.IsChecked == true;
-        await RunSourcesAsync("正在保存网盘接管设置…", async token =>
+        await RunSourcesAsync(async token =>
             ReplacePanInterception(await sources.SavePanInterceptionAsync(provider, enabled, token)));
         if (panInterception is not null) ReplacePanInterception(panInterception);
     }
 
-    private Task LoadSourcesAsync() => RunSourcesAsync("正在读取来源…", async token =>
+    private Task LoadSourcesAsync() => RunSourcesAsync(async token =>
     {
         await sources.InitializeAsync(token);
         sourcesLoaded = true;
     });
 
-    private async Task RunSourcesAsync(string label, Func<CancellationToken, Task> work, string? success = null)
+    private async Task RunSourcesAsync(Func<CancellationToken, Task> work, string? success = null)
     {
         if (!Active || SourcesBusy) return;
         using var operation = new CancellationTokenSource();
         sourceOperation = operation;
         long ticket = activation;
-        sourcesBusy = true; sourcesFailed = false; sourceWork = label;
-        Notices.Message = "";
+        sourcesBusy = true; sourcesFailed = false;
         SourceStateChanged();
         try
         {
@@ -93,7 +89,7 @@ public partial class FilmSettingsView
         }
         finally
         {
-            sourceOperation = null; sourcesBusy = false; sourceWork = "";
+            sourceOperation = null; sourcesBusy = false;
             if (Active && sourcesLoaded) SynchronizeSources();
             else SourceStateChanged();
         }
@@ -149,12 +145,22 @@ public partial class FilmSettingsView
     {
         CatsList.ShowToolbar = VideosList.ShowToolbar = false;
         CatsList.ShowBulkActions = VideosList.ShowBulkActions = false;
-        CatsList.MaxWidth = VideosList.MaxWidth = 1400;
         CatsList.HorizontalAlignment = VideosList.HorizontalAlignment = HorizontalAlignment.Stretch;
-        UpdateSourceColumns(compact: true);
+        CatsList.SetColumns([
+            new("名称", new(1, GridUnitType.Star), 88, Alignment: HorizontalAlignment.Left),
+            new("类型", new(1, GridUnitType.Star), 64),
+            new("状态", new(1, GridUnitType.Star), 76),
+            new("启用", new(1, GridUnitType.Star), 52),
+            new("修改时间", new(1, GridUnitType.Star), 128),
+            new("更新状态", new(1, GridUnitType.Star), 76),
+            new("操作", new(1, GridUnitType.Star), 196)]);
         VideosList.SetColumns([
-            new("站源名称", new(1, GridUnitType.Star)), new("检测状态", new(90)), new("启用", new(44)),
-            new("首页显示", new(66)), new("搜索启用", new(66)), new("操作", new(142))]);
+            new("站源名称", new(1, GridUnitType.Star), 80, Alignment: HorizontalAlignment.Left),
+            new("检测状态", new(1, GridUnitType.Star), 76),
+            new("启用", new(1, GridUnitType.Star), 52),
+            new("首页显示", new(1, GridUnitType.Star), 68),
+            new("搜索启用", new(1, GridUnitType.Star), 68),
+            new("操作", new(1, GridUnitType.Star), 148)]);
         CatsList.SelectionChanged += () =>
         {
             foreach (var row in CatRows) row.Selected = CatsList.Selected.Contains(row.Source.InstallationId);
@@ -178,14 +184,6 @@ public partial class FilmSettingsView
         };
     }
 
-    private bool compactSources;
-    private void UpdateSourceColumns(bool compact)
-    {
-        compactSources = compact;
-        CatsList.SetColumns([
-            new("名称", new(1, GridUnitType.Star)), new("类型", new(46)), new("状态", new(88)),
-            new("启用", new(44)), new("修改时间", new(90)), new("更新状态", new(82)), new("操作", new(compact ? 88 : 176))]);
-    }
     private static string VideoId(FilmSettingsVideoRow row) => System.Text.Json.JsonSerializer.Serialize(row.Source.Key);
     private void RenderSourceLists()
     {
@@ -240,7 +238,6 @@ public partial class FilmSettingsView
         if (section == "pan-routing") await LoadPanInterceptionAsync();
         else await LoadSourcesAsync();
     }
-    private void SourcesCancel_Click(object sender, RoutedEventArgs e) => sourceOperation?.Cancel();
 
     private void ImportLocal_Click(object sender, RoutedEventArgs e)
     {
@@ -248,7 +245,7 @@ public partial class FilmSettingsView
         OpenPopup(anchor, "添加本地文件", "", "添加", () =>
         {
             string name = CatNameBox.Text, path = catFilePath!;
-            return RunSourcesAsync("正在添加猫源…", async token =>
+            return RunSourcesAsync(async token =>
                 await sources.ImportLocalAsync(name, path, cancellationToken: token), "猫源已添加");
         }, edit: true, importType: "local");
     }
@@ -259,7 +256,7 @@ public partial class FilmSettingsView
         OpenPopup(anchor, "添加网络源", "", "添加", () =>
         {
             string name = CatNameBox.Text, url = CatUrlBox.Text;
-            return RunSourcesAsync("正在添加猫源…", async token =>
+            return RunSourcesAsync(async token =>
                 await sources.ImportNetworkAsync(name, url, cancellationToken: token), "猫源已添加");
         }, edit: true, importType: "network");
     }
@@ -272,7 +269,7 @@ public partial class FilmSettingsView
         {
             string name = CatNameBox.Text, type = CatInputType, url = CatUrlBox.Text;
             string? path = catFilePath;
-            return RunSourcesAsync("正在保存猫源…", async token =>
+            return RunSourcesAsync(async token =>
                 await sources.EditCatAsync(id, name, type, type == "network" ? url : null,
                     type == "local" ? path : null, token), "猫源已保存");
         }, edit: true, cat: row.Source);
@@ -283,7 +280,7 @@ public partial class FilmSettingsView
         if (sender is not CheckBox { DataContext: FilmSettingsCatRow row } box) return;
         bool enabled = box.IsChecked == true;
         if (CurrentCat(box, row))
-            await RunSourcesAsync(enabled ? "正在启用猫源…" : "正在停用猫源…", async token =>
+            await RunSourcesAsync(async token =>
                 await sources.EnableCatAsync(row.Source.InstallationId, enabled, token), enabled ? "猫源已启用" : "猫源已停用");
         box.IsChecked = row.Enabled;
     }
@@ -301,7 +298,7 @@ public partial class FilmSettingsView
             if (path is null || ticket != activation || !Active || section != "cats" || !CanEditSources || !CatRows.Contains(row))
                 return;
         }
-        await RunSourcesAsync("正在更新猫源…", async token =>
+        await RunSourcesAsync(async token =>
         {
             await sources.UpdateCatAsync(row.Source.InstallationId, path, token);
         }, "猫源更新完成");
@@ -310,7 +307,7 @@ public partial class FilmSettingsView
     private async void RestartCat_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { DataContext: FilmSettingsCatRow row } anchor || !CurrentCat(anchor, row) || !row.CanRestart) return;
-        await RunSourcesAsync("正在重启猫源…", async token =>
+        await RunSourcesAsync(async token =>
             await sources.RestartCatAsync(row.Source.InstallationId, token), "猫源已重启");
     }
 
@@ -328,7 +325,7 @@ public partial class FilmSettingsView
         var ids = rows.Select(row => row.Source.InstallationId).ToArray();
         string names = string.Join("、", rows.Select(row => row.Name));
         OpenPopup(anchor, "删除猫源", $"删除“{names}”及其对应的视频源？", "删除", () =>
-            RunSourcesAsync("正在删除猫源…", async token =>
+            RunSourcesAsync(async token =>
             {
                 foreach (string id in ids) await sources.DeleteCatAsync(id, token);
             }, "猫源已删除"));
@@ -341,7 +338,7 @@ public partial class FilmSettingsView
         if (CurrentVideo(box, row))
         {
             var options = FilmSettingsLogic.ApplyVideoOption(row.Source.Options, option, enabled);
-            await RunSourcesAsync("正在保存视频源…", token =>
+            await RunSourcesAsync(token =>
                 sources.SaveVideoOptionsAsync(row.Source.Key, options, cancellationToken: token), "视频源设置已保存");
         }
         box.IsChecked = option switch { "enabled" => row.Enabled, "home" => row.HomeVisible, _ => row.SearchEnabled };
@@ -350,12 +347,12 @@ public partial class FilmSettingsView
     private async Task SetAggregateImagesAsync(FilmSettingsVideoRow row)
     {
         if (!Active || section != "videos" || !CanEditSources || !VideoRows.Contains(row) || row.AggregateImages) return;
-        await RunSourcesAsync("正在保存图片来源…", token => sources.SaveVideoOptionsAsync(
+        await RunSourcesAsync(token => sources.SaveVideoOptionsAsync(
             row.Source.Key, row.Source.Options with { AggregateImages = true }, cancellationToken: token), "聚合图片来源已保存");
     }
 
     private Task SaveVideoOrderAsync(IReadOnlyList<FilmSourceKey> order) =>
-        RunSourcesAsync("正在保存排序…", token => sources.ReorderVideosAsync(order, token), "排序已保存");
+        RunSourcesAsync(token => sources.ReorderVideosAsync(order, token), "排序已保存");
 
     private void VideoStatus_Click(object sender, RoutedEventArgs e)
     {
@@ -377,7 +374,7 @@ public partial class FilmSettingsView
     private Task DetectVideosAsync(FilmSettingsVideoRow[] rows)
     {
         var keys = rows.Select(row => row.Source.Key).ToArray();
-        return RunSourcesAsync("正在检测视频源…", async token =>
+        return RunSourcesAsync(async token =>
         {
             foreach (var row in rows) row.SetDetecting(true);
             try
@@ -403,7 +400,7 @@ public partial class FilmSettingsView
     {
         var keys = rows.Select(row => row.Source.Key).ToArray();
         OpenPopup(anchor, "删除视频源", $"删除“{string.Join("、", rows.Select(row => row.Name))}”？", "删除", () =>
-            RunSourcesAsync("正在删除视频源…", async token =>
+            RunSourcesAsync(async token =>
             {
                 foreach (var key in keys) await sources.DeleteVideoAsync(key, token);
             }, "视频源已删除"));

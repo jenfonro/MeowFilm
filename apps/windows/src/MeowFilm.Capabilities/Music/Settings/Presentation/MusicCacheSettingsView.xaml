@@ -8,7 +8,6 @@
    <TextBlock Text="播放缓存" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,8"/>
    <Button Style="{StaticResource Settings.Button}" Content="清空播放缓存" Click="ClearPlaybackCache_Click"
            IsEnabled="{x:Bind Settings.CanClearPlaybackCache,Mode=OneWay}" HorizontalAlignment="Left"/>
-   <desktop:NoticeOutlet Message="{x:Bind Settings.Status,Mode=OneWay}"/>
   </StackPanel>
  </Border>
 </UserControl>

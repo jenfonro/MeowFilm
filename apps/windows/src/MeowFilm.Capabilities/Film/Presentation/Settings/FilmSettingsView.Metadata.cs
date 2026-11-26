@@ -13,14 +13,13 @@ public partial class FilmSettingsView
     public bool MetadataBusy => metadataBusy;
     public bool MetadataIdle => !metadataBusy;
     public bool MetadataFailed => metadataFailed;
-    public bool CanEditMetadata => metadataLoaded && !metadataBusy;
     public sealed record MetadataRoute(string Id, string Label, string Base, string Proxy = "");
     public IReadOnlyList<MetadataRoute> DoubanDataRoutes => FilmSettingsLogic.DoubanDataRoutes;
     public IReadOnlyList<MetadataRoute> DoubanImageRoutes => FilmSettingsLogic.DoubanImageRoutes;
     private void MetadataStateChanged()
     {
         foreach (string name in new[] { nameof(MetadataLoaded), nameof(MetadataBusy), nameof(MetadataIdle),
-            nameof(MetadataFailed), nameof(CanEditMetadata) }) Changed(name);
+            nameof(MetadataFailed) }) Changed(name);
     }
     private void ReplaceMetadata(FilmMetadataSettings value)
     {
@@ -49,11 +48,11 @@ public partial class FilmSettingsView
     private Task LoadMetadataAsync() => RunMetadataAsync(null);
     private async Task RunMetadataAsync(string? provider)
     {
-        if (!Active || metadata is null || MetadataBusy || provider is not null && !CanEditMetadata) return;
+        if (!Active || metadata is null || MetadataBusy || provider is not null && !MetadataLoaded) return;
         using var operation = new CancellationTokenSource();
         metadataOperation = operation;
         long ticket = activation;
-        metadataBusy = true; metadataFailed = false; Notices.Message = "";
+        metadataBusy = true; metadataFailed = false;
         MetadataStateChanged();
         try
         {
