@@ -42,9 +42,22 @@ public sealed partial class ShellWindow
 
     private void UpdateStatusPresentation()
     {
-        StatusPanel.Visibility = _state.HasStatus && !_state.IsBusy ? Visibility.Visible : Visibility.Collapsed;
+        bool wasVisible = StatusPanel.Visibility == Visibility.Visible;
+        bool show = _state.HasStatus && !_state.IsBusy;
+        StatusPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         StatusPanel.Background = (Brush)DesktopVisual.Resource(Root, _state.IsError ? "MeowFilm.Brush.ErrorSurface" : "MeowFilm.Brush.FloatingSurface");
         StatusPanel.BorderBrush = (Brush)DesktopVisual.Resource(Root, _state.IsError ? "MeowFilm.Brush.Error" : "MeowFilm.Brush.Border");
+        if (show && !wasVisible && DesktopVisual.CanAnimate(Root))
+        {
+            StatusPanel.Opacity = 0;
+            DesktopVisual.AnimateDouble(StatusPanelTransform, "Y", -20, 0, TimeSpan.FromMilliseconds(220));
+            DesktopVisual.AnimateDouble(StatusPanel, "Opacity", 0, 1, TimeSpan.FromMilliseconds(180), () => StatusPanel.Opacity = 1);
+        }
+        else if (!show)
+        {
+            StatusPanelTransform.Y = 0;
+            StatusPanel.Opacity = 1;
+        }
     }
 
     private void OnMinimizeCaptionClick(object sender, RoutedEventArgs e) { if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter p) p.Minimize(); }

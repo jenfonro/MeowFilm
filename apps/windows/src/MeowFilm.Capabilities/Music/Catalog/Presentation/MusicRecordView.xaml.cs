@@ -64,7 +64,7 @@ public partial class MusicRecordView : UserControl
     private long swipeGeneration;
     private DesktopWindow? watchedWindow;
     private IDisposable? visibility;
-    private bool? builtCompact;
+    private double builtDiameter;
     private bool IsVisible => DesktopVisual.IsVisible(this);
     internal bool IsSwiping { get; private set; }
     public event EventHandler<MusicRecordSwipeEventArgs>? SwipeCommitted;
@@ -84,8 +84,7 @@ public partial class MusicRecordView : UserControl
         Loaded += (_, _) =>
         {
             visibility?.Dispose();
-            UpdateGrooves();
-            UpdateDiscCenterPoint();
+            UpdateDiscGeometry();
             visibility = DesktopVisual.ObserveVisibility(this, visible => { if (!visible) CancelSwipe(immediate: true); Sync(); });
         };
         Unloaded += (_, _) =>
@@ -95,8 +94,7 @@ public partial class MusicRecordView : UserControl
         };
         SizeChanged += (_, e) =>
         {
-            UpdateGrooves();
-            UpdateDiscCenterPoint();
+            UpdateDiscGeometry();
             if (e.PreviousSize.Width > 0 && e.NewSize.Width != e.PreviousSize.Width &&
                 (pointerPending || IsSwiping || pendingIdentity is not null || Math.Abs(SwipeTranslation.X) > .5))
                 CancelSwipe();
@@ -113,15 +111,39 @@ public partial class MusicRecordView : UserControl
     internal Task<IDisposable> PrepareArtworkAsync(CancellationToken cancellationToken) =>
         Cover.PrepareForPresentationAsync(cancellationToken);
 
-    private void UpdateGrooves()
+    private void UpdateDiscGeometry()
     {
-        if (ActualWidth <= 0 || ActualHeight <= 0) return;
-        bool compact = Math.Min(ActualWidth, ActualHeight) < 160;
-        if (builtCompact == compact) return;
-        builtCompact = compact;
+        double diameter = Math.Min(ActualWidth, ActualHeight);
+        if (diameter <= 0) return;
+        RecordSurface.Width = RecordSurface.Height = diameter;
+        double half = diameter * 0.5;
+        RecordRoot.CornerRadius = new CornerRadius(half);
+        CardClip.SetRadius(RecordRoot, half);
+        double sheenInset = Math.Max(0.5, diameter * (2.0 / 300.0));
+        DiscSheen.Margin = new Thickness(sheenInset);
+        double coverDiameter = diameter * 0.64;
+        double coverRadius = coverDiameter * 0.5;
+        CoverFrame.Width = CoverFrame.Height = coverDiameter;
+        CoverFrame.CornerRadius = new CornerRadius(coverRadius);
+        CardClip.SetRadius(CoverFrame, coverRadius);
+        UpdateDiscCenterPoint();
+        if (Math.Abs(builtDiameter - diameter) < 0.5) return;
+        builtDiameter = diameter;
+        bool compact = diameter < 160;
+        double scale = diameter / 300.0;
+        double step = (compact ? 14.0 : 1.7) * scale;
+        double thickness = Math.Max(0.5, (compact ? 4.0 : 0.65) * scale);
         Grooves.Children.Clear();
-        for (double radius = 100; radius < 148; radius += compact ? 14 : 1.7)
-            Grooves.Children.Add(new Ellipse { Stroke = GrooveStrokeBrush, StrokeThickness = compact ? 4 : .65, Width = radius * 2, Height = radius * 2 });
+        for (double radius = 100.0 * scale; radius < 148.0 * scale; radius += step)
+            Grooves.Children.Add(new Ellipse
+            {
+                Stroke = GrooveStrokeBrush,
+                StrokeThickness = thickness,
+                Width = radius * 2,
+                Height = radius * 2,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            });
     }
 
     private Visual EnsureDiscVisual()

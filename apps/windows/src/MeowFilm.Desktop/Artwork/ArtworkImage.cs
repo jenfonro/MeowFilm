@@ -128,7 +128,15 @@ public sealed class ArtworkImage : Grid, IDebugImageVisual
             if (!loaded || itemsBinding?.Current != false) return;
             RefreshItemsBinding(); UpdateVisibility();
         };
-        SizeChanged += (_, _) => boundsClip.Rect = new Rect(0, 0, ActualWidth, ActualHeight);
+        SizeChanged += (_, _) =>
+        {
+            boundsClip.Rect = new Rect(0, 0, ActualWidth, ActualHeight);
+            if (lease is { } current && DispatcherQueue.HasThreadAccess)
+            {
+                var next = current.Image.GetSource(DispatcherQueue, GetRenderedMaxPixels());
+                if (!ReferenceEquals(Source, next)) SetValue(SourceProperty, next);
+            }
+        };
     }
     private bool WantsViewport => !nativeRecycled && loaded && !string.IsNullOrWhiteSpace(Address);
     private void ReplaceItemsBinding(ArtworkItemsScope.Binding? next)
@@ -349,9 +357,37 @@ public sealed class ArtworkImage : Grid, IDebugImageVisual
             }
         }
     }
+    private double GetRenderedMaxPixels()
+    {
+        if (ActualWidth <= 0 || ActualHeight <= 0 || XamlRoot is not { } xamlRoot) return 0;
+        double width = ActualWidth, height = ActualHeight;
+        DependencyObject? child = this;
+        for (DependencyObject? parent = VisualTreeHelper.GetParent(this);
+             parent is not null;
+             child = parent, parent = VisualTreeHelper.GetParent(parent))
+        {
+            if (parent is Viewbox vb && child is FrameworkElement fe &&
+                vb.ActualWidth > 0 && vb.ActualHeight > 0 && fe.ActualWidth > 0 && fe.ActualHeight > 0)
+            {
+                double sx = vb.ActualWidth / fe.ActualWidth;
+                double sy = vb.ActualHeight / fe.ActualHeight;
+                double factor = vb.Stretch switch
+                {
+                    Stretch.Fill => 1d,
+                    Stretch.UniformToFill => Math.Max(sx, sy),
+                    Stretch.None => 1d,
+                    _ => Math.Min(sx, sy)
+                };
+                if (vb.Stretch == Stretch.Fill) { width *= sx; height *= sy; }
+                else { width *= factor; height *= factor; }
+            }
+        }
+        return Math.Max(width, height) * xamlRoot.RasterizationScale;
+    }
+
     private void Present(IArtworkLease acquired)
     {
-        var source = acquired.Image.GetSource(DispatcherQueue);
+        var source = acquired.Image.GetSource(DispatcherQueue, GetRenderedMaxPixels());
         var palettes = acquired.Image.Palettes;
         var prior = lease;
         lease = acquired; displayedIdentity = DisplayIdentity;
