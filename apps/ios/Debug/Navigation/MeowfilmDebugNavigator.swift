@@ -157,8 +157,8 @@ final class MeowfilmDebugNavigator {
 
         switch target {
         // --- Unsupported on iOS ---
-        case "novel.shelf":
-            throw DebugAPIError.unsupported("iOS has no standalone novel shelf page; query novel_books via storage/query or use novel/command toggle_shelf")
+        case "history", "history.film", "history.novel":
+            throw DebugAPIError.unsupported("history.* is Windows-only; use library.film or library.novel on iOS")
         case "settings.media-controls":
             throw DebugAPIError.unsupported("settings.media-controls is Windows-only")
 
@@ -181,8 +181,35 @@ final class MeowfilmDebugNavigator {
             _ = try await resetToPrimaryRoot(.recommend)
             coordinator.showSearch(animated: false, initialTargetID: MeowfilmSearchComposition.music.id)
 
-        case "music.personal":
-            _ = try await resetToPrimaryRoot(.library)
+        case "music.personal", "music.library", "library", "library.music", "library.film", "library.novel":
+            let main = try await resetToPrimaryRoot(.library)
+            if let libraryVC = main.contentViewController(for: .library) as? MeowfilmLibraryViewController {
+                let wantedTab: MeowfilmLibraryViewController.Tab? = switch target {
+                case "music.personal", "music.library", "library.music": .music
+                case "library.film": .film
+                case "library.novel": .novel
+                default:
+                    (params["tab"]?.stringValue ?? params["domain"]?.stringValue).flatMap(MeowfilmLibraryViewController.Tab.init(identifier:))
+                }
+                if let wantedTab {
+                    libraryVC.selectTab(wantedTab, animated: false)
+                }
+                if let section = params["section"]?.stringValue, !section.isEmpty {
+                    let coordinator = try requireCoordinator()
+                    switch libraryVC.selectedTab {
+                    case .film:
+                        if let kind = PersonalLibrarySectionKind(rawValue: section) {
+                            coordinator.showFilmPersonalSection(kind, animated: false)
+                        }
+                    case .novel:
+                        if let kind = NovelPersonalSectionKind(rawValue: section) {
+                            coordinator.showNovelPersonalSection(kind, animated: false)
+                        }
+                    case .music:
+                        break
+                    }
+                }
+            }
 
         case "music.daily":
             let coordinator = try requireCoordinator()
@@ -220,15 +247,13 @@ final class MeowfilmDebugNavigator {
                 }
             }
 
-        case "music.library":
-            _ = try await resetToPrimaryRoot(.library)
-
         case "music.favorites":
             let coordinator = try requireCoordinator()
             guard let music = assembly?.music else {
                 throw DebugAPIError.invalidState("Music service is not ready")
             }
-            _ = try await resetToPrimaryRoot(.library)
+            let main = try await resetToPrimaryRoot(.library)
+            (main.contentViewController(for: .library) as? MeowfilmLibraryViewController)?.selectTab(.music, animated: false)
             if let fav = music.collections.first(where: { $0.kind == "favorites" }) {
                 let page = MusicCollectionViewController(
                     model: music,
@@ -252,7 +277,8 @@ final class MeowfilmDebugNavigator {
             guard let music = assembly?.music else {
                 throw DebugAPIError.invalidState("Music service is not ready")
             }
-            _ = try await resetToPrimaryRoot(.library)
+            let main = try await resetToPrimaryRoot(.library)
+            (main.contentViewController(for: .library) as? MeowfilmLibraryViewController)?.selectTab(.music, animated: false)
             if let id = params["id"]?.stringValue, !id.isEmpty {
                 guard let col = music.collections.first(where: { $0.id == id }) else {
                     throw DebugAPIError.notFound("Local playlist not found: \(id)")
@@ -334,12 +360,17 @@ final class MeowfilmDebugNavigator {
                 throw DebugAPIError.invalidState("No active FilmDetailViewController; provide 'id' to open one")
             }
             let main = try await resetToPrimaryRoot(.film)
-            guard let filmHome = main.contentViewController(for: .film) as? FilmHomeViewController,
-                  let found = filmHome.debugFindItem(id: id) else {
-                throw DebugAPIError.notFound("Film item not found in loaded home catalog: \(id)")
+            if let filmHome = main.contentViewController(for: .film) as? FilmHomeViewController,
+               let found = filmHome.debugFindItem(id: id) {
+                let kind: FilmPlaybackKind = (found.category == .movie || found.item.kind == .movie) ? .movie : .tv
+                coordinator.showFilm(found.item, kind: kind, entrySurface: "home", animated: false)
+            } else if let item = (coordinator.assembly.filmLibrary.favoriteItems + (coordinator.assembly.filmHistory?.items ?? []))
+                .first(where: { $0.id == id || $0.targetID == id || $0.title == id }) {
+                let kind: FilmPlaybackKind = item.kind == .movie ? .movie : .tv
+                coordinator.showFilm(item, kind: kind, entrySurface: "library", animated: false)
+            } else {
+                throw DebugAPIError.notFound("Film item not found in loaded home or library: \(id)")
             }
-            let kind: FilmPlaybackKind = (found.category == .movie || found.item.kind == .movie) ? .movie : .tv
-            coordinator.showFilm(found.item, kind: kind, entrySurface: "home", animated: false)
 
         case "film.playback":
             let coordinator = try requireCoordinator()

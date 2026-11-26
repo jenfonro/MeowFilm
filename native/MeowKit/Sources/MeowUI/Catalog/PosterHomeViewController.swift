@@ -195,6 +195,7 @@ open class PosterHomeViewController: PageViewController, UICollectionViewDelegat
 
     open func didRequestRefresh() {}
     open func didTapSectionMore(sectionID: String) {}
+    open func didTapSectionAction(sectionID: String) {}
     open func didSelectCard(inSection sectionID: String, cardID: String, index: Int) {}
     open func didDisplaySection(sectionID: String) {}
 
@@ -216,11 +217,16 @@ open class PosterHomeViewController: PageViewController, UICollectionViewDelegat
         let action: (() -> Void)? = section.hasMore ? { [weak self] in
             self?.didTapSectionMore(sectionID: sectionID)
         } : nil
+        let trailingAction: (() -> Void)? = section.actionTitle != nil ? { [weak self] in
+            self?.didTapSectionAction(sectionID: sectionID)
+        } : nil
         (header as? PosterSectionHeaderView)?.configure(
             title: section.title,
             theme: theme,
             moreAccessibilityID: "\(configuration.moreIdentifierPrefix).\(section.id)",
-            onMore: action
+            onMore: action,
+            actionTitle: section.actionTitle,
+            onAction: trailingAction
         )
     }
 

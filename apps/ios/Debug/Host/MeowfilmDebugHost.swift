@@ -110,13 +110,14 @@ final class MeowfilmDebugHost: DebugControlDelegate, @unchecked Sendable {
             "music.home", "music.channels", "music.discovery", "music.personal",
             "music.daily", "music.fm", "music.library", "music.favorites",
             "music.history", "music.archives", "music.playlist", "music.player", "music.queue",
+            "library", "library.music", "library.film", "library.novel",
             "film.home", "film.data", "film.detail", "film.playback",
             "novel.home", "novel.data", "novel.book", "novel.reader",
             "search",
             "settings.general", "settings.music", "settings.film", "settings.novel", "settings.cache"
         ]
         let unsupportedTargets = [
-            "novel.shelf",
+            "history", "history.film", "history.novel",
             "settings.media-controls"
         ]
         let actions = [
@@ -148,7 +149,7 @@ final class MeowfilmDebugHost: DebugControlDelegate, @unchecked Sendable {
                 "runtimeInvoke": .bool(true),
                 "localNetworkBind": .bool(true),
                 "targetNotes": .object([
-                    "novel.shelf": .string("unsupported_on_ios; use storage/query or novel/command toggle_shelf"),
+                    "history": .string("windows_only; on_ios_use_library_film_or_library_novel"),
                     "settings.media-controls": .string("windows_only"),
                     "settings.general.window": .string("windows_only"),
                     "settings.general.shortcuts": .string("windows_only"),

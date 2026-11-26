@@ -79,6 +79,12 @@ public sealed partial class CatalogBrowseView : UserControl
             await RunGuardedAsync(() => controller.RefreshSectionAsync(section));
     }
 
+    private async void HomeAction_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: CatalogHomeSection section })
+            await RunGuardedAsync(() => controller.InvokeSectionActionAsync(section, this));
+    }
+
     private async void HomeRetry_Click(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(controller.RetryHomeAsync);
 
@@ -87,6 +93,9 @@ public sealed partial class CatalogBrowseView : UserControl
 
     private async void DataRefresh_Click(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(controller.RefreshDataAsync);
+
+    private async void DataAction_Click(object sender, RoutedEventArgs e) =>
+        await RunGuardedAsync(() => controller.InvokeDataActionAsync(this));
 
     private async void DataRetry_Click(object sender, RoutedEventArgs e) =>
         await RunGuardedAsync(controller.RetryDataAsync);

@@ -42,6 +42,10 @@ internal sealed partial class ShellDebugAdapter
             {
                 await OpenSearchTargetAsync(parameters, cancellationToken);
             }
+            else if (FindPageSessionByTarget(normalized) is { } matchedPage)
+            {
+                await OpenPageTargetAsync(matchedPage, normalized, parameters, cancellationToken);
+            }
             else if (normalized is "settings.general" or "settings.cache" or "settings.media-controls")
             {
                 string section = normalized == "settings.cache" ? "cache"
@@ -102,6 +106,35 @@ internal sealed partial class ShellDebugAdapter
         }
         if (!string.IsNullOrWhiteSpace(tab) && AsAdapter(searchPage) is { } searchAdapter)
             await searchAdapter.TryOpenDebugTargetAsync("search:" + tab, parameters, cancellationToken);
+    }
+
+    private ShellPageSession? FindPageSessionByTarget(string target)
+    {
+        foreach (var page in shell.Pages)
+        {
+            if (page.Page is IDesktopSearchPage) continue;
+            if (string.Equals(page.Page.Id, target, StringComparison.OrdinalIgnoreCase)) return page;
+            if (AsAdapter(page.Page) is { } adapter &&
+                adapter.SupportedDebugTargets.Any(t => string.Equals(t, target, StringComparison.OrdinalIgnoreCase)))
+                return page;
+        }
+        return null;
+    }
+
+    private async Task OpenPageTargetAsync(ShellPageSession pageSession, string target, JsonElement? parameters, CancellationToken cancellationToken)
+    {
+        if (shell.IsPlayerDetailOpen) await shell.ClosePlayerDetailAsync();
+        if (shell.IsQueueOpen) await shell.CloseQueueAsync();
+        if (shell.CurrentSession is { IsSettingsOpen: true }) await shell.GoBackAsync();
+
+        if (!ReferenceEquals(shell.CurrentPage, pageSession))
+            await shell.ActivatePageAsync(pageSession);
+
+        if (AsAdapter(pageSession.Page) is { } adapter)
+        {
+            bool handled = await adapter.TryOpenDebugTargetAsync(target, parameters, cancellationToken);
+            if (!handled) throw DebugApiException.NotFound($"Unsupported target '{target}' for page '{pageSession.Page.Id}'.");
+        }
     }
 
     private async Task OpenSettingsDomainAsync(string domain, string? section, CancellationToken cancellationToken)

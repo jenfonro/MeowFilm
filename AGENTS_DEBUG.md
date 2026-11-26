@@ -104,7 +104,7 @@ node scripts/debug.mjs --endpoint http://127.0.0.1:19777 caps
 ```
 
 - `status` 核对 5 个事实：`pid`（确认为刚启动的新构建）、`windowReady: true`、`runtimeConnected: true`、`sessionId`、`dataRoot`。
-- `caps` 查看本端真实支持的 `targets[]`、`actions[]`、`diagnostics[]` 与 `platformFeatures`。例如 iOS 无 `nav/forward`、`novel.shelf`、`settings.media-controls` 与桌面专属通用设置区，调用会明确返回 `501 UNSUPPORTED_ON_PLATFORM`，不是接口坏了。
+- `caps` 查看本端真实支持的 `targets[]`、`actions[]`、`diagnostics[]` 与 `platformFeatures`。例如 iOS 无 `nav/forward`、`history`（对应 iOS `library.film`／`library.novel`）、`settings.media-controls` 与桌面专属通用设置区，调用会明确返回 `501 UNSUPPORTED_ON_PLATFORM`，不是接口坏了。
 
 ## 四、标准排查手法（先拿现场事实，不靠猜）
 

@@ -105,6 +105,8 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
     internal string DebugRoute => route;
     internal FilmPlaybackSession DebugFilmPlayback => filmPlayback;
     internal FilmPlayback DebugNativeFilmPlayback => nativeFilmPlayback;
+    internal FilmLibrary FavoritesLibrary => library;
+    internal event EventHandler? HistoryInvalidated;
     public ObservableCollection<NavigationItem> Navigation { get; }
     public FrameworkElement View => view;
     public FrameworkElement SettingsView => settings;

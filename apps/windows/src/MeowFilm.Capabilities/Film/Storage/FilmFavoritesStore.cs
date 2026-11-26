@@ -27,7 +27,7 @@ internal static class FilmFavoritesStore
             SELECT favorite_id,keyword,title,poster,score,text_badge,subtitle,
                    content_kind,year,tmdb_kind,tmdb_id,douban_kind,douban_id,added_at_ms
             FROM film_favorites
-            ORDER BY position, favorite_id
+            ORDER BY added_at_ms DESC, position DESC, favorite_id ASC
             """,
             ReadRow).ToArray();
 

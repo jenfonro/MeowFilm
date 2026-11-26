@@ -27,7 +27,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 
 ## 导航、页头与全局表面
 
-- 只有一套统一侧栏、内容入口、设置入口和 App 页头。顶部媒体入口按 App 注册顺序显示音乐、影视、小说，进入各 owner 声明的第一条首页；下方导航及“我的”分组仅展示当前 owner，不重复首页入口。能力仍由原实例持有，媒体选择不重建业务服务。`NavigationItem.IconData` 可提供线框图标；未提供时沿用符号字形。`IDesktopSidebarSource` 可贡献 owner 自有的侧栏内容及有界设置请求，切换时仅挂载当前贡献，设置请求只接受当前 owner，窗口关闭退订；小说据此显示真实启用书源及导入入口。
+- 只有一套统一侧栏、内容入口、设置入口和 App 页头。侧栏顶部分割线上方按 App 注册顺序显示音乐、影视、小说及公共页面入口（如「历史」`HistoryPage`），点击媒体入口进入各 owner 声明的第一条首页，点击公共页面入口激活对应 `IDesktopPage` 且不改变分割线下方的当前模块导航、「我的」分组或模块侧栏贡献；下方导航及“我的”分组仅展示当前活跃模块 owner，不重复首页入口。能力仍由原实例持有，媒体或公共页选择不重建业务服务。`NavigationItem.IconData` 与 `IDesktopPage.IconData` 可提供线框图标；未提供时沿用符号字形。`IDesktopPage.TryGoBackAsync` 允许当前公共页在退出回历史栈前先消化内部二级视图返回。`IDesktopSidebarSource` 可贡献 owner 自有的侧栏内容及有界设置请求，切换模块时仅挂载当前贡献，设置请求只接受当前 owner，窗口关闭退订；小说据此显示真实启用书源及导入入口。
 - 侧栏条目按 owner 与 route 保留 `ShellNavigationEntry` 身份，实际元数据变化通过属性通知更新；普通导航集合、分组集合及其 `CollectionViewSource` 由壳稳定持有。初次订阅、`Navigation` 源替换及当前源的成员通知只同步对应 owner；普通页面请求开始和完成不触发侧栏内容同步。隐藏 owner 的变化更新其条目，实际切换 owner 时才更新可视投影；成员增删或移动不重建未变化的条目、分组与组头操作，展示切换不临时清空选中项。
 - `ShellWindow` 持有窗口标题、系统按钮、导航／搜索请求及其 owner；`DesktopPageHeader` 是可独立复用的贡献呈现组件，拥有标题、插槽、动作的视觉布局、源订阅及操作生命周期。同一返回／前进控件树进入组件 `Navigation`，同一搜索框进入 `Center`，不复制控件或搜索状态。当前页面通过 `IDesktopHeaderSource` 提供标题、有类型操作和内容插槽，普通能力主视图的搜索准入用于登记全局搜索 owner。
 - 普通页面保留 64 DIP 页头内容边界（`CaptionDragRegion` 与 `HeaderChrome` 高度 64 DIP，右上角紧凑三键 `WindowCaptionButtons` 纵向中心统一对齐在 `Y = 32 DIP`）；`HeaderChrome` 右侧为自绘三键留出 136 DIP 安全右边距，使品牌标识、导航、搜索、通知／设置入口与右上角三键保持同一纵向中心。侧栏宽 216 DIP，正文顶距 22 DIP。公共组件按导航、标题、贡献动作测量剩余区域，搜索在其中居中，最高宽 430、高 34 DIP，窄窗口缩小而不覆盖窗口按钮或贡献动作。设置左邻铃铛仅呈现图标，当前不接通知业务／未读状态，现有操作通知保持原样。播放队列位于页头下方（`Canvas.ZIndex="30"`），模态层（`Canvas.ZIndex="40"`）与自绘三键（`Canvas.ZIndex="45"`）依次叠加。

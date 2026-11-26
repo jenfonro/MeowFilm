@@ -17,7 +17,7 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 - 小说侧边栏显示“首页”及全部已添加书源，观察 `NovelFeature.sources` 的既有顺序和名称，
   可发现的源直接选择同一个 `NovelDiscoverySession`，停用或没有发现能力的源禁用。
   不另建来源仓库。旧首页的书架／历史切换和独立分类入口已移除，不迁移或增加兼容入口；
-  原有本地书架／历史数据及独立业务保持不变，独立书架页面入口尚未接入。
+  本地书架与阅读历史收口在底栏“我的”页的「小说」标签（`NovelPersonalLibraryViewController`／`NovelPersonalCategoryViewController`，复用 `PosterHomeViewController` 固定呈现「我的收藏」与「历史记录」两栏，点击书卡统一进入 `NovelDetailViewController`）。
 - `NovelDiscoverySession` 拥有当前来源、栏目列表与各栏首页状态，`NovelCategoryModel`
   拥有栏目详情页的子分类选择、页码与书籍列表。隐藏取消在途请求，返回恢复未完成工作；
   revision 变化失效旧代，关闭等待已接受请求排空。来源失效不自动跳到另一个源，错误通过统一
@@ -144,6 +144,7 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 | `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelDiscoverySession.swift` | A1/A2/A10：首页分类栏目映射、按需准入与并发限制、`NovelCategoryModel` 筛选分页、代次与取消 |
 | `native/MeowKit/Sources/MeowNovelFeature/Artwork/NovelImageStore.swift` | A1/A2/A10：受信封面与正文图片缓存、并发合并、后台解码与释放排空 |
 | `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelBrowsePages.swift` | A1/A2/A10：`NovelHomeViewController`、`NovelCategoryViewController`、统一搜索与错误浮层 |
+| `native/MeowKit/Sources/MeowNovelFeature/Library/UI/NovelPersonalLibraryViewController.swift` | A1/A3/A10：「我的 → 小说」两栏收藏与历史记录页、二级网格与清空历史确认 |
 | `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelBookCell.swift` | A1/A2/A10：搜索书籍列表单元、动态字体与受信封面消费者 |
 | `native/MeowKit/Sources/MeowNovelFeature/Detail/NovelDetailViewController.swift` | A1/A3/A6：详情与真实目录选择／刷新／顺倒序 |
 | `native/MeowKit/Sources/MeowNovelFeature/Reader/NovelReaderViewController.swift` | A1/A6/A7/A9/A10：原生阅读、高清图、换源与购章确认组件 |

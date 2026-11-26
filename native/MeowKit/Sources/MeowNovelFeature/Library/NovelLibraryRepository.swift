@@ -154,6 +154,11 @@ enum NovelLibraryRepository {
         }
     }
 
+    static func clearHistory(_ db: SQLiteConnection) throws {
+        try db.execute("DELETE FROM novel_progress")
+        try db.execute("DELETE FROM novel_books WHERE on_shelf=0")
+    }
+
     static func record(_ incoming: NovelBookStorageRecord, anchor: NovelAnchor, _ db: SQLiteConnection) throws -> String {
         let existing = try findExisting(incoming, db)
         var next = incoming

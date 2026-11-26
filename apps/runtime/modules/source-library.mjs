@@ -797,7 +797,7 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       await disk?.close();
       memoryReaderValues?.clear();
       states.clear(); images.clear(); imageBytes = 0;
-      if (native) { records.clear(); nativeConfiguration.clear(); sourceLeases.clear(); privateRecords.clear(); }
+      if (native) { records.clear(); nativeConfiguration.clear(); privateRecords.clear(); }
       require(results.every(result => result.status === 'fulfilled'), 'SOURCE_CLEANUP');
     },
   };

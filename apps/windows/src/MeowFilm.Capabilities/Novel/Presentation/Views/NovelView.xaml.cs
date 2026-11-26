@@ -17,8 +17,6 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private readonly NovelWork saves = new();
     private readonly NovelPresentation.VisibilityWatch visibility;
     private CatalogBrowseView? browseView;
-    private NovelShelfView? shelfView;
-    private NovelHistoryView? historyView;
     private NovelBookView? bookView;
     private bool automatic, disposed;
     private Task automaticOperation = Task.CompletedTask;
@@ -78,8 +76,6 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         {
             NovelCapability.HomeRoute => "小说",
             NovelCapability.DataRoute => "栏目详情",
-            NovelCapability.ShelfRoute => "书架",
-            NovelCapability.HistoryRoute => "阅读历史",
             NovelCapability.BookRoute => "书籍详情",
             _ => ""
         },
@@ -200,30 +196,12 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
                             BodyHost.Content = bookView;
                             RestoreScrollPosition(bookView.ScrollHost, module.Route);
                             break;
-                        case NovelCapability.ShelfRoute:
-                            shelfView ??= new NovelShelfView(module);
-                            BodyHost.Content = shelfView;
-                            break;
-                        case NovelCapability.HistoryRoute:
-                            historyView ??= new NovelHistoryView(module);
-                            BodyHost.Content = historyView;
-                            break;
                     }
                 }
             }
 
-            switch (module.Route)
-            {
-                case NovelCapability.BookRoute:
-                    bookView?.Present(module.Session);
-                    break;
-                case NovelCapability.ShelfRoute:
-                    shelfView?.Present();
-                    break;
-                case NovelCapability.HistoryRoute:
-                    historyView?.Present();
-                    break;
-            }
+            if (module.Route == NovelCapability.BookRoute)
+                bookView?.Present(module.Session);
             renderedDataKey = module.Route == NovelCapability.DataRoute ? currentDataKey : "";
         }
         renderedRoute = module.Route;

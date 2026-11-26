@@ -653,6 +653,12 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         return container
     }
 
+    func debugToggleFavorite() async throws -> Bool {
+        try await library.toggle(detail.item)
+        renderFavorite()
+        return library.contains(detail.item)
+    }
+
     func inset(_ child: UIView, horizontal: CGFloat = 16) -> UIView {
         let container = UIView()
         container.addSubview(child)

@@ -67,12 +67,16 @@ extension MeowfilmAssembly {
 
     func leaveFilm(allowSystemOwner: Bool = true) async throws {
         let models = allowSystemOwner ? [filmPlayback].compactMap { $0 } : filmModels
+        let hadModels = !models.isEmpty
         for model in models {
             await model.close(allowSystemOwner: allowSystemOwner)
             guard model.canLeave || allowSystemOwner && model.hasSystemOwner else {
                 throw model.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")
             }
             if filmPlayback === model { filmPlayback = nil }
+        }
+        if hadModels, !closed {
+            filmHistory?.reload()
         }
     }
 }

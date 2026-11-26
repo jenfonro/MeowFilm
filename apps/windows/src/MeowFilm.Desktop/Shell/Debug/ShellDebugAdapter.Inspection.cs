@@ -45,7 +45,11 @@ internal sealed partial class ShellDebugAdapter
         }
         else if (currentPage is { Page: var page })
         {
-            target = page is IDesktopSearchPage ? "search" : page.Id;
+            if (page is IDesktopSearchPage) target = "search";
+            else if (AsAdapter(page) is { } pageAdapter &&
+                     pageAdapter.DescribeCurrentTarget(settingsOpen: false, out _) is { Length: > 0 } pageTarget)
+                target = pageTarget;
+            else target = page.Id;
         }
         else if (settingsOpen)
         {

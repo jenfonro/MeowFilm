@@ -19,6 +19,7 @@ public enum FilmLibraryError: Error, Equatable, LocalizedError {
 @MainActor
 public final class FilmLibrary: ObservableObject {
     @Published public private(set) var favorites: Set<FilmItemIdentity> = []
+    @Published public private(set) var favoriteItems: [FilmItem] = []
     @Published public private(set) var loadError: FilmLibraryError?
     private var database: SQLiteDatabase?
     private var changes: [FilmItemIdentity: UUID] = [:]
@@ -30,9 +31,12 @@ public final class FilmLibrary: ObservableObject {
         guard self.database == nil, !closed else { return }
         do {
             let records = try await database.snapshot { try FilmFavoriteRepository.load($0) }
-            let saved = try Self.projectIdentities(records)
+            let projected = try Self.projectRecords(records)
             guard !closed else { return }
-            self.database = database; favorites = saved; loadError = nil
+            self.database = database
+            favorites = projected.identities
+            favoriteItems = projected.items
+            loadError = nil
         } catch {
             if Self.isCorruption(error) {
                 loadError = .corruptedData
@@ -68,15 +72,32 @@ public final class FilmLibrary: ObservableObject {
         let record = Self.makeRecord(item: item, entry: entry)
         changes[identity] = ticket
         let added: Bool
+        let updatedRecords: [FilmFavoriteRecord]?
         if let database {
-            added = try await database.transaction { db in
-                try FilmFavoriteRepository.toggle(record, db)
+            let txResult = try await database.transaction { db -> (Bool, [FilmFavoriteRecord]) in
+                let isAdded = try FilmFavoriteRepository.toggle(record, db)
+                let all = try FilmFavoriteRepository.load(db)
+                return (isAdded, all)
             }
+            added = txResult.0
+            updatedRecords = txResult.1
         } else {
             added = !favorites.contains(identity)
+            updatedRecords = nil
         }
         if changes[identity] == ticket, !closed {
-            if added { favorites.insert(identity) } else { favorites.remove(identity) }
+            if let updatedRecords, let projected = try? Self.projectRecords(updatedRecords) {
+                favorites = projected.identities
+                favoriteItems = projected.items
+            } else if added {
+                favorites.insert(identity)
+                let projectedItem = Self.projectItem(record)
+                favoriteItems.removeAll { $0.identity == identity }
+                favoriteItems.insert(projectedItem, at: 0)
+            } else {
+                favorites.remove(identity)
+                favoriteItems.removeAll { $0.identity == identity }
+            }
             changes[identity] = nil
         }
         return added
@@ -88,34 +109,52 @@ public final class FilmLibrary: ObservableObject {
         catch { DebugRuntime.logError(.storage, sub: "film.library", event: "flush.error", error: error) }
     }
 
-    private static func projectIdentities(_ records: [FilmFavoriteRecord]) throws -> Set<FilmItemIdentity> {
+    private static func projectRecords(_ records: [FilmFavoriteRecord]) throws -> (identities: Set<FilmItemIdentity>, items: [FilmItem]) {
         var result = Set<FilmItemIdentity>()
+        var items: [FilmItem] = []
+        items.reserveCapacity(records.count)
         for rec in records {
-            let tmdb: FilmTmdbRef? = if let tk = rec.tmdbKind, let tid = rec.tmdbID {
-                FilmTmdbRef(kind: tk, id: tid)
-            } else { nil }
-            let douban: FilmDoubanRef? = if let dk = rec.doubanKind, let did = rec.doubanID {
-                FilmDoubanRef(kind: dk, id: did)
-            } else { nil }
-            let entry = FilmEntry(
-                targetId: rec.favoriteID,
-                keyword: rec.keyword,
-                title: rec.title,
-                subtitle: rec.subtitle,
-                poster: rec.poster,
-                score: rec.score,
-                textBadge: rec.textBadge,
-                kind: rec.contentKind,
-                year: rec.year,
-                tmdb: tmdb,
-                douban: douban
-            )
-            let sourceID = tmdb != nil ? "tmdb" : douban != nil ? "douban" : "favorite"
-            let itemID = tmdb.map { String($0.id) } ?? douban?.id ?? rec.favoriteID
-            let identity = FilmItemIdentity(sourceID: sourceID, itemID: itemID, kind: rec.contentKind, entry: entry)
-            guard result.insert(identity).inserted else { throw FilmLibraryError.corruptedData }
+            let item = projectItem(rec)
+            guard result.insert(item.identity).inserted else { throw FilmLibraryError.corruptedData }
+            items.append(item)
         }
-        return result
+        return (result, items)
+    }
+
+    private static func projectItem(_ rec: FilmFavoriteRecord) -> FilmItem {
+        let tmdb: FilmTmdbRef? = if let tk = rec.tmdbKind, let tid = rec.tmdbID {
+            FilmTmdbRef(kind: tk, id: tid)
+        } else { nil }
+        let douban: FilmDoubanRef? = if let dk = rec.doubanKind, let did = rec.doubanID {
+            FilmDoubanRef(kind: dk, id: did)
+        } else { nil }
+        let entry = FilmEntry(
+            targetId: rec.favoriteID,
+            keyword: rec.keyword,
+            title: rec.title,
+            subtitle: rec.subtitle,
+            poster: rec.poster,
+            score: rec.score,
+            textBadge: rec.textBadge,
+            kind: rec.contentKind,
+            year: rec.year,
+            tmdb: tmdb,
+            douban: douban
+        )
+        let sourceID = tmdb != nil ? "tmdb" : douban != nil ? "douban" : "favorite"
+        let itemID = tmdb.map { String($0.id) } ?? douban?.id ?? rec.favoriteID
+        let posterURL = FilmPlaybackPresentation.artwork(.string(rec.poster))
+        return FilmItem(
+            sourceID: sourceID,
+            id: itemID,
+            title: rec.title,
+            kind: rec.contentKind,
+            posterURL: posterURL,
+            largePosterURL: posterURL,
+            score: rec.score,
+            subtitle: rec.subtitle,
+            entry: entry
+        )
     }
 
     private static func makeRecord(item: FilmItem, entry: FilmEntry) -> FilmFavoriteRecord {

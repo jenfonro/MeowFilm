@@ -86,7 +86,12 @@ public final class NovelHomeViewController: PosterHomeViewController {
         "\(book.installationId)\u{1F}\(book.bookUrl)"
     }
 
-    static func makePosterCard(_ book: NovelBook, feature: NovelFeature) -> PosterCatalogCard {
+    static func makePosterCard(
+        _ book: NovelBook,
+        feature: NovelFeature,
+        textBadge: String = "",
+        label: String = ""
+    ) -> PosterCatalogCard {
         let source = try? feature.source(for: book)
         let coverKey: NovelImageStore.Key? = if let source, !book.coverUrl.isEmpty {
             NovelImageStore.Key(source: source, bookUrl: book.bookUrl, url: book.coverUrl, kind: "cover")
@@ -123,6 +128,8 @@ public final class NovelHomeViewController: PosterHomeViewController {
         return PosterCatalogCard(
             id: cardID(for: book),
             title: book.name,
+            textBadge: textBadge,
+            label: label,
             accessibilityIdentifier: "novel.poster.\(book.id)",
             artworkIdentity: coverKey.map { AnyHashable($0) },
             artwork: artwork

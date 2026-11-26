@@ -345,6 +345,7 @@ internal sealed class ShellModuleCoordinator
         if (_current is not { } current) return;
         if (_shell.CurrentPage is { } currentPage)
         {
+            if (await currentPage.Page.TryGoBackAsync()) { _shell.ApplyPresentation(); return; }
             if (!_shell.History.CanGoBack ||
                 !string.Equals(_shell.History.LastPageId, currentPage.Page.Id, StringComparison.Ordinal))
             {

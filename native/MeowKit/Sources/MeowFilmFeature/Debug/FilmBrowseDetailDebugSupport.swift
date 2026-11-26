@@ -617,6 +617,12 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
             episodeListVisible = listMode
             renderSeason()
             return .object(["episodeListVisible": .bool(episodeListVisible)])
+        case "setting.action":
+            if request.params["command"]?.stringValue == "toggle_favorite" {
+                let fav = try await debugToggleFavorite()
+                return .object(["favorite": .bool(fav), "id": .string(detail.item.id)])
+            }
+            throw DebugAPIError.invalidArgument("Unsupported setting.action on FilmDetailViewController")
         default:
             throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on FilmDetailViewController")
         }

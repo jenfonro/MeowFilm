@@ -172,6 +172,10 @@ public class CatalogHomeSection : INotifyPropertyChanged
     public bool ShowStatus => !HasItems && !ShowLoading;
     public bool CanRetry => state is CatalogSectionState.Failed or CatalogSectionState.Cancelled;
     public bool CanRefresh => state != CatalogSectionState.Loading;
+    public virtual bool ShowRefresh => true;
+    public virtual string ActionText => "";
+    public virtual bool ShowAction => false;
+    public virtual bool CanAction => false;
     public string StatusText => state switch
     {
         CatalogSectionState.Failed => customFailedText ?? defaultFailedText,
@@ -225,6 +229,8 @@ public class CatalogHomeSection : INotifyPropertyChanged
         Changed(nameof(ShowLoading));
         Changed(nameof(CanRetry));
         Changed(nameof(CanRefresh));
+        Changed(nameof(ShowAction));
+        Changed(nameof(CanAction));
         Changed(nameof(StatusText));
     }
 
@@ -270,6 +276,10 @@ public class CatalogDataSection : INotifyPropertyChanged
     public bool ShowStatus => !HasItems && !ShowLoading;
     public bool CanRetry => !HasItems && state is CatalogSectionState.Failed or CatalogSectionState.Cancelled;
     public bool CanRefresh => state != CatalogSectionState.Loading;
+    public virtual bool ShowRefresh => true;
+    public virtual string ActionText => "";
+    public virtual bool ShowAction => false;
+    public virtual bool CanAction => false;
     public bool ShowPageAction => HasItems &&
         (hasMore || state is CatalogSectionState.Loading or CatalogSectionState.Failed or CatalogSectionState.Cancelled);
     public bool CanPage => HasItems && (hasMore || ReloadPending) &&
@@ -379,6 +389,8 @@ public class CatalogDataSection : INotifyPropertyChanged
         Changed(nameof(ShowLoading));
         Changed(nameof(CanRetry));
         Changed(nameof(CanRefresh));
+        Changed(nameof(ShowAction));
+        Changed(nameof(CanAction));
         Changed(nameof(ShowPageAction));
         Changed(nameof(CanPage));
         Changed(nameof(PageActionText));
@@ -402,6 +414,7 @@ public interface ICatalogBrowseController : INotifyPropertyChanged
     bool CanImportHome { get; }
     CatalogDataSection BrowseActiveData { get; }
     string DataRefreshAutomationName { get; }
+    string DataActionAutomationName => "";
     string DataListAutomationName { get; }
     string DataRetryAutomationName { get; }
     string DataMoreAutomationName { get; }
@@ -409,11 +422,13 @@ public interface ICatalogBrowseController : INotifyPropertyChanged
     void OnSectionAdmitted(CatalogHomeSection section);
     Task OpenSectionAsync(CatalogHomeSection section);
     Task RefreshSectionAsync(CatalogHomeSection section);
+    Task InvokeSectionActionAsync(CatalogHomeSection section, FrameworkElement owner) => Task.CompletedTask;
     Task RetrySectionAsync(CatalogHomeSection section);
     Task RetryHomeAsync();
     Task ImportHomeAsync(FrameworkElement owner);
     Task ActivateCardAsync(ICatalogCardDisplay card);
     Task RefreshDataAsync();
+    Task InvokeDataActionAsync(FrameworkElement owner) => Task.CompletedTask;
     Task RetryDataAsync();
     Task LoadMoreDataAsync();
     Task SelectDataFilterAsync(CatalogFilterOption option);

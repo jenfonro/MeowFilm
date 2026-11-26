@@ -451,6 +451,12 @@ internal sealed partial class FilmDebugAdapter
                 await page.BrowseLineAsync(line);
                 return BuildFilmPlayerSnapshot();
             }
+            case "toggle_favorite":
+            {
+                var page = capability.Playback ?? throw DebugApiException.InvalidState("No active film playback page.");
+                await page.ToggleFavoriteAsync();
+                return new { favorite = page.IsFavorite, title = page.Title };
+            }
             default:
                 return null;
         }
