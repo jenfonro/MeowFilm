@@ -8,9 +8,9 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopImmersiveSource, IDesktopSidebarSource, IDebugModuleAdapterSource
+public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopImmersiveSource, IDesktopSidebarSource, IDebugModuleAdapterSource, ICatalogBrowseController
 {
-    public const string HomeRoute = "novel-home", CategoriesRoute = "novel-categories", ShelfRoute = "novel-shelf", HistoryRoute = "novel-history", BookRoute = "novel-book", ReaderRoute = "novel-reader";
+    public const string HomeRoute = "novel-home", DataRoute = "novel-data", ShelfRoute = "novel-shelf", HistoryRoute = "novel-history", BookRoute = "novel-book", ReaderRoute = "novel-reader";
     private readonly NovelWork work = new();
     private CancellationTokenSource presentation = new();
     private readonly Dictionary<string, NovelBookSession> sessions = [];
@@ -34,7 +34,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         Search = new(Sources, Rules);
         Navigation = [new(HomeRoute, "小说", "\uE8F1", ShowInSidebar: false)
             { IconData = "M12,5 C9,3 6,3 3,4 L3,19 C6,18 9,18 12,20 C15,18 18,18 21,19 L21,4 C18,3 15,3 12,5 L12,20" },
-            new(CategoriesRoute, "分类", "\uE8A9"),
+            new(DataRoute, "栏目详情", "\uE8F1", ShowInSidebar: false),
             new(ShelfRoute, "书架", "\uE82D"),
             new(HistoryRoute, "阅读历史", "\uE81C"),
             new(BookRoute, "书籍详情", "\uE8F1", ShowInSidebar: false), new(ReaderRoute, "阅读", "\uE8F1", ShowInSidebar: false)];
@@ -68,6 +68,8 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
     public event EventHandler? SettingsRequested;
     internal void RequestSettings() => SettingsRequested?.Invoke(this, EventArgs.Empty);
+    private void RaisePropertyChanged(string propertyName) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     private void LibraryChanged(object? sender, EventArgs e)
     {
         if (e is not NovelLibraryChangeEventArgs change || change.Rules)
@@ -158,11 +160,18 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         token.ThrowIfCancellationRequested();
         if (changed) CancelPresentation();
         if (!ReferenceEquals(Session, session)) { Session?.Cancel(); Session = session; }
-        if (next is not (HomeRoute or CategoriesRoute)) CancelDiscovery();
-        route = next; Publish();
-        if (route is HomeRoute or CategoriesRoute && discoveryNeedsReload)
-            await LoadDiscoveryAsync(ExploreSource, ExploreKind, reset: !HasLoadedKindsFor(ExploreSource) || discoveryInvalidated, token);
-        if (route == BookRoute && Session is { Chapters.Count: 0 }) await Session.LoadMetadataAsync(token);
+        if (next != HomeRoute) RetireSectionRequests();
+        if (next != DataRoute) RetireDataRequest();
+        if (next is not (HomeRoute or DataRoute)) CancelDiscovery();
+        route = next;
+        PublishBrowseProperties();
+        Publish();
+        if (route == HomeRoute)
+            await EnsureHomeLoadedAsync(token);
+        else if (route == DataRoute)
+            await EnsureDataLoadedAsync(token);
+        else if (route == BookRoute && Session is { Chapters.Count: 0 })
+            await Session.LoadMetadataAsync(token);
     }
     public Task SearchAsync(string query, CancellationToken token) => Search.StartAsync(query, token);
     public async Task ReceiveBookAsync(NovelBook book, CancellationToken token)
@@ -183,22 +192,6 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         }
         if (!ReferenceEquals(Session, session)) { Session?.Cancel(); Session = session; }
     }
-    internal async Task SetBookShelfAsync(NovelBook book, bool add, CancellationToken token = default)
-    {
-        await Library.InitializeAsync(token);
-        string identity = await Rules.IdentityAsync(book, token);
-        token.ThrowIfCancellationRequested();
-        var entry = Library.Find(book, identity);
-        if (entry is not null)
-        {
-            if (entry.OnShelf != add) await Library.SetShelfAsync(entry.BookId, add, token);
-        }
-        else if (add)
-        {
-            await Library.ToggleShelfAsync(new(Guid.NewGuid().ToString("N"), identity, book), token);
-        }
-        Notify(add ? "已加入书架" : "已移出书架");
-    }
     internal Task<NovelChapter[]> FormatChaptersForDisplayAsync(IReadOnlyList<NovelChapter> chapters, CancellationToken token = default) =>
         Session is { } session
             ? session.FormatChaptersForDisplayAsync(chapters, token)
@@ -215,11 +208,6 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         token.ThrowIfCancellationRequested();
         ReceiveEntry(entry);
         return NavigateAsync(BookRoute, Session, token);
-    }
-    internal async Task OpenBookDirectAsync(NovelBook book, CancellationToken token)
-    {
-        await ReceiveBookAsync(book, token);
-        await NavigateAsync(BookRoute, Session, token);
     }
     internal async Task StartReadingDirectAsync(CancellationToken token)
     {
@@ -268,9 +256,42 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         catch (OperationCanceledException) { }
         catch (Exception error) { Notify(error is StorageException ? "小说数据保存失败，原记录已保留" : "小说操作失败，请重试"); }
     }
-    public string CaptureNavigationLocation() => (route is BookRoute or ReaderRoute) && Session is not null ? route + ":" + Session.Entry.BookId : route;
+    public string CaptureNavigationLocation()
+    {
+        if (route is BookRoute or ReaderRoute && Session is not null)
+            return route + ":" + Session.Entry.BookId;
+        if (route == DataRoute && ExploreSource is { } source && DataSections.Contains(ActiveNovelData))
+            return $"{DataRoute}:{source.InstallationId}:{ActiveNovelData.Key}";
+        return route;
+    }
     public async Task RestoreNavigationAsync(string location, CancellationToken token)
     {
+        if (location.StartsWith(DataRoute + ":", StringComparison.Ordinal))
+        {
+            string rest = location[(DataRoute.Length + 1)..];
+            int split = rest.IndexOf(':');
+            string key = rest;
+            if (split > 0)
+            {
+                string sourceId = rest[..split];
+                key = rest[(split + 1)..];
+                await Sources.EnsureReadyAsync(token);
+                var restoredSource = Sources.Sources.FirstOrDefault(s => string.Equals(s.InstallationId, sourceId, StringComparison.Ordinal))
+                    ?? throw new ArgumentException("Retired novel source location.");
+                SelectExploreSource(restoredSource, resetScroll: false);
+            }
+            if (!HasLoadedKindsFor(ExploreSource))
+                await LoadHomeKindsAsync(token);
+            var target = DataSections.FirstOrDefault(d => string.Equals(d.Key, key, StringComparison.Ordinal));
+            if (target is not null && !ReferenceEquals(ActiveNovelData, target))
+            {
+                RetireDataRequest();
+                ActiveNovelData = target;
+                PublishBrowseProperties();
+            }
+            await NavigateAsync(DataRoute, token);
+            return;
+        }
         int separator = location.IndexOf(':');
         if (separator >= 0)
         {
@@ -318,7 +339,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     {
         Notice = text;
         if (DesktopVisual.IsVisible(settings)) settings.PostNotice(text); else view.PostNotice(text);
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Notice)));
+        RaisePropertyChanged(nameof(Notice));
     }
     private void Publish()
     {
@@ -326,8 +347,8 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         bool immersiveChanged = publishedImmersive != IsImmersive;
         publishedRoute = route;
         publishedImmersive = IsImmersive;
-        if (routeChanged) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Route)));
-        if (immersiveChanged) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsImmersive)));
+        if (routeChanged) RaisePropertyChanged(nameof(Route));
+        if (immersiveChanged) RaisePropertyChanged(nameof(IsImmersive));
         view.Present();
     }
     public string OperationErrorText(Exception error) => "小说内容暂时无法加载";
@@ -341,7 +362,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         foreach (var session in sessions.Values) session.Cancel();
         try
         {
-            await Task.WhenAll(work.PauseAsync(), Search.PrepareShutdownAsync(), Rules.PrepareShutdownAsync(),
+            await Task.WhenAll(work.PauseAsync(), DrainDiscoveryAsync(), Search.PrepareShutdownAsync(), Rules.PrepareShutdownAsync(),
                 Task.WhenAll(sessions.Values.Select(s => s.PrepareShutdownAsync()).Concat(retiringSessions.ToArray())),
                 settings.DrainAsync(), view.DrainSavesAsync(), view.DrainImagesAsync(), Sources.PrepareShutdownAsync());
         }
@@ -363,13 +384,9 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         // A save error is not a release error. Conversely, a failed image lease
         // release must not authorize deleting a still-owned data root.
         await Task.WhenAll(view.DrainImagesAsync(), Rules.DisposeAsync().AsTask());
-        disposed = true; presentation.Cancel(); presentation.Dispose(); view.Dispose(); settings.Dispose();
+        disposed = true; presentation.Cancel(); presentation.Dispose(); sectionConcurrency.Dispose(); view.Dispose(); settings.Dispose();
         foreach (var session in sessions.Values) session.Changed -= SessionChanged;
         sessions.Clear();
         Sources.Changed -= SourcesChanged; Sources.ApplyFailed -= SourceApplyFailed; Library.Changed -= LibraryChanged;
     }
-}
-public sealed record NovelKind(string Title, string Url)
-{
-    public override string ToString() => Title;
 }

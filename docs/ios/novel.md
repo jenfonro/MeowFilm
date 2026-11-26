@@ -6,26 +6,29 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 
 ## 使用与 owner
 
-- 底栏“小说”直接显示发现首页，分类合并在首页。保留 App 原有“菜单＋搜索小说”头部，
-  头部下方为频道及当前频道的单选子项；频道按书源顺序排列，首次选择第一个可用入口。
-  `FilterTagsView` 在溢出时提供展开箭头，展开覆盖列表而不增加列表顶部占位；选择、外点和
-  离开页面均收起，被遮挡内容暂时退出无障碍遍历。不推测题材／字数等组合请求参数。
+- 底栏“小说”直接显示 `NovelHomeViewController`，与影视首页共用 `MeowUI/Catalog/` 下的
+  `PosterHomeViewController`、`PosterCategoryViewController` 与 `PosterCatalogCell`，
+  不设独立分类页。保留 App 原有“菜单＋搜索小说”头部；首页每一横向海报栏目对应当前书源
+  `exploreKinds` 返回的分类分组（空 URL 标题归拢其后连续 URL 项，无分组标题的 URL 项
+  各自独立成栏），首屏批次与滚动进入视口按需准入栏目并限制并发请求数。点击栏目标题进入
+  `NovelCategoryViewController`（`novel.data`），多子分类栏目在顶部展示 `FilterTagsView`
+  “分类”筛选行，单入口栏目隐藏筛选区；默认首项直接复用首页已加载的第 1 页书籍，切换筛选项
+  或上拉／点击“加载更多”按页码请求并去重。不推测题材／字数等组合请求参数。
 - 小说侧边栏显示“首页”及全部已添加书源，观察 `NovelFeature.sources` 的既有顺序和名称，
   可发现的源直接选择同一个 `NovelDiscoverySession`，停用或没有发现能力的源禁用。
   不另建来源仓库。旧首页的书架／历史切换和独立分类入口已移除，不迁移或增加兼容入口；
   原有本地书架／历史数据及独立业务保持不变，独立书架页面入口尚未接入。
-- `NovelDiscoverySession` 拥有当前来源、频道、入口、页码与结果；无 URL 的标题形成分组，
-  同名分组保留独立身份，仅 URL 项保留入口且不显示原始请求模板。切换目标清除旧结果，
-  同目标刷新只在频道及第一页全部成功后替换；分页去重且成功后才推进，失败可重试同一页。
-  隐藏取消实际请求，返回保留已完成选择并恢复未完成工作；revision 变化失效旧代，关闭等待
-  接受的请求排空。来源失效不自动跳到另一个源，错误通过统一重试浮层呈现；
-  关闭错误后仍可重新打开浮层重试失败页。`NovelFeature` 只发布最新一次来源清单刷新，
-  防止启动与页面并发读取时迟到清单回退已接受的 revision。
-- 首页与搜索结果共用 `NovelBookCell`：74×104 封面、书名、作者、单行简介、原始字数、
-  来源名／实际候选来源数量，章节可覆盖在封面底部。字段缺失不编造、不额外逐本抓详情，
-  普通文字 Regular，使用 Dynamic Type 和自适应行高，封面经 `NovelImageStore` 后台解码、
-  按稳定资源身份缓存并合并并发请求；滚出视口只归还视图借用，滚回直接命中缓存零重复 IPC，
-  页面卸载或源版本变化时沿受信释放路径排空。
+- `NovelDiscoverySession` 拥有当前来源、栏目列表与各栏首页状态，`NovelCategoryModel`
+  拥有栏目详情页的子分类选择、页码与书籍列表。隐藏取消在途请求，返回恢复未完成工作；
+  revision 变化失效旧代，关闭等待已接受请求排空。来源失效不自动跳到另一个源，错误通过统一
+  重试浮层呈现；`NovelFeature` 只发布最新一次来源清单刷新，防止启动与页面并发读取时迟到
+  清单回退已接受的 revision。
+- 首页与栏目详情使用 `PosterCatalogCell` 海报卡片（封面走 `NovelImageStore` 受信图片通道，
+  无封面显示系统书籍占位图标），搜索结果使用 `NovelBookCell`（74×104 封面、书名、作者、
+  单行简介、原始字数、来源名／实际候选来源数量，章节可覆盖在封面底部）。字段缺失不编造、
+  不额外逐本抓详情，普通文字 Regular，封面经 `NovelImageStore` 后台解码、按稳定资源身份缓存并
+  合并并发请求；滚出视口只归还视图借用，滚回直接命中缓存零重复 IPC，页面卸载或源版本变化时
+  沿受信释放路径排空。
   搜索支持音乐／影视／小说三个目标，各结果分类保留独立消费者，返回详情后保留原查询。
   搜索逐源记录失败与页码，来源 revision 变化取消旧代；隐藏查询返回后才恢复。
   `NovelSourceClient` 在搜索／发现页内隔离不可消费的书籍，保留健康兄弟；空页正常结束追加，
@@ -137,10 +140,11 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 | `native/MeowKit/Sources/MeowNovelFeature/Reading/NovelReadingSession.swift` | A3/A5/A6/A9/A10：正文、目录、换源、购章、保存 |
 | `native/MeowKit/Sources/MeowNovelFeature/Reading/NovelAnchorResolver.swift` | A5/A6：内容改变后锚点核验与比例回退 |
 | `native/MeowKit/Sources/MeowNovelFeature/Reading/NovelReaderLayout.swift` | A6/A7：CoreText 四模式布局、字重、文字／图片锚点 |
-| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelDiscoverySession.swift` | A1/A2/A10：发现频道、来源与入口选择、刷新／分页、代次和取消 |
+| `native/MeowKit/Sources/MeowUI/Catalog/PosterCatalogCell.swift`、`PosterHomeViewController.swift`、`PosterCategoryViewController.swift` | A1/A10：影视与小说共享的海报卡片、横向栏目首页与网格筛选详情页 |
+| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelDiscoverySession.swift` | A1/A2/A10：首页分类栏目映射、按需准入与并发限制、`NovelCategoryModel` 筛选分页、代次与取消 |
 | `native/MeowKit/Sources/MeowNovelFeature/Artwork/NovelImageStore.swift` | A1/A2/A10：受信封面与正文图片缓存、并发合并、后台解码与释放排空 |
-| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelBrowsePages.swift` | A1/A2/A10：合并发现首页、搜索、标签展开与错误浮层 |
-| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelBookCell.swift` | A1/A2/A10：共用书籍信息、动态字体与受信封面消费者 |
+| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelBrowsePages.swift` | A1/A2/A10：`NovelHomeViewController`、`NovelCategoryViewController`、统一搜索与错误浮层 |
+| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelBookCell.swift` | A1/A2/A10：搜索书籍列表单元、动态字体与受信封面消费者 |
 | `native/MeowKit/Sources/MeowNovelFeature/Detail/NovelDetailViewController.swift` | A1/A3/A6：详情与真实目录选择／刷新／顺倒序 |
 | `native/MeowKit/Sources/MeowNovelFeature/Reader/NovelReaderViewController.swift` | A1/A6/A7/A9/A10：原生阅读、高清图、换源与购章确认组件 |
 | `native/MeowKit/Sources/MeowNovelFeature/Settings/NovelSettingsPages.swift` | A1/A7：小说设置、完整排版与背景 |

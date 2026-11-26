@@ -13,7 +13,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities;
 
 public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopGeneralSettingsSource,
-    IDebugModuleAdapterSource, IRuntimeRecoveryScope
+    IDebugModuleAdapterSource, IRuntimeRecoveryScope, ICatalogBrowseController
 {
     internal const string HomeRoute = "film-home";
     internal const string DataRoute = "film-data";
@@ -122,7 +122,20 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         filmPlayback.Position, filmPlayback.Duration);
     public bool IsHome => route == HomeRoute;
     public bool IsData => route == DataRoute;
+    public bool IsBrowse => route is HomeRoute or DataRoute;
     public bool IsPlayback => route == PlaybackRoute;
+    System.Collections.IEnumerable ICatalogBrowseController.BrowseSections => Sections;
+    bool ICatalogBrowseController.HasSections => true;
+    bool ICatalogBrowseController.ShowHomeLoading => false;
+    bool ICatalogBrowseController.ShowHomeStatus => false;
+    string ICatalogBrowseController.HomeStatusText => "";
+    bool ICatalogBrowseController.CanRetryHome => false;
+    bool ICatalogBrowseController.CanImportHome => false;
+    public CatalogDataSection BrowseActiveData => ActiveData;
+    string ICatalogBrowseController.DataRefreshAutomationName => "刷新影片数据";
+    string ICatalogBrowseController.DataListAutomationName => "影片列表";
+    string ICatalogBrowseController.DataRetryAutomationName => "重试加载影片数据";
+    string ICatalogBrowseController.DataMoreAutomationName => "加载更多影片";
     public string Heading => route switch
     {
         HomeRoute => "影视",

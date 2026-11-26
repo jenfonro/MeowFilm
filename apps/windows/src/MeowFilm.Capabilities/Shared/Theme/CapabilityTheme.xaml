@@ -7,4 +7,13 @@
  </ControlTemplate>
  <Style x:Key="Capability.Text" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}"/>
  <Style x:Key="Capability.Muted" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.MutedText}"/>
+ <Style x:Key="Capability.ShelfArrow" TargetType="Button">
+  <Setter Property="Width" Value="48" />
+  <Setter Property="Height" Value="48" />
+  <Setter Property="Padding" Value="0" />
+  <Setter Property="Margin" Value="8,0" />
+  <Setter Property="CornerRadius" Value="24" />
+  <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+  <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+ </Style>
 </ResourceDictionary>

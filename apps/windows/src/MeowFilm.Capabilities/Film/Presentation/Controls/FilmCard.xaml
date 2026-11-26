@@ -1,24 +1,25 @@
 <UserControl xmlns:desktop="using:MeowFilm.Desktop" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmCard" x:Name="Card" HorizontalAlignment="Left" VerticalAlignment="Top">
- <Button x:Name="HitButton" Background="Transparent" BorderThickness="0" Padding="0" MinWidth="0" MinHeight="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Top" UseSystemFocusVisuals="True" Template="{StaticResource MeowFilm.ContentButtonTemplate}" Click="Activate_Click" AutomationProperties.Name="{x:Bind Item.Title}" local:CardMotion.Enabled="True">
+ <Button x:Name="HitButton" Background="Transparent" BorderThickness="0" Padding="0" MinWidth="0" MinHeight="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Top" UseSystemFocusVisuals="True" Template="{StaticResource MeowFilm.ContentButtonTemplate}" Click="Activate_Click" AutomationProperties.Name="{x:Bind CardTitle}" local:CardMotion.Enabled="True">
   <StackPanel>
    <local:AspectRatioDecorator AspectRatio="176,264">
     <Grid>
-    <Grid x:Name="PosterFrame" local:CardClip.Radius="14" RenderTransformOrigin=".5,0" local:CardMotion.HoverScale="0.03">
-     <local:FilmPlaybackPoster x:Name="Poster" Address="{x:Bind Item.Poster}" RenderTransformOrigin=".5,.5" local:CardMotion.HoverScale="0.05" />
-     <local:FilmHoverShade x:Name="HoverShade" Opacity="0" local:CardMotion.HoverOpacity="True" />
-     <local:FilmPlayMark Opacity="0" local:CardMotion.HoverOpacity="True" />
-     <Border x:Name="ScoreBadge" Background="{ThemeResource Film.Brush.ScoreBadge}" Width="32" Height="32" CornerRadius="16" Margin="8" HorizontalAlignment="Right" VerticalAlignment="Top" local:CardMotion.HoverScale="0.1" Visibility="{x:Bind Item.HasScore, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
-      <TextBlock x:Name="ScoreText" Text="{x:Bind Item.Score}" Foreground="{ThemeResource Film.Brush.BadgeForeground}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" />
-     </Border>
-    </Grid>
+     <Grid x:Name="PosterFrame" Background="{ThemeResource MeowFilm.Brush.InputSurface}" local:CardClip.Radius="14" RenderTransformOrigin=".5,0" local:CardMotion.HoverScale="0.03">
+      <local:FilmPlaybackPoster x:Name="Poster" Address="{x:Bind PosterAddress}" Visibility="{x:Bind FilmPosterVisibility}" RenderTransformOrigin=".5,.5" local:CardMotion.HoverScale="0.05" />
+      <local:NovelImage x:Name="BookPoster" Sources="{x:Bind NovelSources}" Book="{x:Bind NovelBook}" ShowPlaceholder="True" Visibility="{x:Bind NovelPosterVisibility}" RenderTransformOrigin=".5,.5" local:CardMotion.HoverScale="0.05" />
+      <local:FilmHoverShade x:Name="HoverShade" Opacity="0" local:CardMotion.HoverOpacity="True" />
+      <local:FilmPlayMark x:Name="PlayMark" Opacity="0" Visibility="{x:Bind PlayMarkVisibility}" local:CardMotion.HoverOpacity="True" />
+      <Border x:Name="ScoreBadge" Background="{ThemeResource Film.Brush.ScoreBadge}" Width="32" Height="32" CornerRadius="16" Margin="8" HorizontalAlignment="Right" VerticalAlignment="Top" local:CardMotion.HoverScale="0.1" Visibility="{x:Bind ScoreBadgeVisibility}">
+       <TextBlock x:Name="ScoreText" Text="{x:Bind CardScore}" Foreground="{ThemeResource Film.Brush.BadgeForeground}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" />
+      </Border>
+     </Grid>
      <Border x:Name="TextBadge" Background="{ThemeResource Film.Brush.TextBadge}" CornerRadius="8" Padding="8,2" Margin="8" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="{x:Bind TextBadgeVisibility}">
-      <TextBlock x:Name="TextBadgeText" Text="{x:Bind Item.TextBadge}" Foreground="{ThemeResource Film.Brush.BadgeForeground}" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis" />
+      <TextBlock x:Name="TextBadgeText" Text="{x:Bind CardTextBadge}" Foreground="{ThemeResource Film.Brush.BadgeForeground}" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis" />
      </Border>
     </Grid>
    </local:AspectRatioDecorator>
-   <TextBlock x:Name="TitleText" Text="{x:Bind Item.Title}" Margin="0,9,0,0" Height="21" FontSize="15" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
-   <Border x:Name="SiteLabel" Background="{ThemeResource Film.Brush.SiteBackground}" BorderBrush="{ThemeResource Film.Brush.SiteBorder}" Margin="0,3,0,0" Padding="8,2" CornerRadius="8" BorderThickness="1" HorizontalAlignment="Center" Visibility="{x:Bind Item.HasSubtitle, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
-    <TextBlock x:Name="Subtitle" Text="{x:Bind Item.Subtitle}" Foreground="{ThemeResource Film.Brush.CardSubtitle}" FontSize="10" LineHeight="15" LineStackingStrategy="BlockLineHeight" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
+   <TextBlock x:Name="TitleText" Text="{x:Bind CardTitle}" Margin="0,9,0,0" Height="21" FontSize="15" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
+   <Border x:Name="SiteLabel" Background="{ThemeResource Film.Brush.SiteBackground}" BorderBrush="{ThemeResource Film.Brush.SiteBorder}" Margin="0,3,0,0" Padding="8,2" CornerRadius="8" BorderThickness="1" HorizontalAlignment="Center" Visibility="{x:Bind SubtitleVisibility}">
+    <TextBlock x:Name="Subtitle" Text="{x:Bind CardSubtitle}" Foreground="{ThemeResource Film.Brush.CardSubtitle}" FontSize="10" LineHeight="15" LineStackingStrategy="BlockLineHeight" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
    </Border>
   </StackPanel>
  </Button>

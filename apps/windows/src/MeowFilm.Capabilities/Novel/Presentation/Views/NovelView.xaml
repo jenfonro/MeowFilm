@@ -3,6 +3,7 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:desktop="using:MeowFilm.Desktop">
  <Grid>
+  <ContentControl x:Name="BrowseHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" Visibility="Collapsed"/>
   <ContentControl x:Name="BodyHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
   <Grid x:Name="ReaderSurface" Visibility="Collapsed">
    <ContentControl x:Name="ReaderSurfaceHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>

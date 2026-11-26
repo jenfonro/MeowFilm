@@ -88,7 +88,7 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 
 禁止将大量跨子域文件平铺堆塞在单一目录，UI 模块按清晰职责建立子目录归位：
 
-- `MeowUI/`：`Accounts/`、`Appearance/`、`Artwork/`、`Controls/`、`Layout/`、`List/`、`Management/`、`Navigation/`、`Presentation/`、`Search/`、`Settings/`
+- `MeowUI/`：`Accounts/`、`Appearance/`、`Artwork/`、`Catalog/`、`Controls/`、`Layout/`、`List/`、`Management/`、`Navigation/`、`Presentation/`、`Search/`、`Settings/`
 - `MeowFilmFeature/`：`Home/`、`Detail/`、`Player/`、`Search/UI/`、`Settings/UI/{Core,Sources,Playback,Rules,Pan}/`、`Debug/`（保留 `Catalog/`、`Library/`、`Pan/`、`Playback/`、`Rules/`、`Settings/`、`SettingsSources/`、`Sources/` 非 UI 业务目录）
 - `MeowMusicFeature/`：`Appearance/`、`Artwork/`、`Catalog/{Browse,Channels,DailyStyle}/`、`Library/UI/`、`Playback/{Artwork,Cache,FM,FullPlayer,Lyrics,MiniPlayer,Model,Presentation,Queue,Sources}/`、`Presentation/`、`Search/UI/`、`Settings/{State,Pages,Accounts,Sources,Search}/`、`Debug/`
 - `MeowNovelFeature/`：`Artwork/`、`Browse/`、`Detail/`、`Reader/`、`Settings/`、`Web/`、`Debug/`（保留 `Library/`、`Reading/`、`Runtime/`）

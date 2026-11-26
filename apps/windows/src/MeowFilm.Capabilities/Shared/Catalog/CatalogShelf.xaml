@@ -1,10 +1,10 @@
-<UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmShelf" Background="Transparent">
+<UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.CatalogShelf" Background="Transparent">
  <Grid>
   <ProgressRing x:Name="LoadingRing" x:Load="{x:Bind Section.ShowLoading, Mode=OneWay, FallbackValue=False}" IsActive="True" />
-  <local:Shelf x:Name="Cards" Margin="24,0" MinimumCardWidth="144" ItemsSource="{x:Bind Section.Items, Mode=OneWay}" HorizontalOffset="{x:Bind Section.HorizontalOffset, Mode=TwoWay}" NavigationButtonStyle="{StaticResource Film.ShelfArrow}" Visibility="{x:Bind Section.HasItems, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+  <local:Shelf x:Name="Cards" Margin="24,0" MinimumCardWidth="144" ItemsSource="{x:Bind Section.Items, Mode=OneWay}" HorizontalOffset="{x:Bind Section.HorizontalOffset, Mode=TwoWay}" NavigationButtonStyle="{StaticResource Capability.ShelfArrow}" Visibility="{x:Bind Section.HasItems, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
    <local:Shelf.CardTemplate>
-    <DataTemplate x:DataType="local:FilmCardItem">
-     <local:FilmCard MaxWidth="176" Activated="Card_Activated" />
+    <DataTemplate x:DataType="local:ICatalogCardDisplay">
+     <local:FilmCard MaxWidth="176" CardActivated="Card_Activated" />
     </DataTemplate>
    </local:Shelf.CardTemplate>
   </local:Shelf>

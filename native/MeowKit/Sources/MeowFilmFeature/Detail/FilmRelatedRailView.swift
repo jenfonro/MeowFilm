@@ -60,7 +60,7 @@ final class FilmRelatedRailView: UIView, UICollectionViewDelegate, UICollectionV
 
     func apply(items: [FilmItem], viewportWidth: CGFloat, theme: PageTheme) {
         self.theme = theme
-        itemWidth = FilmPosterMetrics(viewportWidth: max(240, viewportWidth)).width
+        itemWidth = PosterCatalogMetrics(viewportWidth: max(240, viewportWidth)).width
         emptyLabel.isHidden = !items.isEmpty
         emptyLabel.textColor = UIColor(theme.muted)
         collectionView.isHidden = items.isEmpty
@@ -71,7 +71,7 @@ final class FilmRelatedRailView: UIView, UICollectionViewDelegate, UICollectionV
     }
 
     func updateViewportWidth(_ width: CGFloat) {
-        let next = FilmPosterMetrics(viewportWidth: max(240, width)).width
+        let next = PosterCatalogMetrics(viewportWidth: max(240, width)).width
         guard abs(itemWidth - next) > 0.5 else { return }
         itemWidth = next
         layout.invalidateLayout()

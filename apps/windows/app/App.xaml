@@ -14,9 +14,8 @@
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Shared/Accounts/AccountSettingsTheme.xaml" />
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Music/Presentation/MusicTheme.xaml" />
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Settings/FilmSettingsTheme.xaml" />
-                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Controls/FilmShelfStyles.xaml" />
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Controls/FilmPlayerStyles.xaml" />
-                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Novel/Presentation/Controls/NovelDiscoveryTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Novel/Presentation/NovelTheme.xaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>

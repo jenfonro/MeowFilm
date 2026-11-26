@@ -13,8 +13,9 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     private static let catProbeTimeout: TimeInterval = 180
     private let baseURL: URL
     private let timeout: TimeInterval
-    private let state = RuntimeHTTPState()
+    private let state: RuntimeHTTPState
     private let session: URLSession
+    private let imageSession: URLSession?
     private let eventConfiguration: URLSessionConfiguration
     private let delegateQueue: OperationQueue?
 
@@ -31,6 +32,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         self.baseURL = baseURL
         self.timeout = timeout
         self.delegateQueue = delegateQueue
+        state = RuntimeHTTPState(hasImageSession: true)
         configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
@@ -42,8 +44,11 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         eventConfiguration = configuration.copy() as! URLSessionConfiguration
         // Events have an idle timeout, but no whole-observation RPC deadline.
         eventConfiguration.timeoutIntervalForResource = 0
-        session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state),
+        let imageConfiguration = configuration.copy() as! URLSessionConfiguration
+        session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state, isImage: false),
                              delegateQueue: delegateQueue)
+        imageSession = URLSession(configuration: imageConfiguration, delegate: RuntimeHTTPDelegate(state: state, isImage: true),
+                                  delegateQueue: delegateQueue)
     }
 
     /// Rule execution starts after an unbounded shared queue wait. Its Node
@@ -52,12 +57,14 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         baseURL = parent.baseURL
         timeout = 0
         delegateQueue = parent.delegateQueue
+        state = RuntimeHTTPState(hasImageSession: false)
         let configuration = parent.eventConfiguration.copy() as! URLSessionConfiguration
         configuration.timeoutIntervalForRequest = 0
         configuration.timeoutIntervalForResource = 0
         eventConfiguration = configuration
-        session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state),
+        session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state, isImage: false),
                              delegateQueue: delegateQueue)
+        imageSession = nil
     }
 
     public var isClosed: Bool { state.isClosed }
@@ -127,7 +134,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         let data: Data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 state.start(continuation: continuation) {
-                    let task = session.dataTask(with: outgoing)
+                    let transport = imageSession ?? session
+                    let task = transport.dataTask(with: outgoing)
                     task.delegate = read
                     read.install(task, continuation: continuation, timeout: timeout)
                     task.resume()
@@ -255,7 +263,10 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     func invalidate() {
-        if state.beginClose() { session.invalidateAndCancel() }
+        if state.beginClose() {
+            session.invalidateAndCancel()
+            imageSession?.invalidateAndCancel()
+        }
     }
 
     private func request(method: String, path: String, body: Data? = nil, raw: Bool = false,
@@ -425,11 +436,16 @@ private final class RuntimeHTTPRequest: @unchecked Sendable {
 private final class RuntimeHTTPState: @unchecked Sendable {
     private let lock = NSLock()
     private var closed = false
-    private var invalidated = false
+    private var rpcInvalidated = false
+    private var imageInvalidated: Bool
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var closureWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var events: [UUID: RuntimeHTTPEventConnection] = [:]
     private var rulesTransport: RuntimeHTTPClient?
+    init(hasImageSession: Bool = true) {
+        imageInvalidated = !hasImageSession
+    }
+    private var isFullyInvalidated: Bool { rpcInvalidated && imageInvalidated }
     var isClosed: Bool {
         lock.lock(); defer { lock.unlock() }
         return closed
@@ -494,26 +510,28 @@ private final class RuntimeHTTPState: @unchecked Sendable {
     func endEvents(_ id: UUID) {
         lock.lock()
         events.removeValue(forKey: id)
-        let pending = invalidated && events.isEmpty ? waiters : []
-        if invalidated && events.isEmpty { waiters.removeAll() }
+        let pending = isFullyInvalidated && events.isEmpty ? waiters : []
+        if isFullyInvalidated && events.isEmpty { waiters.removeAll() }
         lock.unlock()
         for waiter in pending { waiter.resume() }
     }
     func waitForInvalidation() async {
         await withCheckedContinuation { continuation in
             lock.lock()
-            if invalidated && events.isEmpty { lock.unlock(); continuation.resume(); return }
+            if isFullyInvalidated && events.isEmpty { lock.unlock(); continuation.resume(); return }
             waiters.append(continuation)
             lock.unlock()
         }
     }
-    func didInvalidate() {
+    func didInvalidate(isImage: Bool) {
         lock.lock()
-        closed = true; invalidated = true
+        closed = true
+        if isImage { imageInvalidated = true } else { rpcInvalidated = true }
+        let fullyInvalidated = isFullyInvalidated
         let closing = Array(closureWaiters.values)
         closureWaiters.removeAll()
-        let pending = events.isEmpty ? waiters : []
-        if events.isEmpty { waiters.removeAll() }
+        let pending = fullyInvalidated && events.isEmpty ? waiters : []
+        if fullyInvalidated && events.isEmpty { waiters.removeAll() }
         lock.unlock()
         for waiter in closing { waiter.resume() }
         for waiter in pending { waiter.resume() }
@@ -617,9 +635,15 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
 
 private final class RuntimeHTTPDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     let state: RuntimeHTTPState
-    init(state: RuntimeHTTPState) { self.state = state }
+    let isImage: Bool
+    init(state: RuntimeHTTPState, isImage: Bool) {
+        self.state = state
+        self.isImage = isImage
+    }
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
-    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) { state.didInvalidate() }
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+        state.didInvalidate(isImage: isImage)
+    }
 }

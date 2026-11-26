@@ -7,7 +7,7 @@ import MeowNovelFeature
 @MainActor
 enum MeowfilmSidebarContent {
     case music(selectedPage: MeowfilmPrimaryPage)
-    case novel(discovery: NovelDiscoverySession, home: () -> Void)
+    case novel(discovery: NovelDiscoverySession)
     case film(settings: FilmSettingsModel?)
 }
 
@@ -161,12 +161,8 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
                                                        selected: selected == .recommend))
             upper.addArrangedSubview(navigationButton(title: "频道", symbol: "square.grid.2x2", page: .channels,
                                                        selected: selected == .channels))
-        case .novel(_, let home):
-            let button = UIButton(type: .system)
-            configureButton(button, title: "首页", symbol: "house")
-            button.accessibilityIdentifier = "app.sidebar.home"
-            button.addAction(UIAction { [weak self] _ in home(); self?.onDismiss?() }, for: .touchUpInside)
-            upper.addArrangedSubview(button)
+        case .novel:
+            upper.addArrangedSubview(navigationButton(title: "首页", symbol: "house", page: .novel, selected: true))
             upper.addArrangedSubview(books)
             renderBooks()
         case .film(let model):
@@ -281,7 +277,7 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         switch content {
         case .music:
             break
-        case .novel(let discovery, _):
+        case .novel(let discovery):
             discovery.feature.$sources.dropFirst().receive(on: RunLoop.main)
                 .sink { [weak self] _ in self?.renderBooks() }.store(in: &observations)
             discovery.$selectedSource.dropFirst().receive(on: RunLoop.main)
@@ -324,7 +320,7 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     }
 
     private func renderBooks() {
-        guard case .novel(let discovery, _) = content else { return }
+        guard case .novel(let discovery) = content else { return }
         let sources = discovery.feature.sources
         let available = Set(discovery.availableSources.map(\.id))
         books.isHidden = sources.isEmpty

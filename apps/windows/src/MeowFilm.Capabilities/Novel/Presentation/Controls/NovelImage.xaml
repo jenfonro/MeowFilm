@@ -1,7 +1,7 @@
 <Grid x:Class="MeowFilm.Capabilities.NovelImage"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
- <Border x:Name="PlaceholderSurface" Style="{StaticResource Novel.Discovery.Surface}" Visibility="Collapsed">
+ <Border x:Name="PlaceholderSurface" Style="{StaticResource Novel.Surface}" Visibility="Collapsed">
   <TextBlock Text="暂无封面" Style="{StaticResource Capability.Muted}" FontSize="12"
              HorizontalAlignment="Center" VerticalAlignment="Center"
              TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>

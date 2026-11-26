@@ -1,14 +1,13 @@
 using System.ComponentModel;
-using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
 using MeowFilm.Desktop;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
 
 public partial class FilmView : UserControl, IDesktopHeaderSource
 {
     private readonly FilmCapability module;
+    private readonly CatalogBrowseView browseView;
     private IDisposable? visibility;
     public FilmCapability Module => module;
     internal FilmPlaybackView PlaybackViewControl => PlaybackView;
@@ -16,7 +15,9 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
     public FilmView(FilmCapability module)
     {
         this.module = module ?? throw new ArgumentNullException(nameof(module));
+        browseView = new CatalogBrowseView(module);
         InitializeComponent();
+        BrowseHost.Content = browseView;
         Loaded += (_, _) =>
         {
             module.PropertyChanged -= OnModulePropertyChanged;
@@ -56,75 +57,11 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
             HeaderChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private async void More_Click(object sender, RoutedEventArgs e)
+    private async void Playback_RecommendationRequested(object? sender, FilmCardActivatedEventArgs e)
     {
-        if (sender is Button { Tag: FilmHomeSection section })
-            await OpenPlaybackAsync(() => module.OpenDataAsync(section));
-    }
-
-    private async void Shelf_ItemActivated(object? sender, FilmCardActivatedEventArgs e)
-    {
-        if (sender is FilmShelf)
-            await OpenPlaybackAsync(() => module.OpenPlaybackAsync(e.Item));
-    }
-
-    private async void Shelf_RetryRequested(object? sender, EventArgs e)
-    {
-        if (sender is FilmShelf { DataContext: FilmHomeSection section })
-            await module.RetrySectionAsync(section);
-    }
-
-    private async void HomeRefresh_Click(object sender, RoutedEventArgs e)
-    {
-
-        if (sender is Button { DataContext: FilmHomeSection section })
-            await module.RefreshSectionAsync(section);
-    }
-
-    private async void DataRefresh_Click(object sender, RoutedEventArgs e)
-    {
-
-        await module.RefreshDataAsync();
-    }
-
-    private async void DataRetry_Click(object sender, RoutedEventArgs e)
-    {
-
-        await module.RetryDataAsync();
-    }
-
-    private async void DataPageAction_Click(object sender, RoutedEventArgs e)
-    {
-
-        await module.LoadMoreDataAsync();
-    }
-
-    private async void DataCard_Activated(object? sender, FilmCardActivatedEventArgs e)
-    {
-        if (sender is FilmCard)
-            await OpenPlaybackAsync(() => module.OpenPlaybackAsync(e.Item));
-    }
-
-    private async void Playback_RecommendationRequested(object? sender, FilmCardActivatedEventArgs e) =>
-        await OpenPlaybackAsync(() => module.OpenRecommendationAsync(e.Item));
-
-    private async Task OpenPlaybackAsync(Func<Task> action)
-    {
-        try { await action(); }
+        try { await module.OpenRecommendationAsync(e.Item); }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
         catch (Exception error) { Notices.Message = module.OperationErrorText(error); }
-    }
-
-    private async void Filter_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is ToggleButton { Tag: FilmFilterOption option } button)
-        {
-            try { await module.SelectDataFilterAsync(option); }
-            catch (OperationCanceledException) { }
-            catch (ObjectDisposedException) { }
-            catch (Exception error) { Notices.Message = module.OperationErrorText(error); }
-            finally { button.IsChecked = option.IsSelected; }
-        }
     }
 }

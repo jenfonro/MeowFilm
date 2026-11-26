@@ -111,7 +111,7 @@ final class MeowfilmDebugHost: DebugControlDelegate, @unchecked Sendable {
             "music.daily", "music.fm", "music.library", "music.favorites",
             "music.history", "music.archives", "music.playlist", "music.player", "music.queue",
             "film.home", "film.data", "film.detail", "film.playback",
-            "novel.home", "novel.categories", "novel.book", "novel.reader",
+            "novel.home", "novel.data", "novel.book", "novel.reader",
             "search",
             "settings.general", "settings.music", "settings.film", "settings.novel", "settings.cache"
         ]

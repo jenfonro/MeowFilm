@@ -485,6 +485,16 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 guard let self, let novel = self.assembly.novel else { return UIViewController() }
                 let page = NovelHomeViewController(feature: novel, themeProvider: appearance)
                 page.onSelect = { [weak self] in self?.showNovel($0) }
+                page.onSelectCategory = { [weak self] model in
+                    guard let self, let novel = self.assembly.novel else { return }
+                    let category = NovelCategoryViewController(
+                        model: model,
+                        feature: novel,
+                        themeProvider: appearance
+                    )
+                    category.onSelectItem = { [weak self] in self?.showNovel($0) }
+                    self.navigation.pushViewController(category, animated: true)
+                }
                 self.novelHome = page; return page
             },
             { [weak self] in
@@ -501,7 +511,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 case .film: content = .film(settings: self.assembly.filmSettings)
                 case .novel:
                     guard let home = self.novelHome else { return }
-                    content = .novel(discovery: home.discovery, home: { [weak self] in self?.main?.select(.novel) })
+                    content = .novel(discovery: home.discovery)
                 default: content = .music(selectedPage: main.selectedPage)
                 }
                 self.root.showSidebar(content: content)

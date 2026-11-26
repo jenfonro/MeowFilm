@@ -12,6 +12,7 @@ public sealed partial class FilmCapability
         {
             ActiveData = selected;
             Changed(nameof(ActiveData));
+            Changed(nameof(BrowseActiveData));
         }
         await NavigateAsync(DataRoute, cancellationToken);
     }
@@ -32,6 +33,7 @@ public sealed partial class FilmCapability
         this.route = route;
         Changed(nameof(IsHome));
         Changed(nameof(IsData));
+        Changed(nameof(IsBrowse));
         Changed(nameof(IsPlayback));
         Changed(nameof(Heading));
         if (route == PlaybackRoute)
@@ -142,9 +144,9 @@ public sealed partial class FilmCapability
         if (!DesktopVisual.IsVisible(view)) return;
         if (IsPlayback) ResumePresentation();
         else if (IsHome)
-            await Task.WhenAll(Sections.Where(section => section.State is not FilmSectionState.Ready)
+            await Task.WhenAll(Sections.Where(section => section.State is not CatalogSectionState.Ready)
                 .Select(section => StartSectionLoad(section, navigationGeneration, lifetime.Token)));
-        else if (IsData && ActiveData.State is not FilmSectionState.Ready)
+        else if (IsData && ActiveData.State is not CatalogSectionState.Ready)
             await StartDataLoad(ActiveData, navigationGeneration, NextDataLimit(ActiveData), lifetime.Token);
     }
 
@@ -158,6 +160,7 @@ public sealed partial class FilmCapability
         {
             ActiveData = selected;
             Changed(nameof(ActiveData));
+            Changed(nameof(BrowseActiveData));
         }
         if (NavigationRequested is not { } requested)
             return NavigateAsync(DataRoute, lifetime.Token);

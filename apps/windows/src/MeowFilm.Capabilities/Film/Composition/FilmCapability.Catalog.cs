@@ -39,10 +39,10 @@ public sealed partial class FilmCapability
             return;
         await StartDataLoad(section, navigationGeneration, NextDataLimit(section), lifetime.Token,
             replace: section.ReloadPending,
-            refresh: section.State is FilmSectionState.Failed or FilmSectionState.Cancelled);
+            refresh: section.State is CatalogSectionState.Failed or CatalogSectionState.Cancelled);
     }
 
-    internal async Task SelectDataFilterAsync(FilmFilterOption option)
+    internal async Task SelectDataFilterAsync(CatalogFilterOption option)
     {
         ArgumentNullException.ThrowIfNull(option);
         var section = ActiveData;
@@ -56,6 +56,22 @@ public sealed partial class FilmCapability
         if (!section.SelectFilter(option)) return;
         await StartDataLoad(section, generation, DataPageSize, lifetime.Token);
     }
+
+    void ICatalogBrowseController.OnSectionAdmitted(CatalogHomeSection section) { }
+    Task ICatalogBrowseController.OpenSectionAsync(CatalogHomeSection section) => OpenDataAsync(section as FilmHomeSection);
+    Task ICatalogBrowseController.RefreshSectionAsync(CatalogHomeSection section) =>
+        section is FilmHomeSection s ? RefreshSectionAsync(s) : Task.CompletedTask;
+    Task ICatalogBrowseController.RetrySectionAsync(CatalogHomeSection section) =>
+        section is FilmHomeSection s ? RetrySectionAsync(s) : Task.CompletedTask;
+    Task ICatalogBrowseController.RetryHomeAsync() => Task.CompletedTask;
+    Task ICatalogBrowseController.ImportHomeAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.CompletedTask;
+    Task ICatalogBrowseController.ActivateCardAsync(ICatalogCardDisplay card) =>
+        card is IFilmCardDisplay film ? OpenPlaybackAsync(film.ToCard()) : Task.CompletedTask;
+    Task ICatalogBrowseController.RefreshDataAsync() => RefreshDataAsync();
+    Task ICatalogBrowseController.RetryDataAsync() => RetryDataAsync();
+    Task ICatalogBrowseController.LoadMoreDataAsync() => LoadMoreDataAsync();
+    Task ICatalogBrowseController.SelectDataFilterAsync(CatalogFilterOption option) => SelectDataFilterAsync(option);
+    void ICatalogBrowseController.ReportBrowseError(string message) => OperationFailed?.Invoke(this, message);
 
     private Task StartSectionLoad(
         FilmHomeSection section,
