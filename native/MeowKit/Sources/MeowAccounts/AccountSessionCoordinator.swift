@@ -72,6 +72,46 @@ public actor AccountSessionCoordinator {
         try leases.allSatisfy { try replacementIsCurrent($0) }
     }
 
+    public func readOffline(for identity: AccountIdentity) throws -> AccountCredential? {
+        let state = snapshot(for: identity)
+        guard state.phase != .signingIn, state.phase != .removalPending else {
+            throw AccountSessionError.invalidState
+        }
+        if let entry = entries[identity], entry.phase == .signedIn || entry.phase == .requiresValidation {
+            return entry.record?.credential
+        }
+        do {
+            return try store.read(for: identity)?.credential
+        } catch {
+            throw AccountSessionError.storage(.sanitized(error))
+        }
+    }
+
+    @discardableResult
+    public func replaceOffline(for identity: AccountIdentity, credential: AccountCredential?) throws -> AccountSessionToken? {
+        let state = snapshot(for: identity)
+        guard state.phase != .signingIn else {
+            throw AccountSessionError.invalidState
+        }
+        guard let credential else {
+            try clear(identity, phase: .signedOut, failure: nil)
+            return nil
+        }
+        let replacement = CredentialRecord(credential: credential)
+        do {
+            try store.write(replacement, for: identity)
+        } catch {
+            let failure = CredentialStoreError.sanitized(error)
+            entries[identity] = Entry(generation: UUID(), phase: .failed, failure: .storage(failure), record: nil)
+            publish(identity)
+            throw AccountSessionError.storage(failure)
+        }
+        let generation = UUID()
+        entries[identity] = Entry(generation: generation, phase: .requiresValidation, failure: nil, record: replacement)
+        publish(identity)
+        return AccountSessionToken(identity: identity, generation: generation)
+    }
+
     public func snapshot(for identity: AccountIdentity) -> AccountSnapshot {
         guard let entry = entries[identity] else {
             return AccountSnapshot(identity: identity, generation: nil, phase: .signedOut)

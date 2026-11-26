@@ -537,6 +537,8 @@ export function createSourceRuntimeModule({
     'library.update': ['installationId', 'expectedRevision', 'patch'],
     'library.remove': ['installationId', 'expectedRevision'],
     'library.export': ['installationIds'],
+    'library.exportCookies': [],
+    'library.replaceCookies': ['items'],
     'library.invoke': ['installationId', 'revision', 'action', 'payload'],
     'library.image': ['installationId', 'revision', 'url', 'bookUrl', 'kind'],
     'library.releaseImage': ['reference'],
@@ -568,6 +570,9 @@ export function createSourceRuntimeModule({
       if (name === 'library.export') {
         requireValue(Array.isArray(params.installationIds));
         params.installationIds.forEach(identifier);
+      }
+      if (name === 'library.replaceCookies') {
+        requireValue(Array.isArray(params.items));
       }
       if (name === 'library.invoke') { identifier(params.action); requireValue(object(params.payload)); }
       if (name === 'library.image') {

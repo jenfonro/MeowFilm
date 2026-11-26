@@ -70,6 +70,19 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         catch (ObjectDisposedException) { }
     }
 
+    internal async Task RefreshAfterExternalImportAsync()
+    {
+        rulesLoaded = false;
+        metadataLoaded = false;
+        sourcesLoaded = false;
+        panInterception = null;
+        if (Active)
+        {
+            if (section == "pan") await panAccounts.ReloadAsync();
+            else await ActivateCurrentGuardedAsync();
+        }
+    }
+
     private async void View_Loaded(object sender, RoutedEventArgs e)
     {
         visibility?.Dispose();

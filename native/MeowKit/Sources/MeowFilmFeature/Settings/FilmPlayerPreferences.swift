@@ -115,6 +115,15 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
 
     @discardableResult
     public func set<Value>(_ keyPath: WritableKeyPath<FilmPlayerPreferences, Value>, _ value: Value) async -> Bool {
+        await mutate { $0[keyPath: keyPath] = value }
+    }
+
+    @discardableResult
+    public func replace(_ candidate: FilmPlayerPreferences) async -> Bool {
+        await mutate { $0 = candidate }
+    }
+
+    private func mutate(_ apply: @escaping @Sendable (inout FilmPlayerPreferences) -> Void) async -> Bool {
         guard !closed else { return false }
         let ticket = UUID(); epoch = ticket
         do {
@@ -122,13 +131,13 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
             if let database {
                 next = try await database.transaction { db in
                     var updated = try FilmPlayerPreferencesRepository.load(db)
-                    updated[keyPath: keyPath] = value
+                    apply(&updated)
                     try updated.normalize()
                     try FilmPlayerPreferencesRepository.save(updated, db)
                     return updated
                 }
             } else {
-                var local = preferences; local[keyPath: keyPath] = value; try local.normalize(); next = local
+                var local = preferences; apply(&local); try local.normalize(); next = local
             }
             if epoch == ticket, !closed { if preferences != next { preferences = next }; persistenceError = nil }
             return true

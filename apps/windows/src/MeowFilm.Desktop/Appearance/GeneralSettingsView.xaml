@@ -12,6 +12,9 @@
     <RadioButton Content="外观" Tag="appearance" IsChecked="True" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" KeyDown="Area_KeyDown"/>
     <RadioButton Content="首页数据源" Tag="sources" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" KeyDown="Area_KeyDown"/>
     <RadioButton Content="缓存控制" Tag="cache" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" KeyDown="Area_KeyDown"/>
+    <RadioButton x:Name="DataArea" Content="数据管理" Tag="data" Visibility="Collapsed"
+                 Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" KeyDown="Area_KeyDown"
+                 AutomationProperties.Name="数据管理"/>
     <RadioButton x:Name="WindowArea" Content="窗口行为" Tag="window" Visibility="Collapsed"
                  Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" KeyDown="Area_KeyDown"
                  AutomationProperties.Name="窗口行为"/>
@@ -36,6 +39,19 @@
     <StackPanel x:Name="HomeSourceContributions" Visibility="Collapsed"/>
     <StackPanel x:Name="CachePage" Visibility="Collapsed">
      <StackPanel x:Name="CacheContributions"/>
+    </StackPanel>
+    <StackPanel x:Name="DataManagementPage" Visibility="Collapsed">
+     <Border x:Name="DataTransferSection" Style="{StaticResource MeowFilm.SettingsSection}" Visibility="Collapsed">
+      <StackPanel>
+       <TextBlock Text="设置数据" Style="{StaticResource MeowFilm.SettingsSectionTitle}" Margin="0,0,0,8"/>
+       <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button x:Name="ImportSettingsButton" Content="导入全部数据"
+                Click="ImportSettings_Click" AutomationProperties.Name="导入全部数据"/>
+        <Button x:Name="ExportSettingsButton" Content="导出全部数据"
+                Click="ExportSettings_Click" AutomationProperties.Name="导出全部数据"/>
+       </StackPanel>
+      </StackPanel>
+     </Border>
      <Border x:Name="UserDataSection" Style="{StaticResource MeowFilm.SettingsSection}" Visibility="Collapsed">
       <StackPanel>
        <TextBlock Text="本机数据" Style="{StaticResource MeowFilm.SettingsSectionTitle}" Margin="0,0,0,8"/>

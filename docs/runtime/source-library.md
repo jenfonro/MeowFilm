@@ -19,6 +19,8 @@
 | `library.update` | `{installationId,expectedRevision,patch:{name?,group?,enabled?,enabledExplore?,order?}}` | `{source:SourceRecord}` |
 | `library.remove` | `{installationId,expectedRevision}` | `{removed:true}` |
 | `library.export` | `{installationIds:[string]}` | `{text:string}` |
+| `library.exportCookies` | `{}` | `{items:[{installationId,sourceUrl,profileSuffix,cookies}]}`（仅用于应用级设置明文导出） |
+| `library.replaceCookies` | `{items:[...]}` | `{applied:number}`（仅用于应用级设置导入离线覆盖对应书源 Cookie，保留既有 KV 存储） |
 | `library.invoke` | `{installationId,revision,action,payload}` | 动作原值 |
 
 普通 RPC 只消费各操作列出的参数，额外键不参与动作或触发未知参数拒绝；`library.update` 只修改表中的五个管理字段，不将其他 patch 成员写入来源身份、定义、私有数据或执行配置。身份、revision/CAS、取消和资源释放条件不变。

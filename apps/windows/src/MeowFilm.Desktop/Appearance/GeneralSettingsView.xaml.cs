@@ -10,18 +10,24 @@ public partial class GeneralSettingsView : UserControl
 {
     private readonly IDesktopAppearance appearance;
     private readonly IDesktopClosePreferences? closePreferences;
+    private readonly IDesktopDataManagement? dataManagement;
     private readonly Action? resetUserData;
     private string currentArea = "appearance";
     internal string CurrentArea => currentArea;
+    internal IDesktopDataManagement? DataManagement => dataManagement;
     public GeneralSettingsView(IDesktopAppearance appearance, IEnumerable<IDesktopGeneralSettingsSource> sources,
         IDesktopClosePreferences? closePreferences = null, IDesktopMediaControlSettings? mediaControls = null,
-        Action? resetUserData = null)
+        Action? resetUserData = null, IDesktopDataManagement? dataManagement = null)
     {
         this.appearance = appearance;
         this.closePreferences = closePreferences;
+        this.dataManagement = dataManagement;
         this.resetUserData = resetUserData;
         InitializeComponent();
-        UserDataSection.Visibility = resetUserData is null ? Visibility.Collapsed : Visibility.Visible;
+        DataArea.Visibility = dataManagement is not null || resetUserData is not null
+            ? Visibility.Visible : Visibility.Collapsed;
+        DataTransferSection.Visibility = dataManagement is not null ? Visibility.Visible : Visibility.Collapsed;
+        UserDataSection.Visibility = resetUserData is not null ? Visibility.Visible : Visibility.Collapsed;
         ThemeSelection.Presets = [new(AppearanceColors.DefaultColor, "浅蓝", AppearanceColors.DefaultColor)];
         WindowBehaviorPage.DataContext = closePreferences;
         Loaded += (_, _) =>
@@ -84,6 +90,7 @@ public partial class GeneralSettingsView : UserControl
         AppearancePage.Visibility = area == "appearance" ? Visibility.Visible : Visibility.Collapsed;
         HomeSourceContributions.Visibility = area == "sources" ? Visibility.Visible : Visibility.Collapsed;
         CachePage.Visibility = area == "cache" ? Visibility.Visible : Visibility.Collapsed;
+        DataManagementPage.Visibility = area == "data" ? Visibility.Visible : Visibility.Collapsed;
         WindowBehaviorPage.Visibility = area == "window" ? Visibility.Visible : Visibility.Collapsed;
         ShortcutsPage.Visibility = area == "shortcuts" ? Visibility.Visible : Visibility.Collapsed;
         SettingsScroller.ChangeView(null, 0, null, true);
@@ -147,6 +154,10 @@ public partial class GeneralSettingsView : UserControl
                 canEdit = closePreferences.CanEdit,
                 status = closePreferences.Status
             },
+            dataManagement = dataManagement is null ? null : new
+            {
+                isBusy = dataManagement.IsBusy
+            },
             canResetUserData = resetUserData is not null
         };
     }
@@ -204,6 +215,55 @@ public partial class GeneralSettingsView : UserControl
     private void CloseReload_Click(object sender, RoutedEventArgs e)
     {
         if (closePreferences is not null) _ = RunGuardedAsync(closePreferences.LoadAsync);
+    }
+    private void SetDataTransferEnabled(bool enabled)
+    {
+        ImportSettingsButton.IsEnabled = enabled;
+        ExportSettingsButton.IsEnabled = enabled;
+        ClearUserDataButton.IsEnabled = enabled;
+    }
+    private void ImportSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (dataManagement is null || dataManagement.IsBusy) return;
+        SetDataTransferEnabled(false);
+        _ = RunDataTransferAsync(
+            async () =>
+            {
+                bool completed = await dataManagement.ImportAsync(this);
+                if (completed && IsLoaded)
+                {
+                    ThemeSelection.RestoreSelection();
+                    if (closePreferences is not null) RestoreCloseBehavior();
+                    NoticeOutlet.Post(this, "已导入全部设置数据");
+                }
+            },
+            "导入失败，请检查 JSON 文件格式后重试");
+    }
+    private void ExportSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (dataManagement is null || dataManagement.IsBusy) return;
+        SetDataTransferEnabled(false);
+        _ = RunDataTransferAsync(
+            async () =>
+            {
+                bool completed = await dataManagement.ExportAsync(this);
+                if (completed && IsLoaded)
+                    NoticeOutlet.Post(this, "已导出全部设置数据");
+            },
+            "导出失败，请检查目标路径权限后重试");
+    }
+    private async Task RunDataTransferAsync(Func<Task> action, string errorMessage)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch
+        {
+            if (IsLoaded) NoticeOutlet.Post(this, errorMessage);
+        }
+        finally
+        {
+            if (IsLoaded) SetDataTransferEnabled(true);
+        }
     }
     private void ClearUserData_Click(object sender, RoutedEventArgs e) => resetUserData?.Invoke();
     private void CloseBehavior_Changed(object sender, SelectionChangedEventArgs e)

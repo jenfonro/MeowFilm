@@ -845,4 +845,118 @@ public final class FilmSettingsRepository: @unchecked Sendable {
             throw Self.translateSQLiteError(error)
         }
     }
+
+    public func exportPreferencesRecord() async throws -> FilmPreferencesRecord {
+        try await readPreferences().value ?? .defaults
+    }
+
+    public func saveImportedPreferences(
+        ruleOrder: [String]?,
+        panOrder: [String]?,
+        keywords: [String]?,
+        siteCleanKeywords: [String]?,
+        iosAutoPrepare: Bool?,
+        metadataViewProvider: String?
+    ) async throws {
+        let allowedRules = ["quality", "pan", "keyword"]
+        let allowedPans = ["yidong", "tianyi", "quark", "uc", "baidu"]
+        _ = try await updatePreferences { current in
+            var next = current ?? .defaults
+            if let ruleOrder {
+                var seen = Set<String>()
+                var ordered = ruleOrder.filter { allowedRules.contains($0) && seen.insert($0).inserted }
+                ordered += allowedRules.filter { !ordered.contains($0) }
+                next.ruleOrder = ordered
+            }
+            if let panOrder {
+                var seen = Set<String>()
+                var ordered = panOrder.filter { allowedPans.contains($0) && seen.insert($0).inserted }
+                ordered += allowedPans.filter { !ordered.contains($0) }
+                next.panOrder = ordered
+            }
+            if let keywords {
+                var seen = Set<Data>()
+                next.keywords = keywords
+                    .map(FilmInputWhitespace.trim)
+                    .filter { !$0.isEmpty && seen.insert(Data($0.lowercased().utf8)).inserted }
+            }
+            if let siteCleanKeywords {
+                var seen = Set<Data>()
+                next.siteCleanKeywords = siteCleanKeywords
+                    .map(FilmInputWhitespace.trim)
+                    .filter { !$0.isEmpty && seen.insert(Data($0.lowercased().utf8)).inserted }
+            }
+            if let iosAutoPrepare {
+                next.iosAutoPrepare = iosAutoPrepare
+            }
+            if let metadataViewProvider, ["tmdb", "douban"].contains(metadataViewProvider) {
+                next.metadataViewProvider = metadataViewProvider
+            }
+            return next
+        }
+    }
+
+    public func exportPanAccountRecords() async throws -> [ExportedPanAccountRecord] {
+        let snap = try await readPanAccounts()
+        guard snap.revision > 0 else { return [] }
+        return snap.accounts.map { r in
+            ExportedPanAccountRecord(
+                provider: r.provider,
+                cookie: r.cookie,
+                username: r.username,
+                password: r.password,
+                authorization: r.authorization,
+                refreshedAtMs: r.refreshedAtMs
+            )
+        }
+    }
+
+    public func replaceImportedPanAccounts(_ accounts: [String: ExportedPanAccountRecord?]) async {
+        for provider in PanProviderID.allCases {
+            if Task.isCancelled { return }
+            let allowed = Set(PanProvider.all.first { $0.id == provider }!.credentialFields)
+            let entry = accounts[provider.rawValue] ?? nil
+            let cookie: String? = if allowed.contains(.cookie), let c = entry?.cookie, !c.isEmpty,
+                !c.utf8.contains(0), !c.utf8.contains(10), !c.utf8.contains(13) { c } else { nil }
+            let username: String? = if allowed.contains(.username), let u = entry?.username, !u.isEmpty,
+                !u.utf8.contains(0), !u.utf8.contains(10), !u.utf8.contains(13) { u } else { nil }
+            let password: String? = if allowed.contains(.password), let p = entry?.password, !p.isEmpty,
+                !p.utf8.contains(0) { p } else { nil }
+            let authorization: String? = if allowed.contains(.authorization), let a = entry?.authorization, !a.isEmpty,
+                !a.utf8.contains(0), !a.utf8.contains(10), !a.utf8.contains(13) { a } else { nil }
+            let refreshedAtMs: Int64? = if allowed.contains(.refreshedAt), let r = entry?.refreshedAtMs,
+                (0...9_007_199_254_740_991).contains(r) { r } else { nil }
+            if let expected = try? await readPanRevisions(provider: provider.rawValue) {
+                _ = try? await replacePan(
+                    provider: provider.rawValue,
+                    expectedAccountRevision: expected.accountRevision,
+                    expectedRowRevision: expected.rowRevision,
+                    cookie: cookie,
+                    username: username,
+                    password: password,
+                    authorization: authorization,
+                    refreshedAtMs: refreshedAtMs
+                )
+            }
+        }
+    }
+}
+
+public struct ExportedPanAccountRecord: Equatable, Sendable {
+    public let provider: String
+    public let cookie: String?
+    public let username: String?
+    public let password: String?
+    public let authorization: String?
+    public let refreshedAtMs: Int64?
+
+    public init(provider: String, cookie: String? = nil, username: String? = nil,
+                password: String? = nil, authorization: String? = nil, refreshedAtMs: Int64? = nil) {
+        self.provider = provider
+        self.cookie = cookie
+        self.username = username
+        self.password = password
+        self.authorization = authorization
+        self.refreshedAtMs = refreshedAtMs
+    }
 }

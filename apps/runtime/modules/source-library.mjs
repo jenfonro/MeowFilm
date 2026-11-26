@@ -74,10 +74,10 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       hasExplore: Boolean(raw?.exploreUrl || actions.includes('explore')),
       actions: [...actions], ...(errorCodeValue ? { errorCode: errorCodeValue } : {}) };
   }
-  async function persist(next = records, removed = []) {
+  async function persist(next = records, removed = [], basePrivate = privateRecords) {
     if (readFailure) throw readFailure;
     if (!disk) return;
-    const nextPrivate = new Map(privateRecords);
+    const nextPrivate = new Map(basePrivate);
     if (native) {
       for (const id of removed) nextPrivate.delete(id);
       for (const item of next.values()) nextPrivate.set(item.installationId, item.private);
@@ -622,6 +622,128 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       await access(signal);
       return { text: stringifyJSONValue(params.installationIds.map(id => managedDefinition(record(id)))) };
     },
+    'library.exportCookies': (_params, signal) => manage(signal, async () => {
+      const items = [];
+      const emit = (id, sourceUrl, privateState) => {
+        for (const [profileSuffix, entries] of privateState?.cookies ?? []) {
+          if (typeof profileSuffix !== 'string' || !Array.isArray(entries) || entries.length === 0) continue;
+          const cookies = [];
+          for (const entry of entries) {
+            const cookie = Array.isArray(entry) ? entry[1] : null;
+            if (!object(cookie) || typeof cookie.name !== 'string' || typeof cookie.value !== 'string' ||
+                typeof cookie.domain !== 'string' || typeof cookie.path !== 'string') continue;
+            cookies.push({
+              name: cookie.name,
+              value: cookie.value,
+              domain: cookie.domain,
+              path: cookie.path,
+              hostOnly: Boolean(cookie.hostOnly),
+              secure: Boolean(cookie.secure),
+              httpOnly: Boolean(cookie.httpOnly),
+              sameSite: cookie.sameSite ?? null,
+              expires: cookie.expires ?? null,
+              sequence: Number.isSafeInteger(cookie.sequence) && cookie.sequence >= 0 ? cookie.sequence : 0,
+            });
+          }
+          if (cookies.length > 0) items.push({ installationId: id, sourceUrl, profileSuffix, cookies });
+        }
+      };
+      for (const [id, item] of records) {
+        emit(id, typeof item.sourceUrl === 'string' ? item.sourceUrl : '', item.private);
+      }
+      if (native) {
+        for (const [id, privateState] of privateRecords) {
+          if (!records.has(id)) emit(id, '', privateState);
+        }
+      }
+      return { items };
+    }),
+    'library.replaceCookies': (params, signal) => manage(signal, async () => {
+      const byUrl = new Map();
+      for (const item of records.values()) {
+        if (typeof item.sourceUrl === 'string' && item.sourceUrl.length > 0) byUrl.set(item.sourceUrl, item);
+      }
+      const grouped = new Map();
+      let nextSeq = 1, applied = 0;
+      const addCookie = (targetId, suffix, cookie) => {
+        let suffixes = grouped.get(targetId);
+        if (!suffixes) grouped.set(targetId, suffixes = new Map());
+        let map = suffixes.get(suffix);
+        if (!map) suffixes.set(suffix, map = new Map());
+        map.set(JSON.stringify([cookie.domain, cookie.path, cookie.name]), cookie);
+        applied++;
+      };
+      for (const entry of params.items) {
+        if (!object(entry) || !Array.isArray(entry.cookies)) continue;
+        const target = typeof entry.installationId === 'string' && records.has(entry.installationId)
+          ? records.get(entry.installationId)
+          : typeof entry.sourceUrl === 'string' ? byUrl.get(entry.sourceUrl.trim()) : undefined;
+        if (!target) continue;
+        const suffix = typeof entry.profileSuffix === 'string' && entry.profileSuffix.length > 0 &&
+          !entry.profileSuffix.includes(':') && !/[\u0000-\u001f\u007f]/.test(entry.profileSuffix)
+          ? entry.profileSuffix : 'http';
+        let defaultDomain = '';
+        try {
+          defaultDomain = new URL(target.sourceUrl).hostname.toLowerCase();
+        } catch { /* Source URL may be a non-HTTP QYSG origin. */ }
+        for (const raw of entry.cookies) {
+          if (!object(raw)) continue;
+          const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+          const value = typeof raw.value === 'string' ? raw.value : '';
+          if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name) || /[\u0000-\u001f\u007f;]/.test(value)) continue;
+          const domain = (typeof raw.domain === 'string' ? raw.domain.trim().replace(/^\./, '').toLowerCase() : '') ||
+            defaultDomain;
+          if (!domain || /[\u0000-\u001f\u007f/;:\s]/.test(domain)) continue;
+          const path = typeof raw.path === 'string' && raw.path.startsWith('/') &&
+            !/[\u0000-\u001f\u007f;]/.test(raw.path) ? raw.path : '/';
+          const hostOnly = typeof raw.hostOnly === 'boolean' ? raw.hostOnly : true;
+          const secure = typeof raw.secure === 'boolean' ? raw.secure : false;
+          const httpOnly = typeof raw.httpOnly === 'boolean' ? raw.httpOnly : false;
+          const sameSite = typeof raw.sameSite === 'string' && ['Lax', 'Strict', 'None'].includes(raw.sameSite)
+            ? raw.sameSite : null;
+          const expires = typeof raw.expires === 'number' && Number.isSafeInteger(raw.expires) ? raw.expires : null;
+          const sequence = typeof raw.sequence === 'number' && Number.isSafeInteger(raw.sequence) && raw.sequence >= 0
+            ? raw.sequence : nextSeq++;
+          if (sequence >= nextSeq) nextSeq = sequence + 1;
+          addCookie(target.installationId, suffix, {
+            name, value, domain, path, hostOnly, secure, httpOnly, sameSite, expires, sequence,
+          });
+        }
+      }
+      const mergePrivate = (id, prevPrivate) => {
+        const storage = cloneJSONValue(prevPrivate?.storage ?? []);
+        const suffixes = grouped.get(id);
+        const allSuffixes = new Set([
+          ...storage.map(([suffix]) => suffix),
+          ...(suffixes ? suffixes.keys() : []),
+        ]);
+        const cookies = [...allSuffixes].map(suffix => [suffix, [...(suffixes?.get(suffix) ?? [])]]);
+        const storageMap = new Map(storage);
+        const nextStorage = [...allSuffixes].map(suffix => [suffix, storageMap.get(suffix) ?? []]);
+        return { cookies, storage: nextStorage };
+      };
+      const nextRecords = new Map();
+      for (const [id, item] of records) {
+        nextRecords.set(id, { ...item, private: mergePrivate(id, item.private) });
+      }
+      const basePrivate = new Map();
+      if (native) {
+        for (const [id, priv] of privateRecords) {
+          if (!nextRecords.has(id)) basePrivate.set(id, mergePrivate(id, priv));
+        }
+      }
+      await persist(nextRecords, [], basePrivate);
+      for (const [id, item] of records) {
+        item.private = nextRecords.get(id).private;
+        const state = states.get(id);
+        if (!state) continue;
+        if (state.private !== undefined) state.private = cloneJSONValue(item.private);
+        if (state.generation !== undefined && (state.accepting || state.trial)) {
+          owner.restoreProfiles(profile(id, state.generation), item.private);
+        }
+      }
+      return { applied };
+    }),
     'library.invoke': invoke,
     async 'library.image'(params, signal) {
       const call = await admitted(params.installationId, params.revision, signal);

@@ -27,6 +27,7 @@ final class MeowfilmAssembly: ObservableObject {
         return created
     }
     let appearance = MusicAppearancePreferencesStore()
+    lazy var settingsTransfer = MeowfilmSettingsTransfer(assembly: self)
     let filmLibrary = FilmLibrary()
     lazy var filmSources: [DoubanFilmSource] = [DoubanFilmSource { [weak self] in
         guard let resources = await self?.resources else { throw FilmHomeError.network }

@@ -31,7 +31,8 @@ public sealed partial class ShellWindow : DesktopWindow
     public ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
-        IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
+        IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null,
+        IDesktopDataManagement? dataManagement = null)
     {
         ArgumentNullException.ThrowIfNull(modules);
         ArgumentNullException.ThrowIfNull(pages);
@@ -84,7 +85,7 @@ public sealed partial class ShellWindow : DesktopWindow
         };
         Activated += (_, _) => UpdateCaption();
         Root.ActualThemeChanged += (_, _) => UpdateCaption();
-        InitializeGeneralSettings(appearance, closePreferences);
+        InitializeGeneralSettings(appearance, closePreferences, dataManagement);
         _closeDialog.ChoiceRequested += _closeCoordinator.OnCloseChoiceRequested;
         _closeDialog.CancelRequested += _closeCoordinator.CancelCloseChoice;
         _closeDialog.ForceDismissRequested += () => _closeCoordinator.DismissCloseChoice(restoreFocus: false);

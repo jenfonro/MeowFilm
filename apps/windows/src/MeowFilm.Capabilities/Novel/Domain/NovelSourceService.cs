@@ -5,6 +5,18 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
+public sealed record ExportedNovelSource(
+    string InstallationId,
+    long Revision,
+    string Name,
+    string SourceUrl,
+    string Group,
+    long Order,
+    bool Enabled,
+    bool EnabledExplore,
+    string Protocol,
+    string Definition);
+
 internal sealed class NovelSourceProjectionChange(IReadOnlySet<string> retired) : EventArgs
 {
     internal IReadOnlySet<string> Retired => retired;
@@ -960,4 +972,68 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
             finally { cancel?.Dispose(); }
         }
     }
+
+    public Task<IReadOnlyList<ExportedNovelSource>> ExportAllDefinitionsAsync(CancellationToken token = default) =>
+        work.Run(ct => configuration.ExportAllAsync(ct), token);
+
+    public Task ReplaceAllDefinitionsAsync(IReadOnlyList<ExportedNovelSource> items, CancellationToken token = default) =>
+        work.Run(async ct =>
+        {
+            await changes.WaitAsync(ct);
+            try
+            {
+                await configuration.LoadAsync(ct);
+                await configuration.ReplaceAllAsync(items, ct);
+                PublishConfiguration();
+            }
+            finally { changes.Release(); }
+
+            try
+            {
+                await applications.Run(async inner => { await ApplyLatestAsync(inner); return true; }, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.Novel, "sources", "import.apply_deferred", error: error);
+            }
+            return true;
+        }, token);
+
+    public Task<JsonElement> ExportCookiesAsync(CancellationToken token = default) =>
+        work.Run(async ct =>
+        {
+            await EnsureReadyAsync(ct);
+            try { await ApplyLatestAsync(ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { }
+            try
+            {
+                var value = await CallAsync("library.exportCookies", new { }, ct);
+                if (value.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+                    return items.Clone();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DebugLog.Warn(DebugCategories.Novel, "sources", "cookies.export_unavailable", error: ex);
+            }
+            return NovelJson.Value(Array.Empty<object>());
+        }, token);
+
+    public Task ReplaceCookiesAsync(JsonElement items, CancellationToken token = default) =>
+        work.Run(async ct =>
+        {
+            if (items.ValueKind != JsonValueKind.Array) return false;
+            await EnsureReadyAsync(ct);
+            try { await ApplyLatestAsync(ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { }
+            try
+            {
+                await CallAsync("library.replaceCookies", new { items }, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DebugLog.Warn(DebugCategories.Novel, "sources", "cookies.replace_unavailable", error: ex);
+            }
+            return true;
+        }, token);
 }

@@ -232,4 +232,39 @@ public sealed partial class MusicSettingsController : MusicController
         if (failure is not null)
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
+
+    internal async Task RefreshAfterExternalImportAsync(CancellationToken token)
+    {
+        try { await ReadAppearance(token); } catch { }
+        catalogSourceLoaded = false;
+        try { await EnsureCatalogSourceSettingsAsync(token); } catch { }
+        try { await ReadDeviceSettings(token); } catch { }
+        desktopLyricLoaded = false;
+        try { await EnsureDesktopLyricSettingsAsync(); } catch { }
+        if (qualityLoaded || settingsRequested)
+        {
+            qualityLoaded = false;
+            try { await ActivateQualitySettingsAsync(qualitySurfaces == QualitySettingsSurface.None ? QualitySettingsSurface.Settings : qualitySurfaces); } catch { }
+        }
+        if (officialSourcesLoaded || settingsRequested)
+        {
+            try { await RefreshSourceManagementAsync(); } catch { }
+        }
+        if (metadataLoaded || settingsRequested)
+        {
+            metadataLoaded = false;
+            try { await ReadMetadataSettings(token); } catch { }
+        }
+        if (songSearchLoaded || playlistSearchLoaded || settingsRequested)
+        {
+            songSearchLoaded = false;
+            playlistSearchLoaded = false;
+            try { await ReadSearchPreferences(token); } catch { }
+        }
+        if (feedbackLoaded || settingsRequested)
+        {
+            feedbackLoaded = false;
+            try { await ReadFeedbackSettings(token); } catch { }
+        }
+    }
 }

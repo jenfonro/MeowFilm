@@ -411,4 +411,70 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
         catch (JsonException) { }
         return fileName ?? "";
     }
+
+    internal async Task<IReadOnlyList<ExportedNovelSource>> ExportAllAsync(CancellationToken token)
+    {
+        await LoadAsync(token);
+        return Snapshot.Sources.Select(s => new ExportedNovelSource(
+            s.InstallationId, s.Revision, s.Name, s.SourceUrl, s.Group, s.Order,
+            s.Enabled, s.EnabledExplore, s.Protocol, s.Definition)).ToArray();
+    }
+
+    internal Task ReplaceAllAsync(IReadOnlyList<ExportedNovelSource> items, CancellationToken token) =>
+        MutateAsync(current =>
+        {
+            var existingByUrl = current.Sources.ToDictionary(s => s.SourceUrl, StringComparer.Ordinal);
+            var seenIds = new HashSet<string>(StringComparer.Ordinal);
+            var seenUrls = new HashSet<string>(StringComparer.Ordinal);
+            var next = new List<NovelSourceDefinition>(items.Count);
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                var raw = items[i];
+                if (string.IsNullOrWhiteSpace(raw.Definition)) continue;
+                try
+                {
+                    var candidate = Parse(raw.Definition, null, next.Count, raw.Name, raw.SourceUrl);
+                    string sourceUrl = !string.IsNullOrWhiteSpace(raw.SourceUrl) ? raw.SourceUrl.Trim() : candidate.SourceUrl;
+                    if (sourceUrl.Length == 0 || !seenUrls.Add(sourceUrl)) continue;
+
+                    existingByUrl.TryGetValue(sourceUrl, out var existing);
+                    string id = !string.IsNullOrWhiteSpace(raw.InstallationId) &&
+                                Regex.IsMatch(raw.InstallationId, @"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z") &&
+                                !seenIds.Contains(raw.InstallationId)
+                        ? raw.InstallationId
+                        : existing is not null && !seenIds.Contains(existing.InstallationId)
+                            ? existing.InstallationId
+                            : Guid.NewGuid().ToString("N");
+                    seenIds.Add(id);
+
+                    string name = !string.IsNullOrWhiteSpace(raw.Name) ? raw.Name.Trim() : candidate.Name;
+                    if (name.Length == 0) name = sourceUrl;
+                    string group = raw.Group ?? candidate.Group;
+                    long order = raw.Order;
+                    bool enabled = raw.Enabled;
+                    bool enabledExplore = raw.EnabledExplore;
+                    long revision = existing is not null ? Math.Min(MaximumRevision, existing.Revision + 1) : 1;
+
+                    string definition = candidate.Definition;
+                    if (JsonNode.Parse(definition) is JsonObject patched)
+                    {
+                        patched["bookSourceName"] = name;
+                        patched["bookSourceUrl"] = sourceUrl;
+                        patched["bookSourceGroup"] = group;
+                        patched["customOrder"] = order;
+                        patched["enabled"] = enabled;
+                        patched["enabledExplore"] = enabledExplore;
+                        definition = patched.ToJsonString();
+                    }
+                    next.Add(new NovelSourceDefinition(
+                        id, revision, name, sourceUrl, group, order, enabled, enabledExplore, candidate.Protocol, definition));
+                }
+                catch (Exception ex) when (ex is JsonException or InvalidDataException or BridgeException)
+                {
+                }
+            }
+            return next.ToArray();
+        }, token);
 }

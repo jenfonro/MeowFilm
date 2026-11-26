@@ -165,8 +165,19 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         _ = showSettings(animated: true)
     }
 
+    func makeDataManagementViewController() -> MeowfilmDataManagementViewController {
+        MeowfilmDataManagementViewController(
+            themeProvider: assembly.appearance,
+            transferProvider: { [weak self] in
+                guard let self, self.assembly.resources != nil, !self.assembly.closed else { return nil }
+                return self.assembly.settingsTransfer
+            },
+            resetUserData: resetUserData
+        )
+    }
+
     func makeSettingsViewController() -> MeowfilmSettingsViewController {
-        let page = MeowfilmSettingsViewController(themeProvider: assembly.appearance, resetUserData: resetUserData)
+        let page = MeowfilmSettingsViewController(themeProvider: assembly.appearance)
         page.openMusic = { [weak self, weak page] in
             guard let self else { return }
             guard let model = assembly.music else {
@@ -199,6 +210,10 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             }
             navigation.pushViewController(FilmMetadataCacheSettingsViewController(
                 owner: owner, themeProvider: assembly.appearance), animated: true)
+        }
+        page.openDataManagement = { [weak self] in
+            guard let self else { return }
+            navigation.pushViewController(makeDataManagementViewController(), animated: true)
         }
         page.openNovel = { [weak self, weak page] in
             guard let self else { return }

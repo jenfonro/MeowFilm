@@ -592,6 +592,9 @@ final class MeowfilmDebugNavigator {
                 }
                 let vc = FilmMetadataCacheSettingsViewController(owner: owner, themeProvider: coordinator.assembly.appearance)
                 coordinator.navigation.setViewControllers(baseStack + [vc], animated: false)
+            case "data":
+                let vc = coordinator.makeDataManagementViewController()
+                coordinator.navigation.setViewControllers(baseStack + [vc], animated: false)
             default:
                 throw DebugAPIError.notFound("Unknown general settings section: \(section ?? "")")
             }

@@ -65,6 +65,11 @@ public final class FilmDoubanSettingsModel: ObservableObject {
         try Task.checkCancellation()
         apply(value)
     }
+    public func reloadAfterImport() async {
+        guard !busy else { return }
+        saved = nil
+        try? await load()
+    }
     public func save() async throws {
         guard !busy, saved != nil else { return }
         busy = true; defer { busy = false }

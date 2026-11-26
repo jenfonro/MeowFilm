@@ -20,6 +20,36 @@ extension NativeMusicService {
         return .init(revision: saved.revision, selections: saved.selections)
     }
 
+    public func replaceOfflineSyncPreferences(_ values: [MusicLibrarySyncSelection]) throws {
+        try check()
+        let selected = try automaticSelections(values)
+        automaticLibrarySyncRuntime.settingsSync?.authorization.revoke()
+        automaticLibrarySyncRuntime.settingsSync?.task.cancel()
+        automaticLibrarySyncRuntime.authorization?.revoke()
+        automaticLibrarySyncRuntime.task?.cancel()
+        librarySyncRun?.cancel()
+        try transaction([.library]) { d in
+            var ledger = try MusicNativeSyncLedger.load(d.library)
+            var preferences = ledger.automatic
+            try musicRequire((0..<(musicMaxSafeInteger - 1)).contains(preferences.revision), .limit)
+            preferences.revision += 1
+            preferences.selections = selected
+            preferences.bindings = preferences.bindings.filter { pair in
+                selected.contains { $0.platform.rawValue == pair.key }
+            }
+            preferences.relationshipPlatforms = preferences.relationshipPlatforms.filter { platform in
+                selected.contains { $0.platform == platform && $0.playlists }
+            }
+            ledger.automatic = preferences
+            ledger.selections = selected
+            ledger.phase = ledger.fences.isEmpty ? .idle : .blocked
+            ledger.issues = ledger.fences.isEmpty ? [] : ledger.issues.filter { $0.code == "unconfirmed" }
+            d.library.sync = ledger.toRecord()
+            d.library.revision += 1
+        }
+        publishAutomaticLibrarySync(.refreshed)
+    }
+
     public func automaticLibrarySyncEvents() -> AsyncStream<MusicAutomaticLibrarySyncEvent> {
         let id = UUID()
         return AsyncStream(bufferingPolicy: .bufferingNewest(32)) { continuation in

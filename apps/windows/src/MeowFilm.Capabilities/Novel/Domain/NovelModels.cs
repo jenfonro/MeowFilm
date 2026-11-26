@@ -183,11 +183,11 @@ public sealed record NovelAppearance
       ("暖黄", "#EFE0B9", "#43351F"), ("浅灰", "#DDDFE0", "#292C2F"), ("粉笺", "#EEDFE0", "#453039"),
       ("夜间", "#212224", "#C8C9CA"), ("墨黑", "#111214", "#AEB0B4") ];
     private static readonly NovelAppearance Default = new();
-    internal static bool ValidSize(double value) => value > 0 && float.IsFinite((float)value) && (float)value > 0 && value * 1.15 <= float.MaxValue;
-    internal static bool ValidLineHeight(double size, double value) => value > 0 &&
+    public static bool ValidSize(double value) => value > 0 && float.IsFinite((float)value) && (float)value > 0 && value * 1.15 <= float.MaxValue;
+    public static bool ValidLineHeight(double size, double value) => value > 0 &&
         float.IsFinite((float)(size * value * 1.15)) && (float)(size * value) > 0;
-    internal static bool ValidFamily(string value) => !string.IsNullOrWhiteSpace(value) && value.IndexOf('\0') < 0;
-    internal static bool TryParseColor(string? value, out byte a, out byte r, out byte g, out byte b)
+    public static bool ValidFamily(string value) => !string.IsNullOrWhiteSpace(value) && value.IndexOf('\0') < 0;
+    public static bool TryParseColor(string? value, out byte a, out byte r, out byte g, out byte b)
     {
         a = r = g = b = 0;
         if (string.IsNullOrWhiteSpace(value)) return false;

@@ -188,7 +188,16 @@ internal static class Program
             runtimeSettings: database => new FilmRuntimeSettings(database),
             stopPlayback: () => Task.WhenAll(musicPlayback?.StopAsync() ?? Task.CompletedTask,
                 filmCapability?.PrepareShutdownAsync() ?? filmPlayback?.StopAsync() ?? Task.CompletedTask),
-            debugOptions: debugOptions.Enabled ? debugOptions : null);
+            debugOptions: debugOptions.Enabled ? debugOptions : null,
+            createDataManagement: (database, appearance, closePreferences, mediaControls, capabilities) =>
+                new AppSettingsTransfer(
+                    database,
+                    appearance,
+                    closePreferences,
+                    mediaControls,
+                    capabilities.OfType<MusicCapability>().Single(),
+                    capabilities.OfType<FilmCapability>().Single(),
+                    capabilities.OfType<NovelCapability>().Single()));
     }
     [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
     private static extern int MessageBox(nint window, string text, string caption, uint flags);

@@ -2,7 +2,169 @@ import Foundation
 import MeowAccounts
 import MeowDebug
 
+public struct MusicOfflineAccountRecord: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public let platform: MusicAccountPlatform
+    public let userID: String
+    public let displayName: String
+    public let avatar: String?
+    public let cookie: String
+    public let credentials: [String: String]
+
+    public init(platform: MusicAccountPlatform, userID: String, displayName: String = "",
+                avatar: String? = nil, cookie: String = "", credentials: [String: String] = [:]) {
+        self.platform = platform
+        self.userID = userID
+        self.displayName = displayName
+        self.avatar = avatar
+        self.cookie = cookie
+        self.credentials = credentials
+    }
+
+    public var description: String { "MusicOfflineAccountRecord(<redacted>)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["value": "<redacted>"]) }
+}
+
 extension NativeMusicAccountService {
+    public func exportOfflineAccounts() async throws -> [MusicOfflineAccountRecord] {
+        try check()
+        let own = epoch
+        var records: [MusicOfflineAccountRecord] = []
+        for platform in MusicAccountPlatform.allCases where scopes[platform] != nil {
+            let identity = try configured(platform)
+            let stored: AccountCredential?
+            do { stored = try await accounts.readOffline(for: identity) }
+            catch AccountSessionError.invalidState { continue }
+            try check(own)
+            guard let stored,
+                  stored.siteKey == platform.rawValue,
+                  !stored.userID.isEmpty,
+                  !stored.cookie.isEmpty else {
+                continue
+            }
+            let userID = stored.userID
+            let cookie = stored.cookie
+            let fields = Self.parseCookieFields(cookie)
+            let nickname = profiles[platform] ?? displayProfiles[platform]?.nickname ?? ""
+            let avatar = displayProfiles[platform]?.avatarURL?.absoluteString
+            records.append(MusicOfflineAccountRecord(
+                platform: platform,
+                userID: userID,
+                displayName: nickname,
+                avatar: avatar,
+                cookie: cookie,
+                credentials: fields
+            ))
+        }
+        return records
+    }
+
+    public func replaceOfflineAccounts(_ targets: [MusicAccountPlatform: MusicOfflineAccountRecord?]) async throws {
+        try check()
+        let own = epoch
+        for platform in MusicAccountPlatform.allCases where scopes[platform] != nil {
+            guard let targetOpt = targets[platform] else { continue }
+            try check(own)
+            let identity = try configured(platform)
+            guard !transitions.contains(platform), !restoring.contains(platform),
+                  !localCacheRestoring.contains(platform), login?.platform != platform else {
+                continue
+            }
+            let candidate = Self.buildOfflineCredential(platform: platform, record: targetOpt)
+            if targetOpt != nil, candidate == nil { continue }
+            transitions.insert(platform)
+            defer {
+                transitions.remove(platform)
+                notifyAccountSession(platform)
+            }
+            let binding = await rotate(platform)
+            guard accountEpochs[platform] == binding, epoch == own, !closed else { continue }
+            pendingWrites += 1
+            let token: AccountSessionToken?
+            do {
+                token = try await accounts.replaceOffline(for: identity, credential: candidate)
+            } catch {
+                pendingWrites -= 1
+                continue
+            }
+            pendingWrites -= 1
+            tokens[platform] = token
+            if token != nil {
+                inspected.insert(platform)
+            } else {
+                inspected.remove(platform)
+            }
+            validated.remove(platform)
+            requiresExplicitRestore.remove(platform)
+            restoreNativeIDs.removeValue(forKey: platform)
+            profiles.removeValue(forKey: platform)
+            displayProfiles.removeValue(forKey: platform)
+            displayProfileDeadlines.removeValue(forKey: platform)
+            notifyAccountSession(platform, committedRecord: true)
+            notifyNativeHome(platform)
+            await drainCacheLifecycle()
+        }
+    }
+
+    private static func parseCookieFields(_ cookie: String) -> [String: String] {
+        var result: [String: String] = [:]
+        for part in cookie.split(separator: ";") {
+            guard let eq = part.firstIndex(of: "=") else { continue }
+            let key = part[..<eq].trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = part[part.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty, !value.isEmpty {
+                result[key] = value
+            }
+        }
+        return result
+    }
+
+    private static func buildOfflineCredential(
+        platform: MusicAccountPlatform,
+        record: MusicOfflineAccountRecord?
+    ) -> AccountCredential? {
+        guard let record else { return nil }
+        var fields = parseCookieFields(record.cookie)
+        for (k, v) in record.credentials {
+            let cleanK = k.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanV = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanK.isEmpty, !cleanV.isEmpty {
+                fields[cleanK] = cleanV
+            }
+        }
+        func hasControlOrNul(_ s: String) -> Bool {
+            s.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
+        }
+        var sanitizedFields: [String: String] = [:]
+        for (k, v) in fields {
+            if !hasControlOrNul(k), !k.contains(";"), !k.contains("="),
+               !hasControlOrNul(v), !v.contains(";") {
+                sanitizedFields[k] = v
+            }
+        }
+        let cookieString: String
+        if !sanitizedFields.isEmpty {
+            cookieString = sanitizedFields.keys.sorted().map { "\($0)=\(sanitizedFields[$0]!)" }.joined(separator: "; ")
+        } else {
+            let trimmed = record.cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !hasControlOrNul(trimmed) else { return nil }
+            cookieString = trimmed
+        }
+
+        var userID = record.userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if userID.isEmpty || hasControlOrNul(userID) {
+            switch platform {
+            case .qq:
+                userID = sanitizedFields["musicid"] ?? sanitizedFields["str_musicid"] ?? ""
+            case .kugou:
+                userID = sanitizedFields["userid"] ?? ""
+            case .netease:
+                userID = "imported"
+            }
+        }
+        if userID.isEmpty { userID = "imported" }
+        return try? AccountCredential(siteKey: platform.rawValue, userID: userID, cookie: cookieString)
+    }
     func revokeAccountImports(_ platform: MusicAccountPlatform? = nil) {
         for batch in transferBatches.values {
             for item in batch.items where platform == nil || item.entry.platform == platform {

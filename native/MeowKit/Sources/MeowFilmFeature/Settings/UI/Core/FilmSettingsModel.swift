@@ -66,6 +66,15 @@ public final class FilmSettingsModel: ObservableObject {
         generation = UUID(); loading?.cancel(); loading = nil
         observation?.cancel(); observation = nil
     }
+    public func reloadAfterImport() async {
+        try? await rules.service.initialize()
+        try? await rules.load()
+        await tmdb.reloadAfterImport()
+        await douban.reloadAfterImport()
+        await playback?.reloadAfterImport()
+        await player.reload()
+        pan.start()
+    }
     deinit { loading?.cancel(); observation?.cancel() }
 }
 #endif
