@@ -12,57 +12,88 @@ public struct NovelDiscoveryItem: Identifiable, Equatable, Sendable {
     }
 }
 
-public struct NovelDiscoveryChannel: Identifiable, Equatable, Sendable {
+public struct NovelHomeSection: Identifiable, Equatable, Sendable {
+    public enum State: Equatable, Sendable {
+        case pending
+        case loading
+        case ready
+        case failed(String)
+    }
+
     public var id: String
     public var title: String
-    public var items: [NovelDiscoveryItem]
-    public init(id: String, title: String, items: [NovelDiscoveryItem]) {
-        self.id = id; self.title = title; self.items = items
+    public var options: [NovelDiscoveryItem]
+    public var books: [NovelBook]
+    public var state: State
+    public var admitted: Bool
+
+    public init(
+        id: String,
+        title: String,
+        options: [NovelDiscoveryItem],
+        books: [NovelBook] = [],
+        state: State = .pending,
+        admitted: Bool = false
+    ) {
+        self.id = id
+        self.title = title
+        self.options = options
+        self.books = books
+        self.state = state
+        self.admitted = admitted
+    }
+
+    public var statusText: String {
+        switch state {
+        case .pending, .loading: return "加载中…"
+        case .ready: return "暂无书籍"
+        case .failed(let message): return message.isEmpty ? "栏目加载失败" : message
+        }
     }
 
     static func make(_ kinds: [NovelExploreKind]) -> [Self] {
-        var channels: [Self] = []
+        var sections: [Self] = []
         var heading: (id: String, title: String)?
         for (index, kind) in kinds.enumerated() {
             let title = kind.title.trimmingCharacters(in: .whitespacesAndNewlines)
-            if kind.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let url = kind.url.trimmingCharacters(in: .whitespacesAndNewlines)
+            if url.isEmpty {
                 if !title.isEmpty { heading = ("group-\(index)", title) }
                 continue
             }
-            let item = NovelDiscoveryItem(id: "item-\(index)", title: title.isEmpty ? "未命名" : title, url: kind.url)
+            let item = NovelDiscoveryItem(id: "item-\(index)", title: title.isEmpty ? "未命名" : title, url: url)
             if let heading {
-                if channels.last?.id != heading.id {
-                    channels.append(.init(id: heading.id, title: heading.title, items: []))
+                if sections.last?.id != heading.id {
+                    sections.append(.init(id: heading.id, title: heading.title, options: []))
                 }
-                channels[channels.count - 1].items.append(item)
+                sections[sections.count - 1].options.append(item)
             } else {
-                channels.append(.init(id: item.id, title: item.title, items: [item]))
+                sections.append(.init(id: item.id, title: item.title, options: [item]))
             }
         }
-        return channels
+        return sections
     }
 }
 
 @MainActor
 public final class NovelDiscoverySession: ObservableObject {
+    private static let initialAdmittedCount = 4
+    private static let maxConcurrentSectionLoads = 3
+
     public let feature: NovelFeature
     @Published public private(set) var selectedSource: NovelSource?
-    @Published public private(set) var channels: [NovelDiscoveryChannel] = []
-    @Published public private(set) var selectedChannelID: String?
-    @Published public private(set) var selectedKindID: String?
-    @Published public private(set) var books: [NovelBook] = []
+    @Published public private(set) var sections: [NovelHomeSection] = []
     @Published public private(set) var loading = false
-    @Published public private(set) var canLoadMore = false
     @Published public var error: String?
 
-    private enum Request: Equatable { case refresh, page }
-    private var unfinished: Request? = .refresh
-    private var failedRequest: Request?
     private var initialized = false
     private var active = false
     private var closed = false
-    private var page = 0
+    private var needsKindsReload = true
+    private var kindsFailed = false
     private var generation = UUID()
+    private var kindsTask: Task<Void, Never>?
+    private var sectionTasks: [String: Task<Void, Never>] = [:]
     private var running: [UUID: Task<Void, Never>] = [:]
     private var sourceObservation: AnyCancellable?
 
@@ -74,65 +105,82 @@ public final class NovelDiscoverySession: ObservableObject {
     }
 
     public var availableSources: [NovelSource] { feature.sources.filter(Self.canExplore) }
-    public var selectedChannel: NovelDiscoveryChannel? { channels.first { $0.id == selectedChannelID } }
-    public var selectedKind: NovelDiscoveryItem? { selectedChannel?.items.first { $0.id == selectedKindID } }
+
+    public var allLoadedBooks: [NovelBook] {
+        sections.flatMap(\.books)
+    }
 
     public func activate() {
         guard !closed, !feature.closed else { return }
         active = true
         feature.start()
-        if !loading, let unfinished { begin(unfinished) }
+        if needsKindsReload && !kindsFailed {
+            beginKindsLoad()
+        } else {
+            scheduleAdmittedSections()
+        }
     }
 
-    public func deactivate() { active = false; invalidate() }
+    public func deactivate() {
+        active = false
+        invalidate()
+    }
 
     public func selectSource(id: String) {
         guard !closed, let source = availableSources.first(where: { $0.id == id }) else { return }
         guard selectedSource?.id != source.id || selectedSource?.revision != source.revision else { return }
-        invalidate(); selectedSource = source; clearSource()
-        unfinished = .refresh
-        if active { begin(.refresh) }
-    }
-
-    public func selectChannel(id: String) {
-        guard !closed, let channel = channels.first(where: { $0.id == id }),
-              let kind = channel.items.first, selectedChannelID != id else { return }
-        select(channel: channel, kind: kind)
-    }
-
-    public func selectKind(id: String) {
-        guard !closed, let channel = selectedChannel,
-              let kind = channel.items.first(where: { $0.id == id }), selectedKindID != id else { return }
-        select(channel: channel, kind: kind)
-    }
-
-    private func select(channel: NovelDiscoveryChannel, kind: NovelDiscoveryItem) {
-        invalidate(); selectedChannelID = channel.id; selectedKindID = kind.id
-        books = []; page = 0; canLoadMore = false; error = nil; unfinished = .page
-        if active { begin(.page) }
+        invalidate()
+        selectedSource = source
+        clearSections()
+        needsKindsReload = true
+        kindsFailed = false
+        if active { beginKindsLoad() }
     }
 
     public func refresh() {
         guard !closed else { return }
         DebugRuntime.log(.novel, sub: "discovery", event: "refresh", level: .debug)
-        unfinished = .refresh
-        if active { begin(.refresh) }
-    }
-
-    public func loadMore() {
-        guard !closed, active, !loading, canLoadMore else { return }
-        DebugRuntime.log(.novel, sub: "discovery", event: "load_more", level: .debug, data: .object([
-            "page": .int(page)
-        ]))
-        begin(.page)
+        invalidate()
+        needsKindsReload = true
+        kindsFailed = false
+        if active { beginKindsLoad() }
     }
 
     public func retry() {
-        guard !closed, active, !loading else { return }
-        begin(failedRequest ?? .refresh)
+        guard !closed, active else { return }
+        if needsKindsReload || sections.isEmpty {
+            kindsFailed = false
+            beginKindsLoad()
+        } else {
+            for index in sections.indices where sections[index].admitted {
+                if case .failed = sections[index].state { sections[index].state = .pending }
+            }
+            error = nil
+            scheduleAdmittedSections()
+        }
     }
 
-    private static func canExplore(_ source: NovelSource) -> Bool {
+    public func admitSection(id: String) {
+        guard !closed, let index = sections.firstIndex(where: { $0.id == id }) else { return }
+        if !sections[index].admitted {
+            sections[index].admitted = true
+        }
+        if active {
+            scheduleAdmittedSections()
+        }
+    }
+
+    public func categoryModel(sectionID: String) -> NovelCategoryModel? {
+        guard !closed,
+              let source = selectedSource,
+              accepts(source),
+              let section = sections.first(where: { $0.id == sectionID }),
+              !section.options.isEmpty else { return nil }
+        let seeded: [NovelBook]? = (section.state == .ready) ? section.books : nil
+        return NovelCategoryModel(feature: feature, source: source, section: section, initialBooks: seeded)
+    }
+
+    static func canExplore(_ source: NovelSource) -> Bool {
         source.enabled && source.enabledExplore && source.actions.contains("exploreKinds") && source.actions.contains("explore")
     }
 
@@ -142,13 +190,14 @@ public final class NovelDiscoverySession: ObservableObject {
 
     private func sourcesChanged(_ sources: [NovelSource]) {
         guard !closed else { return }
-        // Forward changes even when only an unselected sidebar source changed.
         objectWillChange.send()
         guard initialized else { return }
         guard let previous = selectedSource else {
             guard let source = sources.first(where: Self.canExplore) else { return }
-            selectedSource = source; unfinished = .refresh
-            if active { begin(.refresh) }
+            selectedSource = source
+            needsKindsReload = true
+            kindsFailed = false
+            if active { beginKindsLoad() }
             return
         }
         guard let current = sources.first(where: { $0.id == previous.id }), Self.canExplore(current) else {
@@ -156,92 +205,173 @@ public final class NovelDiscoverySession: ObservableObject {
             // Retain the selected identity. A disappearing source never selects
             // another source on the user's behalf.
             if let current = sources.first(where: { $0.id == previous.id }) { selectedSource = current }
-            clearSource(); unfinished = nil; error = NovelError.noSource.localizedDescription
+            clearSections()
+            needsKindsReload = false
+            kindsFailed = false
+            error = NovelError.noSource.localizedDescription
             return
         }
         selectedSource = current
         if current.revision != previous.revision || !Self.canExplore(previous) {
-            invalidate(); clearSource(); unfinished = .refresh
+            invalidate()
+            clearSections()
+            needsKindsReload = true
+            kindsFailed = false
         }
-        if active, !loading, let unfinished { begin(unfinished) }
+        if active {
+            if needsKindsReload && !kindsFailed {
+                beginKindsLoad()
+            } else {
+                scheduleAdmittedSections()
+            }
+        }
     }
 
-    private func clearSource() {
-        channels = []; selectedChannelID = nil; selectedKindID = nil
-        books = []; page = 0; canLoadMore = false; error = nil; failedRequest = nil
+    private func clearSections() {
+        sections = []
+        error = nil
     }
 
     private func invalidate() {
-        generation = UUID(); loading = false
-        // Cancellation signals the actual runtime calls. Keep every accepted
-        // task until its completion so close can drain even late transports.
+        generation = UUID()
+        kindsTask?.cancel()
+        kindsTask = nil
+        for task in sectionTasks.values { task.cancel() }
+        sectionTasks.removeAll()
+        for index in sections.indices {
+            if sections[index].state == .loading {
+                sections[index].state = .pending
+            }
+        }
+        syncLoadingFlag()
+        // Keep every accepted task until completion so close() drains late transports.
         for task in running.values { task.cancel() }
     }
 
-    private func begin(_ request: Request) {
-        invalidate(); unfinished = request; failedRequest = nil; loading = true; error = nil
-        let token = generation, taskID = UUID()
+    private func syncLoadingFlag() {
+        let next = kindsTask != nil || !sectionTasks.isEmpty
+        if loading != next {
+            loading = next
+        }
+    }
+
+    private func beginKindsLoad() {
+        invalidate()
+        kindsFailed = false
+        error = nil
+        let token = generation
+        let taskID = UUID()
         let task = Task { [weak self] in
             guard let self else { return }
             defer {
-                running[taskID] = nil
-                if generation == token { loading = false }
+                self.running[taskID] = nil
+                if self.generation == token {
+                    self.kindsTask = nil
+                    self.syncLoadingFlag()
+                }
             }
             do {
                 try Task.checkCancellation()
-                guard !closed, generation == token else { return }
-                if !initialized {
-                    try await feature.refreshSources()
+                guard !self.closed, self.generation == token else { return }
+                if !self.initialized {
+                    try await self.feature.refreshSources()
                     try Task.checkCancellation()
-                    guard !closed, generation == token else { return }
-                    initialized = true
-                    if let selectedSource, let current = feature.sources.first(where: { $0.id == selectedSource.id }) {
+                    guard !self.closed, self.generation == token else { return }
+                    self.initialized = true
+                    if let selected = self.selectedSource,
+                       let current = self.feature.sources.first(where: { $0.id == selected.id }) {
                         self.selectedSource = current
                     }
                 }
-                if selectedSource == nil { selectedSource = availableSources.first }
-                guard let source = selectedSource else { unfinished = nil; return }
-                guard accepts(source) else {
-                    unfinished = nil; error = NovelError.noSource.localizedDescription; return
+                if self.selectedSource == nil {
+                    self.selectedSource = self.availableSources.first
                 }
-                var nextChannels = channels
-                var channel = selectedChannel
-                var kind = selectedKind
-                let selectedURL = kind?.url
-                if request == .refresh {
-                    let kinds = try await feature.sourcesClient.kinds(source)
-                    guard isCurrent(token, source: source) else { return }
-                    nextChannels = NovelDiscoveryChannel.make(kinds)
-                    channel = nextChannels.first { $0.id == selectedChannelID && $0.items.contains { $0.url == selectedURL } } ??
-                        nextChannels.first { $0.items.contains { $0.url == selectedURL } } ?? nextChannels.first
-                    kind = channel?.items.first { $0.id == selectedKindID && $0.url == selectedURL } ??
-                        channel?.items.first { $0.url == selectedURL } ?? channel?.items.first
+                guard let source = self.selectedSource else {
+                    self.needsKindsReload = false
+                    return
                 }
-                let nextPage = request == .refresh ? 1 : page + 1
-                let incoming: [NovelBook]
-                if let kind {
-                    incoming = try await feature.sourcesClient.explore(source, url: kind.url, page: nextPage)
-                } else { incoming = [] }
-                guard isCurrent(token, source: source) else { return }
-                var nextBooks = request == .refresh ? [] : books
-                var identities = Set(nextBooks.map { $0.installationId + "\n" + $0.bookUrl })
-                let added = incoming.filter { identities.insert($0.installationId + "\n" + $0.bookUrl).inserted }
-                nextBooks.append(contentsOf: added)
-                // No partial refresh: kinds and first-page books are published
-                // only once the complete request succeeded.
-                channels = nextChannels; selectedChannelID = channel?.id; selectedKindID = kind?.id
-                books = nextBooks; page = kind == nil ? 0 : nextPage
-                canLoadMore = !added.isEmpty; unfinished = nil
+                guard self.accepts(source) else {
+                    self.needsKindsReload = false
+                    self.error = NovelError.noSource.localizedDescription
+                    return
+                }
+                let rawKinds = try await self.feature.sourcesClient.kinds(source)
+                guard self.isCurrent(token, source: source) else { return }
+                var built = NovelHomeSection.make(rawKinds)
+                for idx in 0..<min(Self.initialAdmittedCount, built.count) {
+                    built[idx].admitted = true
+                }
+                self.sections = built
+                self.needsKindsReload = false
+                self.kindsTask = nil
+                self.scheduleAdmittedSections()
             } catch {
-                guard !closed, !Task.isCancelled, generation == token else { return }
+                guard !self.closed, !Task.isCancelled, self.generation == token else { return }
                 if error is CancellationError { return }
-                unfinished = nil
-                failedRequest = request
-                self.error = (error as? RuntimeHTTPError) == .remote("WEB_INTERACTION_REQUIRED") ?
-                    "书源需要网页验证" : error.localizedDescription
+                self.kindsFailed = true
+                self.error = Self.errorText(error)
             }
         }
+        kindsTask = task
         running[taskID] = task
+        syncLoadingFlag()
+    }
+
+    private func scheduleAdmittedSections() {
+        guard active, !closed, kindsTask == nil,
+              let source = selectedSource, accepts(source) else {
+            syncLoadingFlag()
+            return
+        }
+        let token = generation
+        for index in sections.indices {
+            if sectionTasks.count >= Self.maxConcurrentSectionLoads { break }
+            let section = sections[index]
+            guard section.admitted, section.state == .pending, sectionTasks[section.id] == nil else { continue }
+            guard let defaultOption = section.options.first else {
+                sections[index].state = .ready
+                continue
+            }
+            sections[index].state = .loading
+            let sectionID = section.id
+            let url = defaultOption.url
+            let taskID = UUID()
+            let task = Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.running[taskID] = nil
+                    if self.generation == token {
+                        self.sectionTasks[sectionID] = nil
+                        self.scheduleAdmittedSections()
+                    }
+                }
+                do {
+                    try Task.checkCancellation()
+                    let incoming = try await self.feature.sourcesClient.explore(source, url: url, page: 1)
+                    guard self.isCurrent(token, source: source),
+                          let idx = self.sections.firstIndex(where: { $0.id == sectionID }) else { return }
+                    var seen = Set<String>()
+                    let unique = incoming.filter { seen.insert($0.installationId + "\n" + $0.bookUrl).inserted }
+                    self.sections[idx].books = unique
+                    self.sections[idx].state = .ready
+                } catch {
+                    guard self.isCurrent(token, source: source),
+                          let idx = self.sections.firstIndex(where: { $0.id == sectionID }) else { return }
+                    if error is CancellationError || Task.isCancelled {
+                        self.sections[idx].state = .pending
+                        return
+                    }
+                    let message = Self.errorText(error)
+                    self.sections[idx].state = .failed(message)
+                    if self.error == nil {
+                        self.error = message
+                    }
+                }
+            }
+            sectionTasks[sectionID] = task
+            running[taskID] = task
+        }
+        syncLoadingFlag()
     }
 
     private func isCurrent(_ token: UUID, source: NovelSource) -> Bool {
@@ -249,8 +379,197 @@ public final class NovelDiscoverySession: ObservableObject {
             selectedSource?.id == source.id && selectedSource?.revision == source.revision && accepts(source)
     }
 
+    static func errorText(_ error: Error) -> String {
+        (error as? RuntimeHTTPError) == .remote("WEB_INTERACTION_REQUIRED")
+            ? "书源需要网页验证"
+            : error.localizedDescription
+    }
+
     public func close() async {
-        closed = true; active = false; sourceObservation = nil; invalidate()
+        closed = true
+        active = false
+        sourceObservation = nil
+        invalidate()
         for task in Array(running.values) { await task.value }
+    }
+}
+
+@MainActor
+public final class NovelCategoryModel: ObservableObject {
+    public let feature: NovelFeature
+    public let source: NovelSource
+    public let sectionID: String
+    public let title: String
+    public let options: [NovelDiscoveryItem]
+
+    @Published public private(set) var selectedOptionID: String
+    @Published public private(set) var books: [NovelBook] = []
+    @Published public private(set) var isLoading = false
+    @Published public private(set) var hasMore = true
+    @Published public private(set) var error: String?
+
+    private var page = 0
+    private var hasLoadedInitial = false
+    private var closed = false
+    private var requestID: UUID?
+    private var task: Task<Void, Never>?
+    private var running: [UUID: Task<Void, Never>] = [:]
+    private var sourceObservation: AnyCancellable?
+
+    public init(
+        feature: NovelFeature,
+        source: NovelSource,
+        section: NovelHomeSection,
+        initialBooks: [NovelBook]? = nil
+    ) {
+        self.feature = feature
+        self.source = source
+        self.sectionID = section.id
+        self.title = section.title
+        self.options = section.options
+        self.selectedOptionID = section.options.first?.id ?? ""
+        if let initialBooks {
+            self.books = initialBooks
+            self.page = 1
+            self.hasLoadedInitial = true
+            self.hasMore = !initialBooks.isEmpty
+        }
+        sourceObservation = feature.$sources.dropFirst().sink { [weak self] sources in
+            self?.sourcesChanged(sources)
+        }
+    }
+
+    public var selectedOption: NovelDiscoveryItem? {
+        options.first(where: { $0.id == selectedOptionID }) ?? options.first
+    }
+
+    @discardableResult
+    public func loadIfNeeded() -> Task<Void, Never>? {
+        guard !closed else { return nil }
+        if let task { return task }
+        guard !hasLoadedInitial, error == nil else { return nil }
+        return loadPage(targetPage: 1, replacing: true)
+    }
+
+    @discardableResult
+    public func selectOption(_ id: String) -> Task<Void, Never>? {
+        guard !closed, selectedOptionID != id,
+              options.contains(where: { $0.id == id }) else { return nil }
+        retireRequest()
+        selectedOptionID = id
+        books = []
+        page = 0
+        hasLoadedInitial = false
+        hasMore = true
+        error = nil
+        return loadPage(targetPage: 1, replacing: true)
+    }
+
+    @discardableResult
+    public func refresh() -> Task<Void, Never>? {
+        guard !closed else { return nil }
+        retireRequest()
+        return loadPage(targetPage: 1, replacing: true)
+    }
+
+    @discardableResult
+    public func loadMore() -> Task<Void, Never>? {
+        guard !closed, hasMore else { return nil }
+        if let task { return task }
+        let nextPage = page == 0 ? 1 : page + 1
+        return loadPage(targetPage: nextPage, replacing: page == 0)
+    }
+
+    public func cancel() {
+        retireRequest()
+    }
+
+    public func close() async {
+        closed = true
+        sourceObservation = nil
+        retireRequest()
+        for task in Array(running.values) { await task.value }
+    }
+
+    private func acceptsSource() -> Bool {
+        !feature.closed && feature.sources.contains {
+            $0.id == source.id && $0.revision == source.revision && NovelDiscoverySession.canExplore($0)
+        }
+    }
+
+    private func sourcesChanged(_ sources: [NovelSource]) {
+        guard !closed else { return }
+        let stillValid = sources.contains {
+            $0.id == source.id && $0.revision == source.revision && NovelDiscoverySession.canExplore($0)
+        }
+        if !stillValid {
+            retireRequest()
+            hasMore = false
+            error = NovelError.noSource.localizedDescription
+        }
+    }
+
+    private func loadPage(targetPage: Int, replacing: Bool) -> Task<Void, Never>? {
+        guard acceptsSource(), let option = selectedOption else {
+            hasMore = false
+            error = NovelError.noSource.localizedDescription
+            return nil
+        }
+        error = nil
+        isLoading = true
+        let reqID = UUID()
+        let taskID = UUID()
+        requestID = reqID
+        let source = source
+        let url = option.url
+        let loadTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.running[taskID] = nil
+                if self.requestID == reqID {
+                    self.task = nil
+                    self.requestID = nil
+                    self.isLoading = false
+                }
+            }
+            do {
+                try Task.checkCancellation()
+                let incoming = try await self.feature.sourcesClient.explore(source, url: url, page: targetPage)
+                try Task.checkCancellation()
+                guard !self.closed, self.requestID == reqID, self.acceptsSource() else { return }
+                var seen = Set<String>()
+                let uniqueIncoming = incoming.filter { seen.insert($0.installationId + "\n" + $0.bookUrl).inserted }
+                if replacing {
+                    self.books = uniqueIncoming
+                    self.hasMore = !uniqueIncoming.isEmpty
+                } else {
+                    let existing = Set(self.books.map { $0.installationId + "\n" + $0.bookUrl })
+                    let added = uniqueIncoming.filter { !existing.contains($0.installationId + "\n" + $0.bookUrl) }
+                    self.books.append(contentsOf: added)
+                    self.hasMore = !added.isEmpty
+                }
+                self.page = targetPage
+                self.hasLoadedInitial = true
+            } catch {
+                guard !self.closed, self.requestID == reqID else { return }
+                if !(error is CancellationError) && !Task.isCancelled {
+                    self.error = NovelDiscoverySession.errorText(error)
+                }
+            }
+        }
+        task = loadTask
+        running[taskID] = loadTask
+        return loadTask
+    }
+
+    private func retireRequest() {
+        requestID = nil
+        task?.cancel()
+        task = nil
+        isLoading = false
+    }
+
+    deinit {
+        task?.cancel()
     }
 }

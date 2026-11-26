@@ -16,8 +16,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private readonly DispatcherTimer save;
     private readonly NovelWork saves = new();
     private readonly NovelPresentation.VisibilityWatch visibility;
-    private NovelDiscoveryView? homeDiscoveryView;
-    private NovelDiscoveryView? categoriesDiscoveryView;
+    private CatalogBrowseView? browseView;
     private NovelShelfView? shelfView;
     private NovelHistoryView? historyView;
     private NovelBookView? bookView;
@@ -25,6 +24,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private Task automaticOperation = Task.CompletedTask;
     private int autoTicks;
     private string renderedRoute = "";
+    private string renderedDataKey = "";
     private NovelBookSession? renderedSession;
     private DesktopWindow? attachedWindow;
     private readonly Dictionary<string, double> scrollPositions = [];
@@ -53,14 +53,19 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             if (disposed) return;
             if (!visible)
             {
-                homeDiscoveryView?.ClosePopups();
-                categoriesDiscoveryView?.ClosePopups();
+                module.CancelDiscovery();
                 module.CancelPresentation();
                 module.Session?.Cancel();
                 module.RunUi(_ => SavePositionAsync());
             }
             else if (module.Route == NovelCapability.ReaderRoute)
+            {
                 module.RefreshReaderSettings();
+            }
+            else if (module.Route is NovelCapability.HomeRoute or NovelCapability.DataRoute)
+            {
+                module.ResumeDiscoveryIfVisible();
+            }
         });
         Loaded += (_, _) => { AttachWindow(); Present(); };
         Unloaded += (_, _) => { if (IsLoaded) return; PauseReading(); save.Stop(); DetachWindow(); };
@@ -72,9 +77,10 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         module.Route switch
         {
             NovelCapability.HomeRoute => "小说",
-            NovelCapability.CategoriesRoute => "分类",
+            NovelCapability.DataRoute => "栏目详情",
             NovelCapability.ShelfRoute => "书架",
             NovelCapability.HistoryRoute => "阅读历史",
+            NovelCapability.BookRoute => "书籍详情",
             _ => ""
         },
         SearchVisible: module.Route != NovelCapability.ReaderRoute)
@@ -86,13 +92,44 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     public event EventHandler? HeaderChanged;
     internal void PostNotice(string text) => NoticeHost.Post(text);
 
+    private string CurrentDataScrollKey =>
+        module.ExploreSource is { } src && module.DataSections.Contains(module.ActiveNovelData)
+            ? $"{NovelCapability.DataRoute}:{src.InstallationId}:{module.ActiveNovelData.Key}"
+            : NovelCapability.DataRoute;
+
+    internal void ResetBrowseScroll()
+    {
+        foreach (var key in scrollPositions.Keys.Where(k =>
+            k == NovelCapability.HomeRoute || k == NovelCapability.DataRoute || k.StartsWith(NovelCapability.DataRoute + ":", StringComparison.Ordinal)).ToArray())
+        {
+            scrollPositions.Remove(key);
+        }
+        browseView?.ResetHomeScroll();
+        browseView?.ResetDataScroll();
+    }
+
+    internal void ClearDataScrollMemory()
+    {
+        scrollPositions.Remove(CurrentDataScrollKey);
+        browseView?.ResetDataScroll();
+    }
+
     private void SaveCurrentScrollPosition()
     {
         if (string.IsNullOrEmpty(renderedRoute)) return;
-        if (BodyHost.Content is NovelDiscoveryView oldDiscovery)
-            scrollPositions[renderedRoute] = oldDiscovery.ScrollHost.VerticalOffset;
+        if (renderedRoute == NovelCapability.HomeRoute && browseView is not null)
+        {
+            scrollPositions[NovelCapability.HomeRoute] = browseView.HomeScrollHost.VerticalOffset;
+        }
+        else if (renderedRoute == NovelCapability.DataRoute && browseView is not null)
+        {
+            string key = string.IsNullOrEmpty(renderedDataKey) ? NovelCapability.DataRoute : renderedDataKey;
+            scrollPositions[key] = browseView.DataScrollHost.VerticalOffset;
+        }
         else if (BodyHost.Content is NovelBookView oldBook)
+        {
             scrollPositions[renderedRoute] = oldBook.ScrollHost.VerticalOffset;
+        }
     }
 
     private void RestoreScrollPosition(ScrollViewer scroller, string routeKey)
@@ -115,9 +152,8 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         bool headerRouteChanged = renderedRoute != module.Route;
         if (reading)
         {
-            homeDiscoveryView?.ClosePopups();
-            categoriesDiscoveryView?.ClosePopups();
             SaveCurrentScrollPosition();
+            BrowseHost.Visibility = Visibility.Collapsed;
             BodyHost.Content = null;
             BodyHost.Visibility = Visibility.Collapsed;
             ReaderSurface.Visibility = Visibility.Visible;
@@ -132,39 +168,47 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         {
             PauseReading();
             ReaderSurface.Visibility = Visibility.Collapsed;
-            BodyHost.Visibility = Visibility.Visible;
-            BodyHost.Margin = module.Route == NovelCapability.BookRoute ? new(40, 20, 24, 20) : new(0);
-            bool routeChanged = renderedRoute != module.Route || BodyHost.Content is null;
+            bool isBrowse = module.Route is NovelCapability.HomeRoute or NovelCapability.DataRoute;
+            string currentDataKey = CurrentDataScrollKey;
+            bool routeChanged = renderedRoute != module.Route ||
+                (module.Route == NovelCapability.DataRoute && renderedDataKey != currentDataKey) ||
+                (isBrowse ? BrowseHost.Content is null : BodyHost.Content is null);
             if (routeChanged)
             {
-                homeDiscoveryView?.ClosePopups();
-                categoriesDiscoveryView?.ClosePopups();
                 SaveCurrentScrollPosition();
-                switch (module.Route)
+                if (isBrowse)
                 {
-                    case NovelCapability.BookRoute:
-                        bookView ??= new NovelBookView(module, SwitchSourceAsync, CatalogAsync);
-                        BodyHost.Content = bookView;
-                        RestoreScrollPosition(bookView.ScrollHost, module.Route);
-                        break;
-                    case NovelCapability.ShelfRoute:
-                        shelfView ??= new NovelShelfView(module);
-                        BodyHost.Content = shelfView;
-                        break;
-                    case NovelCapability.HistoryRoute:
-                        historyView ??= new NovelHistoryView(module);
-                        BodyHost.Content = historyView;
-                        break;
-                    case NovelCapability.CategoriesRoute:
-                        categoriesDiscoveryView ??= new NovelDiscoveryView(module, categories: true);
-                        BodyHost.Content = categoriesDiscoveryView;
-                        RestoreScrollPosition(categoriesDiscoveryView.ScrollHost, module.Route);
-                        break;
-                    default:
-                        homeDiscoveryView ??= new NovelDiscoveryView(module, categories: false);
-                        BodyHost.Content = homeDiscoveryView;
-                        RestoreScrollPosition(homeDiscoveryView.ScrollHost, module.Route);
-                        break;
+                    BodyHost.Content = null;
+                    BodyHost.Visibility = Visibility.Collapsed;
+                    browseView ??= new CatalogBrowseView(module);
+                    if (!ReferenceEquals(BrowseHost.Content, browseView))
+                        BrowseHost.Content = browseView;
+                    BrowseHost.Visibility = Visibility.Visible;
+                    RestoreScrollPosition(
+                        module.Route == NovelCapability.DataRoute ? browseView.DataScrollHost : browseView.HomeScrollHost,
+                        module.Route == NovelCapability.DataRoute ? CurrentDataScrollKey : NovelCapability.HomeRoute);
+                }
+                else
+                {
+                    BrowseHost.Visibility = Visibility.Collapsed;
+                    BodyHost.Visibility = Visibility.Visible;
+                    BodyHost.Margin = module.Route == NovelCapability.BookRoute ? new(40, 20, 24, 20) : new(0);
+                    switch (module.Route)
+                    {
+                        case NovelCapability.BookRoute:
+                            bookView ??= new NovelBookView(module, SwitchSourceAsync, CatalogAsync);
+                            BodyHost.Content = bookView;
+                            RestoreScrollPosition(bookView.ScrollHost, module.Route);
+                            break;
+                        case NovelCapability.ShelfRoute:
+                            shelfView ??= new NovelShelfView(module);
+                            BodyHost.Content = shelfView;
+                            break;
+                        case NovelCapability.HistoryRoute:
+                            historyView ??= new NovelHistoryView(module);
+                            BodyHost.Content = historyView;
+                            break;
+                    }
                 }
             }
 
@@ -179,15 +223,8 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
                 case NovelCapability.HistoryRoute:
                     historyView?.Present();
                     break;
-                case NovelCapability.CategoriesRoute:
-                    categoriesDiscoveryView?.Present();
-                    categoriesDiscoveryView?.PresentFailureIfNeeded();
-                    break;
-                default:
-                    homeDiscoveryView?.Present();
-                    homeDiscoveryView?.PresentFailureIfNeeded();
-                    break;
             }
+            renderedDataKey = module.Route == NovelCapability.DataRoute ? currentDataKey : "";
         }
         renderedRoute = module.Route;
         renderedSession = module.Session;
@@ -395,8 +432,6 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     {
         if (disposed) return;
         disposed = true;
-        homeDiscoveryView?.Detach();
-        categoriesDiscoveryView?.Detach();
         visibility.Dispose();
         PauseReading();
         save.Stop();

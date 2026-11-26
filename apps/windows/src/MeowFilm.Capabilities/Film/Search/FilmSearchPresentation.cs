@@ -23,8 +23,13 @@ public sealed class FilmSearchCardItem : IFilmCardDisplay, INotifyPropertyChange
     public bool HasScore => Score.Length > 0;
     public bool HasTextBadge => TextBadge.Length > 0;
     public bool HasSubtitle => Subtitle.Length > 0;
+    public bool ShowPlayMark => true;
+    public NovelBook? NovelBook => null;
+    public NovelSourceService? NovelSources => null;
     public FilmSearchContext SearchContext { get; }
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    public bool HasSameDisplay(ICatalogCardDisplay other) => ReferenceEquals(this, other);
 
     public FilmCardItem ToCard() => new(Id, Title, Poster, Score)
     {

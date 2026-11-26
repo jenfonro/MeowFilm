@@ -65,7 +65,7 @@
     </DataTemplate>
    </ItemsControl.ItemTemplate>
   </ItemsControl>
-  <local:Shelf x:Name="EpisodeShelf" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" MinimumCardWidth="240" HorizontalOffset="{x:Bind Directory.HorizontalOffset, Mode=TwoWay}" NavigationButtonStyle="{StaticResource Film.ShelfArrow}" Visibility="{x:Bind Page.ShowEpisodeCards, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" CardTemplate="{StaticResource Film.EpisodeCard}" AutomationProperties.Name="横向选集列表" />
+  <local:Shelf x:Name="EpisodeShelf" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" MinimumCardWidth="240" HorizontalOffset="{x:Bind Directory.HorizontalOffset, Mode=TwoWay}" NavigationButtonStyle="{StaticResource Capability.ShelfArrow}" Visibility="{x:Bind Page.ShowEpisodeCards, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" CardTemplate="{StaticResource Film.EpisodeCard}" AutomationProperties.Name="横向选集列表" />
   <ListView x:Name="EpisodeList" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" AutomationProperties.Name="逐集列表" Visibility="{x:Bind Page.ShowEpisodeList, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" SelectionMode="None" IsItemClickEnabled="False" HorizontalContentAlignment="Stretch">
    <ListView.ItemsPanel>
     <ItemsPanelTemplate>

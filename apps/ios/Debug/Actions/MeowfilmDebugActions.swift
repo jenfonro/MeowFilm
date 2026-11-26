@@ -479,8 +479,12 @@ extension MeowfilmDebugNavigator {
            let entry = novel.local.entries.first(where: { $0.book.id == bookId || $0.book.bookUrl == bookId }) {
             return entry.book
         }
+        if let categoryVC = activeBusinessController() as? NovelCategoryViewController,
+           let found = categoryVC.debugBooks.first(where: { $0.id == bookId || $0.bookUrl == bookId }) {
+            return found
+        }
         if let home = coordinator?.novelHome,
-           let found = home.discovery.books.first(where: { $0.id == bookId || $0.bookUrl == bookId }) {
+           let found = home.discovery.allLoadedBooks.first(where: { $0.id == bookId || $0.bookUrl == bookId }) {
             return found
         }
         return nil

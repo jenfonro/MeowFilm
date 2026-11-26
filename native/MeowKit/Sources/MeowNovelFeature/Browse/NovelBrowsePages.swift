@@ -5,211 +5,153 @@ import MeowDebug
 import MeowUI
 
 @MainActor
-public final class NovelHomeViewController: PageViewController, UITableViewDelegate {
+public final class NovelHomeViewController: PosterHomeViewController {
     public var onSelect: ((NovelBook) -> Void)?
+    public var onSelectCategory: ((NovelCategoryModel) -> Void)?
     public let discovery: NovelDiscoverySession
-    private lazy var channels = FilterTagsView(themeProvider: themeProvider, identifier: "novel.channel")
-    private lazy var kinds = FilterTagsView(themeProvider: themeProvider, identifier: "novel.kind")
-    private let backdrop = UIButton(type: .custom)
-    private let table = UITableView(frame: .zero, style: .plain)
-    private var dataSource: UITableViewDiffableDataSource<Int, String>!
-    private let empty = UILabel()
-    private let more = UIButton(type: .system)
-    private let activity = UIActivityIndicatorView(style: .medium)
-    private var channelsHeight: NSLayoutConstraint!
-    private var kindsHeight: NSLayoutConstraint!
-    private var kindsTop: NSLayoutConstraint!
-    private var tableTop: NSLayoutConstraint!
-    private var layoutWidth: CGFloat = -1
-    private var bookProjection = IndexedDiffableProjection<Int, String, NovelBook>()
-    var renderedBooks: [NovelBook] { bookProjection.items }
-    private var renderedTarget = ""
 
     public init(feature: NovelFeature, themeProvider: any PageThemeProviding) {
         discovery = NovelDiscoverySession(feature: feature)
-        super.init(themeProvider: themeProvider)
+        super.init(
+            configuration: PosterHomeConfiguration(
+                pageAccessibilityID: "novel.home",
+                collectionAccessibilityID: "novel.home.sections",
+                moreIdentifierPrefix: "novel.home.more"
+            ),
+            themeProvider: themeProvider
+        )
+        pageTitle = "小说"
     }
+
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.accessibilityIdentifier = "novel.home"
-        table.delegate = self
-        table.backgroundColor = .clear; table.separatorStyle = .none
-        table.rowHeight = UITableView.automaticDimension; table.estimatedRowHeight = 130
-        table.keyboardDismissMode = .onDrag
-        table.accessibilityIdentifier = "novel.books"
-        table.register(NovelBookCell.self, forCellReuseIdentifier: NovelBookCell.reuseIdentifier)
-        dataSource = UITableViewDiffableDataSource<Int, String>(tableView: table) { [weak self] tableView, indexPath, rowID in
-            let cell = tableView.dequeueReusableCell(withIdentifier: NovelBookCell.reuseIdentifier, for: indexPath) as! NovelBookCell
-            if let self, let book = self.bookProjection[rowID] {
-                cell.configure(book, feature: self.discovery.feature, theme: self.theme, loadCover: self.isPageVisible)
-            }
-            return cell
-        }
-        dataSource.defaultRowAnimation = .none
-        table.refreshControl = UIRefreshControl()
-        table.refreshControl?.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            guard isPageVisible else { table.refreshControl?.endRefreshing(); return }
-            discovery.refresh()
-        }, for: .valueChanged)
-        empty.font = .preferredFont(forTextStyle: .body); empty.adjustsFontForContentSizeCategory = true
-        empty.textAlignment = .center; empty.numberOfLines = 0
-        empty.accessibilityIdentifier = "novel.books.empty"
-        more.setTitle("加载更多", for: .normal); more.titleLabel?.font = .systemFont(ofSize: 14)
-        more.accessibilityIdentifier = "novel.explore.more"
-        more.addAction(UIAction { [weak self] _ in
-            self?.discovery.loadMore()
-        }, for: .touchUpInside)
-        more.addSubview(activity); activity.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([activity.centerXAnchor.constraint(equalTo: more.centerXAnchor),
-                                     activity.centerYAnchor.constraint(equalTo: more.centerYAnchor)])
-        backdrop.backgroundColor = UIColor(PageTheme.scrim)
-        backdrop.accessibilityLabel = "收起标签"; backdrop.accessibilityIdentifier = "novel.tags.dismiss"
-        backdrop.isHidden = true
-        backdrop.addAction(UIAction { [weak self] _ in self?.collapseTags() }, for: .touchUpInside)
-        channels.onExpansionChanged = { [weak self] in
-            guard let self else { return }
-            if channels.isExpanded { kinds.collapse(); view.bringSubviewToFront(channels) }
-            updateTagsLayout()
-        }
-        kinds.onExpansionChanged = { [weak self] in
-            guard let self else { return }
-            if kinds.isExpanded { channels.collapse(); view.bringSubviewToFront(kinds) }
-            updateTagsLayout()
-        }
-        for child in [table, backdrop, kinds, channels] {
-            view.addSubview(child); child.translatesAutoresizingMaskIntoConstraints = false
-        }
-        channelsHeight = channels.heightAnchor.constraint(equalToConstant: 0)
-        kindsHeight = kinds.heightAnchor.constraint(equalToConstant: 0)
-        kindsTop = kinds.topAnchor.constraint(equalTo: contentTopAnchor)
-        tableTop = table.topAnchor.constraint(equalTo: contentTopAnchor)
-        NSLayoutConstraint.activate([
-            channels.topAnchor.constraint(equalTo: contentTopAnchor), channelsHeight,
-            channels.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-            channels.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            kindsTop, kindsHeight,
-            kinds.leadingAnchor.constraint(equalTo: channels.leadingAnchor), kinds.trailingAnchor.constraint(equalTo: channels.trailingAnchor),
-            tableTop, table.leadingAnchor.constraint(equalTo: channels.leadingAnchor),
-            table.trailingAnchor.constraint(equalTo: channels.trailingAnchor), table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            backdrop.topAnchor.constraint(equalTo: contentTopAnchor), backdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            backdrop.leadingAnchor.constraint(equalTo: view.leadingAnchor), backdrop.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-        ])
         let discoveryChanges = Publishers.MergeMany([
             discovery.$selectedSource.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            discovery.$channels.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            discovery.$selectedChannelID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            discovery.$selectedKindID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            discovery.$books.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$sections.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             discovery.$loading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            discovery.$canLoadMore.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             discovery.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
         ]).eraseToAnyPublisher()
         observe(discoveryChanges, whenVisible: true) { [weak self] in self?.render() }
-        observe(discovery.feature.$error.dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.presentErrors() }
+        observe(discovery.feature.$error.dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
+            self?.presentErrors()
+        }
         render()
     }
+
     public override func pageDidBecomeVisible() {
         discovery.activate()
-        render(reloadBooks: true)
-        reconfigureVisibleBookCells()
+        render()
+        super.pageDidBecomeVisible()
     }
-    public override func pageDidBecomeHidden() { discovery.deactivate(); table.refreshControl?.endRefreshing(); collapseTags(); cancelCovers() }
+
+    public override func pageDidBecomeHidden() {
+        discovery.deactivate()
+        super.pageDidBecomeHidden()
+    }
+
     public override func pageDidBecomeInactive() {
-        discovery.deactivate(); collapseTags(); cancelCovers()
+        discovery.deactivate()
+        super.pageDidBecomeInactive()
         Task { [discovery] in await discovery.close() }
     }
-    public override func applyTheme() {
-        super.applyTheme()
-        if isViewLoaded, tableTop != nil {
-            configureTags()
-            empty.textColor = UIColor(theme.muted)
-            table.refreshControl?.tintColor = UIColor(theme.accent)
-            more.tintColor = UIColor(theme.ink)
-            activity.color = UIColor(theme.muted)
-            for cell in table.visibleCells { (cell as? NovelBookCell)?.applyTheme(theme) }
-        }
-    }
-    public override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        if abs(channels.bounds.width - layoutWidth) > 0.5 { updateTagsLayout() }
-        if table.tableFooterView != nil, more.frame.width != table.bounds.width {
-            more.frame.size.width = table.bounds.width; table.tableFooterView = more
-        }
-    }
-    private func configureTags() {
-        channels.configure(filters: discovery.channels.map { FilterTag(id: $0.id, title: $0.title) },
-                           selectedID: discovery.selectedChannelID ?? "", theme: theme) { [weak self] id in
-            self?.discovery.selectChannel(id: id)
-        }
-        kinds.configure(filters: (discovery.selectedChannel?.items ?? []).map { FilterTag(id: $0.id, title: $0.title) },
-                        selectedID: discovery.selectedKindID ?? "", theme: theme) { [weak self] id in
-            self?.discovery.selectKind(id: id)
-        }
-    }
-    private func render(reloadBooks: Bool = false) {
-        guard isViewLoaded, tableTop != nil else { return }
-        configureTags()
-        updateTagsLayout()
-        let target = (discovery.selectedSource?.id ?? "") + "\n" + (discovery.selectedKind?.url ?? "")
-        let changedTarget = target != renderedTarget
-        renderedTarget = target
-        if reloadBooks || renderedBooks != discovery.books {
-            applyBooksSnapshot(discovery.books)
-        }
-        if changedTarget { table.setContentOffset(.zero, animated: false) }
-        empty.text = discovery.loading ? "加载中" : discovery.selectedSource == nil ? "没有可发现书源" : "暂无书籍"
-        table.backgroundView = discovery.books.isEmpty && discovery.error == nil ? empty : nil
-        more.setTitle(discovery.loading ? nil : "加载更多", for: .normal)
-        more.isEnabled = !discovery.loading && discovery.canLoadMore
-        if discovery.loading { activity.startAnimating() }
-        else { activity.stopAnimating(); table.refreshControl?.endRefreshing() }
-        if discovery.loading || discovery.canLoadMore {
-            more.frame = CGRect(x: 0, y: 0, width: table.bounds.width, height: 44)
-            if table.tableFooterView !== more { table.tableFooterView = more }
-        } else { table.tableFooterView = nil }
-        presentErrors()
-    }
-    private func updateTagsLayout() {
-        guard tableTop != nil else { return }
-        let width = channels.bounds.width
-        layoutWidth = width
-        channels.updateLayout(width: width); kinds.updateLayout(width: width)
-        channelsHeight.constant = channels.preferredHeight(for: width)
-        kindsHeight.constant = kinds.preferredHeight(for: width)
-        kindsTop.constant = channels.collapsedHeight
-        tableTop.constant = channels.collapsedHeight + kinds.collapsedHeight
-        channels.isHidden = channelsHeight.constant == 0; kinds.isHidden = kindsHeight.constant == 0
-        let expanded = channels.isExpanded || kinds.isExpanded
-        backdrop.isHidden = !expanded
-        if expanded {
-            view.bringSubviewToFront(backdrop)
-            view.bringSubviewToFront(channels.isExpanded ? channels : kinds)
-        }
-        table.accessibilityElementsHidden = expanded
-        kinds.accessibilityElementsHidden = channels.isExpanded
-        channels.accessibilityElementsHidden = kinds.isExpanded
-    }
-    private func collapseTags() { channels.collapse(); kinds.collapse() }
-    private func cancelCovers() { for cell in table.visibleCells { (cell as? NovelBookCell)?.cancelPendingLoad() } }
 
-    private func rowID(for book: NovelBook) -> String {
+    public override func didRequestRefresh() {
+        clearErrorSource("discovery")
+        discovery.refresh()
+    }
+
+    public override func didDisplaySection(sectionID: String) {
+        discovery.admitSection(id: sectionID)
+    }
+
+    public override func didTapSectionMore(sectionID: String) {
+        guard let category = discovery.categoryModel(sectionID: sectionID) else { return }
+        onSelectCategory?(category)
+    }
+
+    public override func didSelectCard(inSection sectionID: String, cardID: String, index: Int) {
+        guard let section = discovery.sections.first(where: { $0.id == sectionID }) else { return }
+        let book: NovelBook?
+        if section.books.indices.contains(index),
+           Self.cardID(for: section.books[index]) == cardID {
+            book = section.books[index]
+        } else {
+            book = section.books.first { Self.cardID(for: $0) == cardID }
+        }
+        guard let book else { return }
+        onSelect?(book)
+    }
+
+    static func cardID(for book: NovelBook) -> String {
         "\(book.installationId)\u{1F}\(book.bookUrl)"
     }
 
-    private func applyBooksSnapshot(_ books: [NovelBook]) {
-        let update = bookProjection.update(section: 0, items: books, id: rowID(for:))
-        dataSource.applyIfNeeded(update, animatingDifferences: false)
+    static func makePosterCard(_ book: NovelBook, feature: NovelFeature) -> PosterCatalogCard {
+        let source = try? feature.source(for: book)
+        let coverKey: NovelImageStore.Key? = if let source, !book.coverUrl.isEmpty {
+            NovelImageStore.Key(source: source, bookUrl: book.bookUrl, url: book.coverUrl, kind: "cover")
+        } else {
+            nil
+        }
+        let artwork = PosterCatalogArtwork.custom(
+            id: coverKey.map { AnyHashable($0) },
+            placeholderSymbol: "book.closed",
+            cached: { [weak feature] in
+                guard let feature, let source, !book.coverUrl.isEmpty else { return nil }
+                return feature.images.cached(source: source, bookUrl: book.bookUrl, url: book.coverUrl, kind: "cover")
+            },
+            load: { [weak feature] in
+                guard let feature, let source, !book.coverUrl.isEmpty, feature.accepts(source) else { return nil }
+                do {
+                    let image = try await feature.images.read(source: source, book: book, url: book.coverUrl, kind: "cover")
+                    guard !Task.isCancelled, feature.accepts(source) else { return nil }
+                    return image
+                } catch {
+                    if (error as? NovelError) == .imageReleaseFailed {
+                        feature.error = error.localizedDescription
+                    }
+                    if !(error is CancellationError) && !Task.isCancelled {
+                        DebugRuntime.logError(.novel, sub: "cover", event: "load.failed", error: error, data: .object([
+                            "sourceId": .string(source.id),
+                            "coverUrl": .string(book.coverUrl)
+                        ]), level: .warn)
+                    }
+                    return nil
+                }
+            }
+        )
+        return PosterCatalogCard(
+            id: cardID(for: book),
+            title: book.name,
+            accessibilityIdentifier: "novel.poster.\(book.id)",
+            artworkIdentity: coverKey.map { AnyHashable($0) },
+            artwork: artwork
+        )
     }
 
-    private func reconfigureVisibleBookCells() {
-        for indexPath in table.indexPathsForVisibleRows ?? [] {
-            guard let rowID = dataSource.itemIdentifier(for: indexPath),
-                  let book = bookProjection[rowID],
-                  let cell = table.cellForRow(at: indexPath) as? NovelBookCell else { continue }
-            cell.configure(book, feature: discovery.feature, theme: theme, loadCover: isPageVisible)
+    private func render() {
+        guard isViewLoaded else { return }
+        let feature = discovery.feature
+        let projected = discovery.sections.map { section in
+            PosterCatalogSection(
+                id: section.id,
+                title: section.title,
+                hasMore: !section.options.isEmpty,
+                statusText: section.statusText,
+                items: section.books.map { Self.makePosterCard($0, feature: feature) }
+            )
         }
+        let emptyText = discovery.selectedSource == nil ? "没有可发现书源" : "暂无可用分类"
+        applyHomeState(
+            sourceID: discovery.selectedSource.map { "\($0.id)\u{1F}\($0.revision)" },
+            sections: projected,
+            isLoading: discovery.loading,
+            hasError: discovery.error != nil,
+            emptyText: emptyText
+        )
+        presentErrors()
     }
+
     private func presentErrors() {
         guard isPageVisible else { return }
         syncErrorSource("discovery", message: discovery.error, retry: { [weak self] in
@@ -220,21 +162,136 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
             enqueueError(error)
         }
     }
-    public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        tableView.deselectRow(at: indexPath, animated: true)
-        guard let rowID = dataSource.itemIdentifier(for: indexPath), let book = bookProjection[rowID] else { return }
-        onSelect?(book)
+
+    deinit {
+        let discovery = discovery
+        Task { await discovery.close() }
     }
-    public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
-        (cell as? NovelBookCell)?.cancelPendingLoad()
+}
+
+@MainActor
+public final class NovelCategoryViewController: PosterCategoryViewController {
+    public var onSelectItem: ((NovelBook) -> Void)?
+    public let model: NovelCategoryModel
+    private let feature: NovelFeature
+    var renderedBooks: [NovelBook] = []
+
+    public init(model: NovelCategoryModel, feature: NovelFeature, themeProvider: any PageThemeProviding) {
+        self.model = model
+        self.feature = feature
+        super.init(
+            configuration: PosterCategoryConfiguration(
+                pageAccessibilityID: "novel.category.\(model.sectionID)",
+                collectionAccessibilityID: "novel.category.grid",
+                filterIdentifierPrefix: "novel.category",
+                moreButtonAccessibilityID: "novel.category.more",
+                loadingAccessibilityID: "novel.category.loading",
+                emptyText: "暂无书籍"
+            ),
+            themeProvider: themeProvider
+        )
+        pageTitle = model.title
     }
-    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard isPageVisible, scrollView.isDragging || scrollView.isDecelerating, discovery.error == nil,
-              scrollView.contentOffset.y > 0,
-              scrollView.contentOffset.y + scrollView.bounds.height > scrollView.contentSize.height - 200 else { return }
-        discovery.loadMore()
+
+    public override func viewDidLoad() {
+        super.viewDidLoad()
+        observe(model, whenVisible: true) { [weak self] in self?.render() }
+        observe(feature.$error.dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
+            self?.presentErrors()
+        }
+        render()
     }
-    deinit { let discovery = discovery; Task { await discovery.close() } }
+
+    public override func pageDidBecomeVisible() {
+        model.loadIfNeeded()
+        render()
+        super.pageDidBecomeVisible()
+    }
+
+    public override func pageDidBecomeHidden() {
+        model.cancel()
+        super.pageDidBecomeHidden()
+    }
+
+    public override func pageDidBecomeInactive() {
+        model.cancel()
+        super.pageDidBecomeInactive()
+        let model = model
+        Task { await model.close() }
+    }
+
+    public override func didSelectCard(cardID: String, index: Int) {
+        let book: NovelBook?
+        if renderedBooks.indices.contains(index),
+           NovelHomeViewController.cardID(for: renderedBooks[index]) == cardID {
+            book = renderedBooks[index]
+        } else {
+            book = renderedBooks.first { NovelHomeViewController.cardID(for: $0) == cardID }
+        }
+        guard let book else { return }
+        onSelectItem?(book)
+    }
+
+    public override func didSelectFilter(rowID: String, value: String) {
+        clearErrorSource("novel.category")
+        model.selectOption(value)
+    }
+
+    public override func didRequestRefresh() {
+        clearErrorSource("novel.category")
+        model.refresh()
+    }
+
+    public override func didRequestLoadMore() {
+        clearErrorSource("novel.category")
+        model.loadMore()
+    }
+
+    private func render() {
+        guard isViewLoaded else { return }
+        renderedBooks = model.books
+        let filterRows: [PosterCategoryFilterRowModel] = if model.options.count > 1 {
+            [
+                PosterCategoryFilterRowModel(
+                    id: "category",
+                    title: "分类",
+                    selectedID: model.selectedOptionID,
+                    options: model.options.map { FilterTag(id: $0.id, title: $0.title) }
+                )
+            ]
+        } else {
+            []
+        }
+        let cards = renderedBooks.map { NovelHomeViewController.makePosterCard($0, feature: feature) }
+        applyCategoryState(
+            filterRows: filterRows,
+            cards: cards,
+            isLoading: model.isLoading,
+            hasMore: model.hasMore,
+            hasError: model.error != nil
+        )
+        presentErrors()
+    }
+
+    private func presentErrors() {
+        guard isPageVisible else { return }
+        let retry: (() -> Void)? = model.hasMore ? { [weak self] in self?.model.loadMore() } : nil
+        syncErrorSource(
+            "novel.category",
+            message: model.error,
+            token: model.error.map { AnyHashable($0) },
+            retry: retry
+        )
+        if let error = feature.error {
+            feature.error = nil
+            enqueueError(error)
+        }
+    }
+
+    deinit {
+        let model = model
+        Task { await model.close() }
+    }
 }
 
 @MainActor

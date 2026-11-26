@@ -109,12 +109,17 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         collection.delaysContentTouches = false
         collection.delegate = self
         collection.accessibilityIdentifier = "film.search.grid"
-        collection.register(FilmPosterCell.self, forCellWithReuseIdentifier: FilmPosterCell.reuseIdentifier)
+        collection.register(PosterCatalogCell.self, forCellWithReuseIdentifier: PosterCatalogCell.reuseIdentifier)
         dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { [weak self] view, path, key in
             guard let self, let content = self.presentation.cards[key]?.content else { return nil }
-            let cell = view.dequeueReusableCell(withReuseIdentifier: FilmPosterCell.reuseIdentifier, for: path)
-            (cell as? FilmPosterCell)?.configure(item: content.item,
-                images: self.images, theme: self.theme, textBadge: content.textBadge, label: content.label)
+            let cell = view.dequeueReusableCell(withReuseIdentifier: PosterCatalogCell.reuseIdentifier, for: path)
+            let card = FilmHomeViewController.makePosterCard(
+                content.item,
+                images: self.images,
+                textBadge: content.textBadge,
+                label: content.label
+            )
+            (cell as? PosterCatalogCell)?.configure(card: card, theme: self.theme)
             return cell
         }
         var initialBuilder = DiffableSnapshotBuilder<Int, FilmSearchResultsPresentation.Identifier>()
@@ -209,7 +214,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         rawSwitch.applyTheme(theme)
         guard changed else { return }
         for cell in collection.visibleCells {
-            (cell as? FilmPosterCell)?.applyTheme(theme)
+            (cell as? PosterCatalogCell)?.applyTheme(theme)
         }
     }
 
@@ -322,10 +327,10 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
             let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .absolute(width), heightDimension: .fractionalHeight(1)))
             let group = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1),
                 heightDimension: .absolute(width * 1.5 + 59)), repeatingSubitem: item, count: 3)
-            group.interItemSpacing = .fixed(FilmPosterMetrics.spacing)
+            group.interItemSpacing = .fixed(PosterCatalogMetrics.spacing)
             let section = NSCollectionLayoutSection(group: group)
             section.interGroupSpacing = 16
-            section.contentInsets = .init(top: 4, leading: FilmPosterMetrics.inset, bottom: 16, trailing: FilmPosterMetrics.inset)
+            section.contentInsets = .init(top: 4, leading: PosterCatalogMetrics.inset, bottom: 16, trailing: PosterCatalogMetrics.inset)
             return section
         }
     }
@@ -338,22 +343,22 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     }
     public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
-        (cell as? FilmPosterCell)?.resumePendingLoad()
+        (cell as? PosterCatalogCell)?.resumePendingLoad()
     }
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
-        guard let poster = cell as? FilmPosterCell else { return }
+        guard let poster = cell as? PosterCatalogCell else { return }
         poster.resetPressFeedback()
         poster.cancelPendingLoad()
     }
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        for cell in collection.visibleCells.compactMap({ $0 as? FilmPosterCell }) { cell.resetPressFeedback() }
+        for cell in collection.visibleCells.compactMap({ $0 as? PosterCatalogCell }) { cell.resetPressFeedback() }
     }
     private func cancelVisibleArtworks() {
-        for cell in collection.visibleCells.compactMap({ $0 as? FilmPosterCell }) { cell.cancelPendingLoad() }
+        for cell in collection.visibleCells.compactMap({ $0 as? PosterCatalogCell }) { cell.cancelPendingLoad() }
     }
     private func resumeVisibleArtworks() {
-        for cell in collection.visibleCells.compactMap({ $0 as? FilmPosterCell }) { cell.resumePendingLoad() }
+        for cell in collection.visibleCells.compactMap({ $0 as? PosterCatalogCell }) { cell.resumePendingLoad() }
     }
 }
 #endif

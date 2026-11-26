@@ -359,11 +359,7 @@ extension FilmHomeViewController: DebugPageInspectable, DebugPageActionable, Deb
                 throw DebugAPIError.invalidArgument("Provide 'itemIndex' or 'itemId'")
             }
             let category = model.categoryModel(sectionID: sec.id)?.category
-            if let onSelectPlaybackItem {
-                onSelectPlaybackItem(item, category)
-            } else {
-                onSelectItem?(item)
-            }
+            onSelectPlaybackItem?(item, category)
             return .object(["openedFilmId": .string(item.id), "title": .string(item.title)])
         case "section.more":
             let sec = try resolveSection(request.params)
