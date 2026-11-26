@@ -1,6 +1,7 @@
 import UIKit
 import MeowContracts
 import MeowDebug
+import MeowRuntime
 import MeowUI
 import MeowPlayback
 import MeowMusicFeature
@@ -269,6 +270,120 @@ extension MeowfilmDebugNavigator {
                 guard let novel = assembly.novel else { throw DebugAPIError.invalidState("Novel feature unavailable") }
                 try await novel.refreshSources()
                 return .object(["sourcesCount": .int(novel.sources.count)])
+            }
+            if domain == "film" {
+                guard let resources = assembly.resources else { throw DebugAPIError.invalidState("Film resources unavailable") }
+                switch cmd {
+                case "refresh_sources":
+                    try await resources.filmSourceSettings.refresh()
+                    let snap = await resources.filmSourceSettings.snapshot
+                    return .object([
+                        "executed": .bool(true),
+                        "command": .string(cmd),
+                        "catsCount": .int(snap.cats.count),
+                        "videosCount": .int(snap.videos.count)
+                    ])
+                case "cat.import":
+                    let name = params["name"]?.stringValue ?? "猫源"
+                    let installationId = params["installationId"]?.stringValue
+                    if let sourceUrl = params["sourceUrl"]?.stringValue {
+                        let cat = try await resources.filmSourceSettings.importNetwork(
+                            name: name, sourceURL: sourceUrl, installationId: installationId)
+                        return .object([
+                            "executed": .bool(true),
+                            "command": .string(cmd),
+                            "installationId": .string(cat.installationId),
+                            "state": .string(cat.state)
+                        ])
+                    } else if let source = params["source"]?.stringValue {
+                        let cat = try await resources.filmSourceSettings.importLocal(
+                            name: name, source: source, installationId: installationId)
+                        return .object([
+                            "executed": .bool(true),
+                            "command": .string(cmd),
+                            "installationId": .string(cat.installationId),
+                            "state": .string(cat.state)
+                        ])
+                    }
+                    throw DebugAPIError.invalidArgument("cat.import requires 'sourceUrl' or 'source'")
+                case "cat.delete":
+                    guard let id = params["installationId"]?.stringValue else {
+                        throw DebugAPIError.invalidArgument("cat.delete requires 'installationId'")
+                    }
+                    try await resources.filmSourceSettings.deleteCat(id)
+                    return .object(["executed": .bool(true), "command": .string(cmd), "installationId": .string(id)])
+                case "account.save":
+                    let rawProvider = (params["platform"]?.stringValue ?? "").lowercased()
+                    guard let provider = PanProviderID(rawValue: rawProvider) else {
+                        throw DebugAPIError.invalidArgument("Invalid pan provider: \(rawProvider)")
+                    }
+                    let panService = PanAccountService(settingsRepository: resources.filmSettings.repository,
+                                                       connection: { try await resources.scriptSession.connection() })
+                    var credObj: RuntimeObject = [:]
+                    if let creds = params["credentials"]?.objectValue {
+                        for (k, v) in creds {
+                            if let s = v.stringValue { credObj[k] = .string(s) }
+                            else if let n = v.intValue { credObj[k] = .number(Double(n)) }
+                        }
+                    }
+                    for field in ["cookie", "username", "password", "authorization"] {
+                        if credObj[field] == nil, let s = params[field]?.stringValue {
+                            credObj[field] = .string(s)
+                        }
+                    }
+                    let saved = try await panService.replace(provider, credentials: .object(credObj))
+                    return .object([
+                        "executed": .bool(true),
+                        "command": .string(cmd),
+                        "provider": .string(provider.rawValue),
+                        "configured": .bool(saved.configured == true),
+                        "revision": .optional(saved.revision.map(Int.init))
+                    ])
+                case "metadata.save":
+                    let provider = (params["provider"]?.stringValue ?? "").lowercased()
+                    guard let filmSettings = assembly.filmSettings else {
+                        throw DebugAPIError.invalidState("Film settings model unavailable")
+                    }
+                    switch provider {
+                    case "tmdb":
+                        try await filmSettings.tmdb.load()
+                        if let v = params["apiBase"]?.stringValue { filmSettings.tmdb.apiBase = v }
+                        if let v = params["imageBase"]?.stringValue { filmSettings.tmdb.imageBase = v }
+                        if let v = params["apiToken"]?.stringValue { filmSettings.tmdb.apiToken = v }
+                        if let v = params["language"]?.stringValue { filmSettings.tmdb.language = v }
+                        if let v = params["region"]?.stringValue { filmSettings.tmdb.region = v }
+                        if let v = params["includeAdult"]?.boolValue { filmSettings.tmdb.includeAdult = v }
+                        try await filmSettings.tmdb.save()
+                        return .object([
+                            "executed": .bool(true),
+                            "command": .string(cmd),
+                            "provider": .string("tmdb"),
+                            "configured": .bool(!filmSettings.tmdb.apiToken.isEmpty)
+                        ])
+                    case "douban":
+                        try await filmSettings.douban.load()
+                        if let v = params["dataRoute"]?.stringValue, let r = FilmDoubanDataRoute(rawValue: v) {
+                            filmSettings.douban.dataRoute = r
+                        }
+                        if let v = params["imageRoute"]?.stringValue, let r = FilmDoubanImageRoute(rawValue: v) {
+                            filmSettings.douban.imageRoute = r
+                        }
+                        if let v = params["apiProxy"]?.stringValue { filmSettings.douban.apiProxy = v }
+                        if let v = params["imageProxy"]?.stringValue { filmSettings.douban.imageProxy = v }
+                        if let v = params["cookie"]?.stringValue { filmSettings.douban.cookie = v }
+                        try await filmSettings.douban.save()
+                        return .object([
+                            "executed": .bool(true),
+                            "command": .string(cmd),
+                            "provider": .string("douban"),
+                            "hasCookie": .bool(!filmSettings.douban.cookie.isEmpty)
+                        ])
+                    default:
+                        throw DebugAPIError.invalidArgument("metadata.save requires provider 'tmdb' or 'douban'")
+                    }
+                default:
+                    break
+                }
             }
             if domain == "music" && cmd == "clear_cache" {
                 try await assembly.clearAllMusicCaches()

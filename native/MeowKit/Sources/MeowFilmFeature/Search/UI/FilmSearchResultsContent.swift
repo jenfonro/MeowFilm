@@ -32,6 +32,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     private let activity = UIActivityIndicatorView(style: .medium)
     private let empty = UILabel()
     private var raw = false
+    var debugRawListMode: Bool { raw }
     private(set) var projection = IndexedDiffableProjection<Int, Data, CardEntry>()
     private(set) var lastInputCards: [FilmSearchCard] = []
     private var offsets: [Bool: CGPoint] = [:]
@@ -146,6 +147,14 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
             if queryChanged, isViewLoaded { collection.setContentOffset(.zero, animated: false) }
             render()
         } catch { presentError("影视搜索不可用") }
+    }
+
+    func debugSetRawListMode(_ isOn: Bool) {
+        guard raw != isOn else { return }
+        if isViewLoaded { offsets[raw] = collection.contentOffset }
+        raw = isOn
+        rawSwitch.setOn(isOn, animated: false)
+        render(restoringOffset: offsets[raw] ?? .zero)
     }
 
     public func cancel() {
@@ -263,12 +272,6 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
                 message: "TMDB 请求失败",
                 token: AnyHashable("\(state.sessionID.uuidString):failed"),
                 retry: retry
-            )
-        case .unavailable:
-            ancestorPage?.syncErrorSource(
-                "film.search.metadata",
-                message: "TMDB 不可用",
-                token: AnyHashable("\(state.sessionID.uuidString):unavailable")
             )
         default:
             ancestorPage?.clearErrorSource("film.search.metadata")

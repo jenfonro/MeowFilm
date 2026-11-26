@@ -87,10 +87,10 @@ enum FilmRuleSettings {
             #"(?<=\D)\d{1,4}$"#,
         ],
         seasonRules: [
-            .init(pattern: #"(?:第\s*0*([0-9]{1,2}|[一二三四五六七八九十百两〇零]{1,5})\s*(?:季|部|篇))"#, replace: "$1", flags: ""),
-            .init(pattern: #"(?:^|[\s\[\(\{【（._-])[Ss](?:eason)?\s*0*([0-9]{1,2})(?=$|[\s\]\)\}】）._EexX-])"#, replace: "$1", flags: "i"),
-            .init(pattern: #"(?<!新)年\s*番\s*0*([0-9]{1,2}|[一二三四五六七八九十]{1,3})"#, replace: "$1", flags: ""),
-            .init(pattern: #"(?<=[\u4e00-\u9fa5A-Za-z])\s*0*([1-9][0-9]?)\s*$"#, replace: "$1", flags: ""),
+            .init(pattern: #"^.*?(?:[Ss](?:eason)?\s*0*(\d{1,2})(?=\b|[Ee]|\D)|第\s*0*(\d{1,2})\s*(?:季|部|篇)|(?:^|\s)0*(\d{1,2})\s*季(?![度节])).*$"#, replace: #"S$1$2$3"#, flags: #"i"#),
+            .init(pattern: #"^.*?(?<!新)年\s*番\s*0*(\d{1,2}).*$"#, replace: #"S$1"#, flags: #"i"#),
+            .init(pattern: #"^.*?(?<!新)年\s*番(?!\s*\d).*$"#, replace: #"S1"#, flags: #"i"#),
+            .init(pattern: #"^\s*(.*[\u4e00-\u9fffA-Za-z])\s*0*([1-9])\s*$"#, replace: #"S$2"#, flags: #"i"#),
         ])
     static var initial: FilmRuleSet { restore }
 }

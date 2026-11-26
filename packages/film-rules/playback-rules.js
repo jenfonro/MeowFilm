@@ -256,8 +256,7 @@
     if (explicit !== undefined) return explicit;
     const rawTitle = titleText(record.rawTitle ?? record.vod_name ?? record.title ?? record.name);
     const remark = titleText(record.vod_remarks ?? record.remark);
-    return recognition.titleSeason(rawTitle) ?? recognition.season(rawTitle) ??
-      recognition.season(remark) ?? recognition.titleSeason(remark);
+    return recognition.titleSeason(rawTitle) ?? recognition.season(rawTitle) ?? recognition.season(remark);
   }
 
   function canonicalTitle(value, kind, recognition, query) {

@@ -114,7 +114,6 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
     public bool HasMore => session?.HasMore == true;
     public string MetadataStatus => session?.MetadataState switch
     {
-        FilmSearchChannelState.Unavailable => "TMDB 不可用",
         FilmSearchChannelState.Error => "TMDB 请求失败",
         FilmSearchChannelState.Loading => "TMDB 加载中…",
         _ => ""

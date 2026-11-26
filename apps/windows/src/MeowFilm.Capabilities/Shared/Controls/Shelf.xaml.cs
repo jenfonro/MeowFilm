@@ -110,7 +110,7 @@ public partial class Shelf : UserControl
             SetSettled(true);
             rail = null; targetOffset = null;
         };
-        SizeChanged += (_, _) => UpdateLayoutMetrics();
+        SizeChanged += (_, e) => OnShelfSizeChanged(e);
         ItemsHost.ContainerContentChanging += (_, e) => SizeCard(e.ItemContainer);
         CardMotion.SetEnabled(this, true);
         RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => UpdateArrowOpacity());
@@ -155,24 +155,52 @@ public partial class Shelf : UserControl
 
     protected override Size MeasureOverride(Size availableSize)
     {
-        if (double.IsFinite(availableSize.Width) && availableSize.Width > 0) UpdateLayoutMetrics(availableSize.Width);
+        if (double.IsFinite(availableSize.Width) && availableSize.Width > 0) ApplyCardMetrics(availableSize.Width);
         return base.MeasureOverride(availableSize);
     }
 
-    private void UpdateLayoutMetrics() => UpdateLayoutMetrics(ItemsHost.ActualWidth);
-
-    private void UpdateLayoutMetrics(double hostWidth)
+    private bool ApplyCardMetrics(double hostWidth)
     {
-        if (!IsLoaded || !DesktopVisual.IsVisible(this) || hostWidth <= 0) return;
-        var (target, gap) = LayoutMetrics(); double previous = CardWidth, oldMaximum = MaximumOffset;
+        if (!IsLoaded || !DesktopVisual.IsVisible(this) || hostWidth <= 0) return false;
+        var (target, gap) = LayoutMetrics();
         var (count, pitch) = MeasureCards(hostWidth, target, gap, IsBanner);
         if (ItemsHost.ItemsPanelRoot is ItemsWrapGrid grid) grid.ItemWidth = pitch;
-        if (count == visibleCards && Math.Abs(pitch - previous) <= 0.01) { UpdateButtons(); return; }
-        double old = targetOffset ?? PresentedOffset; visibleCards = count; CardWidth = pitch;
+        if (count == visibleCards && Math.Abs(pitch - CardWidth) <= 0.01) return false;
+        visibleCards = count; CardWidth = pitch;
         for (int i = 0; i < ItemsHost.Items.Count; i++) if (ItemsHost.ContainerFromIndex(i) is ListViewItem item) SizeCard(item);
-        double next = oldMaximum > .5 && oldMaximum - old < .5 ? MaximumOffset : Math.Round(old / previous) * pitch;
-        targetOffset = null;
-        rail?.ChangeView(Math.Clamp(next, 0, MaximumOffset), null, null, true); UpdateButtons();
+        return true;
+    }
+
+    private void OnShelfSizeChanged(SizeChangedEventArgs e)
+    {
+        if (!IsLoaded || !DesktopVisual.IsVisible(this) || e.NewSize.Width <= 0) return;
+        double hostWidth = ItemsHost.ActualWidth > 0 ? ItemsHost.ActualWidth : e.NewSize.Width;
+        ApplyCardMetrics(hostWidth);
+        if (e.PreviousSize.Width > 0 && Math.Abs(e.NewSize.Width - e.PreviousSize.Width) > 0.01)
+        {
+            var (target, gap) = LayoutMetrics();
+            var (prevCount, prevPitch) = MeasureCards(e.PreviousSize.Width, target, gap, IsBanner);
+            double oldMaximum = Math.Max(0, (ColumnCount - prevCount) * prevPitch);
+            double old = targetOffset ?? PresentedOffset;
+            double next = oldMaximum > .5 && oldMaximum - old < .5 ? MaximumOffset : Math.Round(old / prevPitch) * CardWidth;
+            targetOffset = null;
+            rail?.ChangeView(Math.Clamp(next, 0, MaximumOffset), null, null, true);
+        }
+        UpdateButtons();
+    }
+
+    private void UpdateLayoutMetrics()
+    {
+        if (!IsLoaded || !DesktopVisual.IsVisible(this) || ItemsHost.ActualWidth <= 0) return;
+        double previous = CardWidth, oldMaximum = MaximumOffset;
+        if (ApplyCardMetrics(ItemsHost.ActualWidth))
+        {
+            double old = targetOffset ?? PresentedOffset;
+            double next = oldMaximum > .5 && oldMaximum - old < .5 ? MaximumOffset : Math.Round(old / previous) * CardWidth;
+            targetOffset = null;
+            rail?.ChangeView(Math.Clamp(next, 0, MaximumOffset), null, null, true);
+        }
+        UpdateButtons();
     }
 
     private void SizeCard(SelectorItem item)

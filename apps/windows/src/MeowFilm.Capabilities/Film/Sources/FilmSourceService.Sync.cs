@@ -39,10 +39,10 @@ public sealed partial class FilmSourceService
             var configured = await change(admission).ConfigureAwait(false);
             // No runtime acknowledgement or cache write can revoke this native commit.
             ApplyConfiguration(configured);
-            ConfigurationChanged();
             result = FindCat(id);
         }, ct).ConfigureAwait(false);
-        return result;
+        await NotifyAndConvergeCatConfigurationAsync(ct).ConfigureAwait(false);
+        return Cats.FirstOrDefault(cat => cat.InstallationId == id) ?? result;
     }, token);
 
     private bool RuntimeActive => recovery?.State is RuntimeConnectionState.Starting or RuntimeConnectionState.Ready ||
@@ -83,24 +83,28 @@ public sealed partial class FilmSourceService
         Volatile.Write(ref snapshot, new Snapshot(Freeze(cats), Freeze(Videos.Where(video => ids.Contains(video.Key.InstallationId)))));
     }
 
-    private void ConfigurationChanged()
+    private async Task NotifyAndConvergeCatConfigurationAsync(CancellationToken token)
     {
         if (!RuntimeActive || Runtime is not IRuntimeConnectionSource source) return;
-        var task = TryRunAsync(async token =>
+        try
         {
-            try
-            {
-                var connection = await source.CaptureConnectionAsync(token).ConfigureAwait(false);
-                using var activeConnection = CancellationTokenSource.CreateLinkedTokenSource(token, connection.Revoked);
-                var reply = await connection.Client.CallAsync("runtime.settings.changed", new { block = "cat.sources" },
-                    TimeSpan.FromSeconds(5), activeConnection.Token).ConfigureAwait(false);
-                if (!reply.GetProperty("ok").GetBoolean()) throw new BridgeException(reply.GetProperty("code").GetString()!);
-                await InManagementAsync(() => SynchronizeAsync(activeConnection.Token), activeConnection.Token).ConfigureAwait(false);
-                await AwaitStartupAsync(activeConnection.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception error) { await ReportRuntimeErrorAsync(error).ConfigureAwait(false); }
-        }, CancellationToken.None);
+            var connection = await source.CaptureConnectionAsync(token).ConfigureAwait(false);
+            using var activeConnection = CancellationTokenSource.CreateLinkedTokenSource(token, connection.Revoked);
+            var reply = await connection.Client.CallAsync("runtime.settings.changed", new { block = "cat.sources" },
+                TimeSpan.FromSeconds(5), activeConnection.Token).ConfigureAwait(false);
+            if (!reply.GetProperty("ok").GetBoolean()) throw new BridgeException(reply.GetProperty("code").GetString()!);
+            await InManagementAsync(() => SynchronizeAsync(activeConnection.Token), activeConnection.Token).ConfigureAwait(false);
+            await AwaitStartupAsync(activeConnection.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { await ReportRuntimeErrorAsync(error).ConfigureAwait(false); }
+    }
+
+    private void ConfigurationChanged()
+    {
+        if (!RuntimeActive || Runtime is not IRuntimeConnectionSource) return;
+        var task = TryRunAsync(NotifyAndConvergeCatConfigurationAsync, CancellationToken.None);
         if (task is not null) _ = ObserveAsync(task);
         static async Task ObserveAsync(Task work)
         {
@@ -342,13 +346,19 @@ public sealed partial class FilmSourceService
             try
             {
                 var connection = await source.CaptureConnectionAsync().ConfigureAwait(false);
-                await connection.Client.CallAsync("runtime.settings.changed", new { block = "film.video-sources" },
+                var reply = await connection.Client.CallAsync("runtime.settings.changed", new { block = "film.video-sources" },
                     TimeSpan.FromSeconds(5), connection.Revoked).ConfigureAwait(false);
+                if (!reply.TryGetProperty("ok", out var okProp) || okProp.ValueKind != JsonValueKind.True)
+                {
+                    DebugLog.Warn(DebugCategories.FilmCatalog, "sources", "video_sources.notify.rejected",
+                        new { code = reply.TryGetProperty("code", out var codeProp) ? codeProp.GetString() : null });
+                }
                 return;
             }
-            catch
+            catch (Exception error)
             {
-                // Durable storage is already committed; fall through to async notification if supported.
+                DebugLog.Warn(DebugCategories.FilmCatalog, "sources", "video_sources.notify.failed", error: error);
+                return;
             }
         }
         (Runtime as IRuntimeSettingsNotifications)?.SettingsChanged("film.video-sources");
