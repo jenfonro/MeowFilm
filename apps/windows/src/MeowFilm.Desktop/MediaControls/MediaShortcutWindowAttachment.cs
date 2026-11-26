@@ -25,7 +25,6 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     private GCHandle callbackRoot;
     private readonly IDesktopMediaControlSettings settings;
     private readonly Func<MediaShortcutAction, Task> execute;
-    private readonly NoticeOutlet notice = new();
     private readonly Dictionary<int, Registration> owned = [];
     private readonly Dictionary<int, Registration> active = [];
     private readonly Dictionary<int, Retirement> retiring = [];
@@ -230,7 +229,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
         finally { running.Remove(completion.Task); completion.TrySetResult(); }
     }
 
-    private void Notify(string message) => NoticeOutlet.Publish(root, new DesktopNoticeEventArgs(notice, message));
+    private void Notify(string message) => NoticeOutlet.Post(root, message, this);
 
     private void Closed(object sender, WindowEventArgs args) => Stop();
 

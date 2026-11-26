@@ -19,8 +19,10 @@ public sealed partial class ManagementRowView : Grid
         InitializeComponent();
         DataContextChanged += (_, _) => Bind();
         Loaded += (_, _) => Bind();
-        Unloaded += (_, _) => { if (IsLoaded) return; StopObserving(); owner?.DetachColumns(this); owner = null; };
+        Unloaded += (_, _) => { if (IsLoaded) return; StopObserving(); if (owner is not null) owner.ColumnsChanged -= SyncColumns; owner = null; };
     }
+
+    private void SyncColumns() => owner?.ApplyColumns(this);
 
     private void StopObserving()
     {
@@ -34,7 +36,7 @@ public sealed partial class ManagementRowView : Grid
         if (!ReferenceEquals(state, next))
         {
             StopObserving();
-            if (!ReferenceEquals(owner, next?.Owner)) { owner?.DetachColumns(this); owner = null; }
+            if (!ReferenceEquals(owner, next?.Owner)) { if (owner is not null) owner.ColumnsChanged -= SyncColumns; owner = null; }
             state = next;
             renderedRow = null;
             if (next is null)
@@ -47,7 +49,7 @@ public sealed partial class ManagementRowView : Grid
         }
         if (state is null) return;
         if (IsLoaded && !observing) { state.RowChanged += UpdateRow; state.SelectionChanged += UpdateSelection; observing = true; }
-        if (IsLoaded && owner is null) { owner = state.Owner; owner.AttachColumns(this); }
+        if (IsLoaded && owner is null) { owner = state.Owner; owner.ColumnsChanged += SyncColumns; }
         state.Owner.ApplyColumns(this);
         UpdateRow(); UpdateSelection();
     }

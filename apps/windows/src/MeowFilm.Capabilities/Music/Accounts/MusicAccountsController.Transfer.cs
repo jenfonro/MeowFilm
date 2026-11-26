@@ -30,6 +30,7 @@ public sealed partial class MusicAccountsController
     {
         if (!CanTransferAccounts) return Task.CompletedTask;
         accountTransferBusy = true;
+        accountStatus = "";
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         accountTransferCancellation = cancellation;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

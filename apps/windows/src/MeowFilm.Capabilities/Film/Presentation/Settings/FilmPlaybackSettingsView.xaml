@@ -22,21 +22,12 @@
    </DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
- <Grid Margin="0,0,12,0">
+ <Grid>
   <Grid.RowDefinitions>
    <RowDefinition Height="Auto" />
    <RowDefinition />
   </Grid.RowDefinitions>
-  <Grid Margin="0,0,0,10">
-   <Grid.ColumnDefinitions>
-    <ColumnDefinition Width="*" />
-    <ColumnDefinition Width="Auto" />
-   </Grid.ColumnDefinitions>
-   <Button Content="重试" Click="Retry_Click" Style="{StaticResource Settings.Button}" IsEnabled="{x:Bind CanRetryRead, Mode=OneWay}" Visibility="{x:Bind HasReadFailure, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="重新读取智能播放设置" Grid.Column="1" />
-   <Grid Grid.Column="0">
-    <TextBlock Text="{x:Bind Work, Mode=OneWay}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
-   </Grid>
-  </Grid>
+  <Button Content="重试" Click="Retry_Click" Style="{StaticResource Settings.Button}" Margin="0,8,0,0" HorizontalAlignment="Left" IsEnabled="{x:Bind CanRetryRead, Mode=OneWay}" Visibility="{x:Bind HasReadFailure, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="重新读取智能播放设置" />
   <ScrollViewer Grid.Row="1" Style="{StaticResource MeowFilm.SettingsScrollViewer}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
    <StackPanel>
     <StackPanel x:Name="PreferencesForm" Visibility="Collapsed">
@@ -79,30 +70,24 @@
        </StackPanel>
       </Grid>
      </Border>
-     <ContentControl IsEnabled="{x:Bind Idle, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
-      <Border Style="{StaticResource Settings.Section}">
-       <StackPanel>
-        <Grid Margin="0,0,0,12">
-         <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*" />
-          <ColumnDefinition Width="Auto" />
-         </Grid.ColumnDefinitions>
-         <Button Content="恢复默认" Tag="keywords" Click="Restore_Click" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复关键字默认偏好" Grid.Column="1" />
-         <Grid Grid.Column="0">
-          <StackPanel Orientation="Horizontal">
-           <TextBlock Text="关键字匹配规则" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
-           <Button Content="保存" Click="SavePreferences_Click" Margin="12,0,0,0" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="保存关键字匹配规则" />
-          </StackPanel>
-         </Grid>
+     <Border Style="{StaticResource Settings.Section}">
+      <StackPanel>
+       <Grid Margin="0,0,0,12">
+        <Grid.ColumnDefinitions>
+         <ColumnDefinition Width="*" />
+         <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <Button Content="恢复默认" Tag="keywords" Click="Restore_Click" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复关键字默认偏好" Grid.Column="1" />
+        <Grid Grid.Column="0">
+         <StackPanel Orientation="Horizontal">
+          <TextBlock Text="关键字匹配规则" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
+          <Button Content="保存" Click="SavePreferences_Click" Margin="12,0,0,0" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="保存关键字匹配规则" />
+         </StackPanel>
         </Grid>
-        <Grid>
-         <TextBox x:Name="Keywords" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="关键字匹配规则" AutomationProperties.HelpText="DDP,H.265" />
-         <TextBlock x:Name="KeywordsPlaceholder" Text="DDP,H.265" Margin="13,0" VerticalAlignment="Center" IsHitTestVisible="False" Foreground="{ThemeResource MeowFilm.Brush.Muted}" Visibility="{x:Bind Keywords.Text, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, ConverterParameter=Not}">
-        </TextBlock>
-        </Grid>
-       </StackPanel>
-      </Border>
-     </ContentControl>
+       </Grid>
+       <TextBox x:Name="Keywords" Style="{StaticResource Settings.TextBox}" PlaceholderText="DDP,H.265" AutomationProperties.Name="关键字匹配规则" />
+      </StackPanel>
+     </Border>
      <ContentControl IsEnabled="{x:Bind CanEditLibrary, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
       <Border Style="{StaticResource Settings.Section}">
        <StackPanel>
@@ -192,29 +177,26 @@
       </Border>
      </ContentControl>
     </StackPanel>
-    <ContentControl IsEnabled="{x:Bind Idle, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
-     <Border x:Name="CleanForm" Style="{StaticResource Settings.Section}" Visibility="Collapsed">
-      <StackPanel>
-       <Grid Margin="0,0,0,12">
-        <Grid.ColumnDefinitions>
-         <ColumnDefinition Width="*" />
-         <ColumnDefinition Width="Auto" />
-        </Grid.ColumnDefinitions>
-        <Button Content="恢复默认" Tag="clean" Click="Restore_Click" Style="{StaticResource Settings.QuietButton}" Grid.Column="1" />
-        <Grid Grid.Column="0">
-         <StackPanel Orientation="Horizontal">
-          <TextBlock Text="站点净化设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
-          <Button Content="保存" Click="SavePreferences_Click" Margin="12,0,0,0" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="保存站点净化" />
-         </StackPanel>
-        </Grid>
+    <Border x:Name="CleanForm" Style="{StaticResource Settings.Section}" Visibility="Collapsed">
+     <StackPanel>
+      <Grid Margin="0,0,0,12">
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+       </Grid.ColumnDefinitions>
+       <Button Content="恢复默认" Tag="clean" Click="Restore_Click" Style="{StaticResource Settings.QuietButton}" Grid.Column="1" />
+       <Grid Grid.Column="0">
+        <StackPanel Orientation="Horizontal">
+         <TextBlock Text="站点净化设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
+         <Button Content="保存" Click="SavePreferences_Click" Margin="12,0,0,0" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="保存站点净化" />
+        </StackPanel>
        </Grid>
-       <TextBlock Text="关键字匹配规则" Margin="0,0,0,8" />
-       <TextBox x:Name="CleanKeywords" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="站点净化关键词" />
-      </StackPanel>
-     </Border>
-    </ContentControl>
+      </Grid>
+      <TextBlock Text="关键字匹配规则" Margin="0,0,0,8" />
+      <TextBox x:Name="CleanKeywords" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="站点净化关键词" />
+     </StackPanel>
+    </Border>
    </StackPanel>
   </ScrollViewer>
-  <desktop:NoticeOutlet x:Name="Notices" Grid.Row="1" VerticalAlignment="Bottom" />
  </Grid>
 </UserControl>

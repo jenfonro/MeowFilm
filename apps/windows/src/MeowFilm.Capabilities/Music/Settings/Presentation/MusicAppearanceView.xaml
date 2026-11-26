@@ -18,7 +18,6 @@
     </StackPanel>
     <Button Content="重新读取" Style="{StaticResource Settings.QuietButton}" HorizontalAlignment="Left" Click="Retry_Click" Margin="0,12,0,0"
             Visibility="{x:Bind Settings.AppearanceStatus,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"/>
-    <desktop:NoticeOutlet Message="{x:Bind Settings.AppearanceStatus,Mode=OneWay}"/>
    </StackPanel>
   </Border>
   <Border Style="{StaticResource Settings.Section}">

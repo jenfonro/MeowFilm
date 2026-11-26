@@ -63,34 +63,31 @@
     <Border x:Name="DragIndicator" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" IsHitTestVisible="False"/>
    </Grid></ControlTemplate></Setter.Value></Setter>
   </Style>
-  <Style x:Key="DailyStyleTag" TargetType="ToggleButton">
+  <Style x:Key="DailyStyleTag" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
    <Setter Property="Width" Value="78"/><Setter Property="Height" Value="31"/><Setter Property="MinWidth" Value="0"/><Setter Property="MinHeight" Value="0"/>
    <Setter Property="Margin" Value="0,0,12,14"/><Setter Property="Padding" Value="8,2"/>
    <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
    <Setter Property="CornerRadius" Value="16"/><Setter Property="BorderThickness" Value="1"/>
    <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.InputSurface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
-   <Setter Property="UseSystemFocusVisuals" Value="True"/>
-   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
-    <Grid>
-     <VisualStateManager.VisualStateGroups>
-      <VisualStateGroup x:Name="CommonStates">
-       <VisualState x:Name="Normal"/>
-       <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="TagBorder.Background" Value="{ThemeResource MeowFilm.Brush.Hover}"/></VisualState.Setters></VisualState>
-       <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="TagBorder.Background" Value="{ThemeResource MeowFilm.Brush.Pressed}"/></VisualState.Setters></VisualState>
-       <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="TagLabel.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
-       <VisualState x:Name="Checked"><VisualState.Setters><Setter Target="TagBorder.BorderBrush" Value="{ThemeResource MeowFilm.Brush.Accent}"/><Setter Target="TagLabel.Foreground" Value="{ThemeResource MeowFilm.Brush.Accent}"/></VisualState.Setters></VisualState>
-       <VisualState x:Name="CheckedPointerOver"><VisualState.Setters><Setter Target="TagBorder.Background" Value="{ThemeResource MeowFilm.Brush.Hover}"/><Setter Target="TagBorder.BorderBrush" Value="{ThemeResource MeowFilm.Brush.Accent}"/><Setter Target="TagLabel.Foreground" Value="{ThemeResource MeowFilm.Brush.Accent}"/></VisualState.Setters></VisualState>
-       <VisualState x:Name="CheckedPressed"><VisualState.Setters><Setter Target="TagBorder.Background" Value="{ThemeResource MeowFilm.Brush.Pressed}"/><Setter Target="TagBorder.BorderBrush" Value="{ThemeResource MeowFilm.Brush.Accent}"/><Setter Target="TagLabel.Foreground" Value="{ThemeResource MeowFilm.Brush.Accent}"/></VisualState.Setters></VisualState>
-       <VisualState x:Name="CheckedDisabled"><VisualState.Setters><Setter Target="TagBorder.BorderBrush" Value="{ThemeResource MeowFilm.Brush.Accent}"/><Setter Target="TagLabel.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
-      </VisualStateGroup>
-     </VisualStateManager.VisualStateGroups>
-     <Border x:Name="TagBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
-      <TextBlock x:Name="TagLabel" Text="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-     </Border>
-    </Grid>
-   </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Flyout x:Name="DailyStylePopup" Placement="Bottom" Closing="DailyStylePopup_Closing"><StackPanel Width="508" Spacing="12">
+   <StackPanel.Resources><ResourceDictionary><ResourceDictionary.ThemeDictionaries><ResourceDictionary x:Key="Default">
+    <StaticResource x:Key="ToggleButtonBackgroundPointerOver" ResourceKey="MeowFilm.Brush.Hover"/>
+    <StaticResource x:Key="ToggleButtonBackgroundPressed" ResourceKey="MeowFilm.Brush.Pressed"/>
+    <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="MeowFilm.Brush.Text"/>
+    <StaticResource x:Key="ToggleButtonForegroundPressed" ResourceKey="MeowFilm.Brush.Text"/>
+    <StaticResource x:Key="ToggleButtonBorderBrushPointerOver" ResourceKey="MeowFilm.Brush.Border"/>
+    <StaticResource x:Key="ToggleButtonBorderBrushPressed" ResourceKey="MeowFilm.Brush.Border"/>
+    <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="MeowFilm.Brush.InputSurface"/>
+    <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="MeowFilm.Brush.Hover"/>
+    <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="MeowFilm.Brush.Pressed"/>
+    <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="MeowFilm.Brush.Accent"/>
+    <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="MeowFilm.Brush.Accent"/>
+    <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="MeowFilm.Brush.Accent"/>
+    <StaticResource x:Key="ToggleButtonBorderBrushChecked" ResourceKey="MeowFilm.Brush.Accent"/>
+    <StaticResource x:Key="ToggleButtonBorderBrushCheckedPointerOver" ResourceKey="MeowFilm.Brush.Accent"/>
+    <StaticResource x:Key="ToggleButtonBorderBrushCheckedPressed" ResourceKey="MeowFilm.Brush.Accent"/>
+   </ResourceDictionary></ResourceDictionary.ThemeDictionaries></ResourceDictionary></StackPanel.Resources>
    <ScrollViewer MaxHeight="230"><ItemsControl ItemsSource="{x:Bind Catalog.DailyStyleGroups,Mode=OneWay}"><ItemsControl.ItemTemplate><DataTemplate x:DataType="local:MusicCatalogTagGroup">
     <StackPanel Margin="0,0,0,12"><TextBlock Text="{x:Bind Id}" Margin="0,0,0,8"/><ItemsControl ItemsSource="{x:Bind Items}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><desktop:WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate x:DataType="local:MusicCatalogTag"><ToggleButton Style="{StaticResource DailyStyleTag}" Content="{x:Bind Name}" Tag="{x:Bind}" IsChecked="{x:Bind Selected}" Click="DailyStyleTag_Click"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></StackPanel>
    </DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer>
@@ -121,7 +118,6 @@
    <Button x:Name="DailyStyleButton" Content="{x:Bind Catalog.DailyStyleSelectionText,Mode=OneWay}" Click="DailyStyleOpen_Click" HorizontalAlignment="Left" IsEnabled="{x:Bind Catalog.CanEditDailyStyle,Mode=OneWay}" Visibility="{x:Bind Catalog.IsDailyStyle,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Width="Auto" MaxWidth="500" Padding="14,2" Style="{StaticResource Music.FilterTag}" Margin="0,0,0,16"/>
    <ProgressRing x:Name="DetailLoadingRing" x:Load="{x:Bind Catalog.ShowDetailLoading,Mode=OneWay}" Margin="0,16" IsActive="True" AutomationProperties.Name="正在加载歌曲"/>
    <StackPanel x:Name="DetailSectionHeader" Orientation="Horizontal" Margin="0,0,0,10" Visibility="Collapsed"><TextBlock x:Name="DetailSectionTitleText" FontSize="20"/><TextBlock x:Name="DetailCountTextBlock" FontSize="11" Margin="3,1,0,0"/></StackPanel>
-   <desktop:NoticeOutlet Message="{x:Bind Library.Status,Mode=OneWay}"/><desktop:NoticeOutlet Message="{x:Bind Search.SearchStatus,Mode=OneWay}"/>
   </StackPanel>
   <Grid x:Name="BodyPages" Grid.Row="2">
    <local:MusicCatalogView x:Name="CatalogView"/><local:MusicDiscoveryView x:Name="DiscoveryView"/>

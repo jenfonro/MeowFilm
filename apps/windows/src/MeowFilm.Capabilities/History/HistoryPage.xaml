@@ -2,7 +2,6 @@
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="using:MeowFilm.Capabilities"
- xmlns:desktop="using:MeowFilm.Desktop"
  Background="Transparent"
  UseLayoutRounding="True">
  <Grid Background="Transparent">
@@ -26,7 +25,6 @@
      </DataTemplate>
     </ItemsControl.ItemTemplate>
    </ItemsControl>
-   <desktop:NoticeOutlet x:Name="Notices"/>
   </StackPanel>
   <ContentControl x:Name="FilmBrowseHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" Visibility="{x:Bind Page.IsFilmSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}"/>
   <ContentControl x:Name="NovelBrowseHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" Visibility="{x:Bind Page.IsNovelSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}"/>

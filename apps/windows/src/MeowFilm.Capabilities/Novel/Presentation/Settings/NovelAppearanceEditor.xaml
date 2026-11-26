@@ -2,9 +2,6 @@
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:desktop="using:MeowFilm.Desktop">
- <UserControl.Resources>
-  <Style x:Key="Novel.CheckBox" TargetType="CheckBox"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/></Style>
- </UserControl.Resources>
  <StackPanel>
   <desktop:NoticeStack x:Name="Notices"/>
   <Border Style="{StaticResource Novel.Row}">
@@ -26,7 +23,7 @@
    </StackPanel>
   </Border>
   <Border Style="{StaticResource Novel.Row}">
-   <CheckBox x:Name="BoldCheck" Content="加粗" Style="{StaticResource Novel.CheckBox}" Margin="0"/>
+   <CheckBox x:Name="BoldCheck" Content="加粗" Margin="0"/>
   </Border>
   <Border Style="{StaticResource Novel.Row}">
    <StackPanel>

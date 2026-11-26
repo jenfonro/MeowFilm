@@ -42,15 +42,15 @@
      </ItemsControl>
     </StackPanel>
    </DataTemplate>
-   <DataTemplate x:Key="Source.Type" x:DataType="local:MusicSourceRow"><TextBlock Text="{x:Bind TypeText}" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" Margin="6,0"/></DataTemplate>
+   <DataTemplate x:Key="Source.Type" x:DataType="local:MusicSourceRow"><TextBlock Text="{x:Bind TypeText}" Style="{StaticResource Source.Muted}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,0"/></DataTemplate>
    <DataTemplate x:Key="Source.Health" x:DataType="local:MusicSourceRow"><desktop:ManagementStatus Content="{x:Bind StatusText,Mode=OneWay}" Style="{StaticResource Source.Status}" Tone="{x:Bind StatusKind,Mode=OneWay,Converter={StaticResource Music.SourceTone}}" AutomationProperties.Name="{x:Bind StatusText,Mode=OneWay}"/></DataTemplate>
    <DataTemplate x:Key="Source.Platforms" x:DataType="local:MusicSourceRow">
-    <ItemsControl ItemsSource="{x:Bind Platforms}" ItemTemplate="{StaticResource Source.Platform}" VerticalAlignment="Center" IsTabStop="False" Margin="6,0" AutomationProperties.Name="平台">
+    <ItemsControl ItemsSource="{x:Bind Platforms}" ItemTemplate="{StaticResource Source.Platform}" HorizontalAlignment="Center" VerticalAlignment="Center" IsTabStop="False" Margin="6,0" AutomationProperties.Name="平台">
      <ItemsControl.ItemsPanel><ItemsPanelTemplate><desktop:WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
     </ItemsControl>
    </DataTemplate>
    <DataTemplate x:Key="Source.Actions" x:DataType="local:MusicSourceRow">
-    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,6,0">
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,0">
      <Button Content="检测" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="8,0" Click="Check_Click"
              IsEnabled="{x:Bind Checking,Mode=OneWay,Converter={StaticResource Settings.Not}}" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Settings.PrefixName},ConverterParameter=检测}"/>
      <Button Content="编辑" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="8,0" Click="Edit_Click" IsEnabled="{x:Bind IsScript}" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Settings.PrefixName},ConverterParameter=编辑}"/>
@@ -60,7 +60,7 @@
    </DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
- <Grid x:Name="ManagementContent" MaxWidth="1248" Margin="0">
+ <Grid x:Name="ManagementContent" Margin="0">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
   <StackPanel x:Name="SourceTitleRow" Style="{StaticResource MeowFilm.ManagementTitleRow}">
    <TextBlock Text="音源管理" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" VerticalAlignment="Center" Margin="0,0,12,0"/>
@@ -75,8 +75,8 @@
     <StackPanel>
      <TextBlock Text="添加网络源" Style="{StaticResource Settings.PopupTitle}"/>
      <TextBlock Text="网络地址" Margin="0,16,0,8"/>
-     <TextBox x:Name="NetworkAddress" Style="{StaticResource Settings.TextBox}" Height="40"
-              VerticalContentAlignment="Center" AutomationProperties.Name="HTTPS 音源脚本地址" IsEnabled="{x:Bind Settings.CanEditScripts,Mode=OneWay,FallbackValue=False}"/>
+     <TextBox x:Name="NetworkAddress" Style="{StaticResource Settings.TextBox}"
+              AutomationProperties.Name="HTTPS 音源脚本地址" IsEnabled="{x:Bind Settings.CanEditScripts,Mode=OneWay,FallbackValue=False}"/>
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
       <Button x:Name="NetworkCancel" Content="取消" Style="{StaticResource Settings.QuietButton}" Click="NetworkCancel_Click" MinWidth="64"/>
       <Button x:Name="NetworkSave" Content="添加" Style="{StaticResource Settings.PrimaryButton}" Click="Download_Click" IsEnabled="{x:Bind Settings.CanEditScripts,Mode=OneWay,FallbackValue=False}" MinWidth="64" Margin="8,0,0,0"/>
@@ -87,11 +87,11 @@
     <StackPanel>
      <TextBlock Text="编辑音源" Style="{StaticResource Settings.PopupTitle}" Margin="0,0,0,12"/>
      <TextBlock Text="名称" Style="{StaticResource Source.Muted}" Margin="0,0,0,6"/>
-     <TextBox x:Name="EditName" Style="{StaticResource Settings.TextBox}" Height="36" AutomationProperties.Name="音源名称"
+     <TextBox x:Name="EditName" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="音源名称"
               TextChanged="EditName_TextChanged"/>
      <StackPanel x:Name="EditAddressPanel" Margin="0,12,0,0">
       <TextBlock Text="网络地址" Style="{StaticResource Source.Muted}" Margin="0,0,0,6"/>
-      <TextBox x:Name="EditAddress" Style="{StaticResource Settings.TextBox}" Height="36" AutomationProperties.Name="音源网络地址"/>
+      <TextBox x:Name="EditAddress" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="音源网络地址"/>
      </StackPanel>
      <Grid Margin="0,16,0,0">
       <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

@@ -19,9 +19,9 @@ public partial class FilmMetadataCacheSettingsView : UserControl
         {
             await Task.WhenAll((provider == "both" ? new[] { "douban", "tmdb" } : [provider])
                 .Select(value => service.ClearCacheAsync(value)));
-            Notices.Message = "缓存已清空";
+            MeowFilm.Desktop.NoticeOutlet.Post(this, "缓存已清空");
         }
-        catch { Notices.Message = "缓存清理失败"; }
+        catch { MeowFilm.Desktop.NoticeOutlet.Post(this, "缓存清理失败"); }
         finally { Actions.IsEnabled = true; }
     }
 }

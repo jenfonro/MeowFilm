@@ -10,10 +10,10 @@
    <Button Content="重试" Click="Reload_Click" HorizontalAlignment="Left" Style="{StaticResource Settings.Button}"
            AutomationProperties.Name="重新读取网盘账号"/>
   </StackPanel>
-  <ScrollViewer x:Name="TableScroll" Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+  <ScrollViewer x:Name="TableScroll" Grid.Row="1" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
                 Style="{StaticResource MeowFilm.SettingsScrollViewer}"
                 AutomationProperties.Name="网盘账号表">
-   <Grid x:Name="AccountTable" MinWidth="448" Width="{x:Bind TableScroll.ViewportWidth, Mode=OneWay}" VerticalAlignment="Top">
+   <Grid x:Name="AccountTable" MinWidth="448" HorizontalAlignment="Stretch" VerticalAlignment="Top">
     <Grid.RowDefinitions><RowDefinition Height="30"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <Grid x:Name="AccountTableHeader" Margin="7,0">
      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="96"/><ColumnDefinition Width="192"/></Grid.ColumnDefinitions>
@@ -50,7 +50,6 @@
     </Border>
    </Grid>
   </ScrollViewer>
-  <desktop:NoticeOutlet Message="{x:Bind Accounts.Notice, Mode=OneWay}"/>
   <Grid x:Name="ModalStash" Visibility="Collapsed">
    <local:AccountLoginSurface x:Name="LoginSurface" Title="{x:Bind Accounts.LoginTitle, Mode=OneWay}"
           Style="{StaticResource Account.LoginSurface}" CloseRequested="CloseLogin_Click">
@@ -85,9 +84,17 @@
         <ItemsControl.ItemTemplate><DataTemplate x:DataType="local:PanCredentialField">
          <StackPanel>
           <TextBlock Text="{x:Bind Label}" Margin="0,0,0,8" Style="{StaticResource Settings.Text}"/>
-          <PasswordBox Style="{StaticResource Account.Password}" Margin="0,0,0,14" Tag="{x:Bind}"
-                       Visibility="{x:Bind IsSecret, Converter={StaticResource MeowFilm.Visible}}"
-                       AutomationProperties.Name="{x:Bind Label}" Loaded="CredentialInput_Loaded"/>
+          <Border Margin="0,0,0,14" Height="40" CornerRadius="10" Background="{ThemeResource MeowFilm.Brush.InputSurface}"
+                  BorderBrush="{ThemeResource MeowFilm.Brush.Border}" BorderThickness="1"
+                  Visibility="{x:Bind IsSecret, Converter={StaticResource MeowFilm.Visible}}">
+           <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <PasswordBox Style="{StaticResource Account.Password}" Tag="{x:Bind}"
+                         AutomationProperties.Name="{x:Bind Label}" Loaded="CredentialInput_Loaded"/>
+            <Button Grid.Column="1" Style="{StaticResource MeowFilm.IconButton}" Width="28" Height="28" MinWidth="28" MinHeight="28"
+                    Margin="0,0,5,0" FontSize="14" Foreground="{ThemeResource MeowFilm.Brush.Muted}" Content="&#xED1A;"
+                    Click="RevealSecret_Click" AutomationProperties.Name="显示密码"/>
+           </Grid>
+          </Border>
           <TextBox Style="{StaticResource Settings.TextBox}" Margin="0,0,0,14" Tag="{x:Bind}"
                    Visibility="{x:Bind IsSecret, Converter={StaticResource MeowFilm.Visible}, ConverterParameter=Not}"
                    AutomationProperties.Name="{x:Bind Label}" Loaded="CredentialInput_Loaded"/>

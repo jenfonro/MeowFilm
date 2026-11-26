@@ -9,7 +9,6 @@
      <Button Content="清空豆瓣与 TMDB 缓存" Tag="both" Click="Clear_Click" Style="{StaticResource Settings.Button}" Margin="0,0,0,8" />
     </desktop:WrapPanel>
    </ContentControl>
-   <desktop:NoticeOutlet x:Name="Notices" />
   </StackPanel>
  </Border>
 </UserControl>

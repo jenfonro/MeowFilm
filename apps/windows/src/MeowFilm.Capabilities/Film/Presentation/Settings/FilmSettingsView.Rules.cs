@@ -38,7 +38,6 @@ public partial class FilmSettingsView
         ruleOperation = operation;
         long ticket = activation;
         rulesBusy = true; rulesFailed = false;
-        Notices.Message = "";
         RulesStateChanged();
         try
         {
@@ -212,5 +211,4 @@ public partial class FilmSettingsView
     }
     private void RuleInput_Changed(object sender, TextChangedEventArgs e) => InvalidateRuleResults();
     private async void RulesRetry_Click(object sender, RoutedEventArgs e) => await LoadRulesAsync();
-    private void RulesCancel_Click(object sender, RoutedEventArgs e) => ruleOperation?.Cancel();
 }

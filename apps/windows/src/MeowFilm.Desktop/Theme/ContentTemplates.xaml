@@ -6,6 +6,22 @@
     Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"/>
   </Border>
  </ControlTemplate>
+ <ControlTemplate x:Key="MeowFilm.StateButtonTemplate" TargetType="Button">
+  <Grid x:Name="Root">
+   <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates">
+    <VisualState x:Name="Normal"/>
+    <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtleHover}"/></VisualState.Setters></VisualState>
+    <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtlePressed}"/></VisualState.Setters></VisualState>
+    <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="Root.Opacity" Value="0.45"/></VisualState.Setters></VisualState>
+   </VisualStateGroup></VisualStateManager.VisualStateGroups>
+   <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"/>
+   <Border x:Name="StateLayer" Background="Transparent" CornerRadius="{TemplateBinding CornerRadius}" IsHitTestVisible="False"/>
+   <ContentPresenter Margin="{TemplateBinding Padding}" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+    HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+    HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+    Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"/>
+  </Grid>
+ </ControlTemplate>
  <Style x:Key="MeowFilm.ContentListItem" TargetType="ListViewItem">
   <Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0"/>
   <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Top"/>

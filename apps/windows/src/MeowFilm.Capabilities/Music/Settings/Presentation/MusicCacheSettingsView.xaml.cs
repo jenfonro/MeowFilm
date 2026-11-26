@@ -12,6 +12,14 @@ public partial class MusicCacheSettingsView : UserControl
     {
         Settings = settings;
         InitializeComponent();
+        Loaded += (_, _) => { Settings.PropertyChanged -= SettingsChanged; Settings.PropertyChanged += SettingsChanged; };
+        Unloaded += (_, _) => { if (!IsLoaded) Settings.PropertyChanged -= SettingsChanged; };
+    }
+
+    private void SettingsChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MusicSettingsController.Status))
+            NoticeOutlet.Post(this, Settings.Status, (Settings, "cache"));
     }
 
     private async void ClearPlaybackCache_Click(object sender, RoutedEventArgs e)

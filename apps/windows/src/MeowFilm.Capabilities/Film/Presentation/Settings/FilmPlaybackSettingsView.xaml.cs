@@ -36,7 +36,6 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     public bool CanRetryRead => Idle && !libraryBusy;
     public bool HasReadFailure => ReadFailed || LibraryFailed;
     public bool CanEditLibrary => Idle && !libraryBusy && !LibraryFailed;
-    public string Work { get; private set; } = "";
     public IReadOnlyList<FilmSettingRow> Rows => rows;
     public IReadOnlyList<FilmSettingGroup> ManualGroups { get; private set; } = [];
     public IReadOnlyList<FilmSettingGroup> BlockGroups { get; private set; } = [];
@@ -56,7 +55,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         Changed(nameof(SelectedBlockRows));
         Changed(nameof(HasNoBlockRows));
     }
-    private void Notify(string value) => Notices.Message = value;
+    private void Notify(string value) => NoticeOutlet.Post(this, value);
     internal void SelectSection(string value)
     {
         if (stopping) return;
@@ -80,7 +79,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         read?.Cancel();
         editorLifetime?.Cancel();
         confirmLifetime?.Cancel();
-        readBusy = libraryBusy = false; ReadFailed = LibraryFailed = false; preferences = null; rows = []; ManualGroups = []; BlockGroups = []; Work = ""; Changed();
+        readBusy = libraryBusy = false; ReadFailed = LibraryFailed = false; preferences = null; rows = []; ManualGroups = []; BlockGroups = []; Changed();
     }
     internal async Task PrepareShutdownAsync()
     {
@@ -130,7 +129,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         string requestedSection = section;
         string? selectedManual = (ManualTargets.SelectedItem as FilmSettingGroup)?.Id;
         string? selectedBlock = (BlockTargets.SelectedItem as FilmSettingGroup)?.Id;
-        readBusy = preferences is null; ReadFailed = LibraryFailed = false; Work = ""; Changed();
+        readBusy = preferences is null; ReadFailed = LibraryFailed = false; Changed();
         try
         {
             var loaded = preferences ?? await service.ReadPreferencesAsync(token);
@@ -162,7 +161,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-        catch (Exception) { if (ticket == generation) { ReadFailed = true; Work = "读取失败"; Notify("影视设置读取失败"); } }
+        catch (Exception) { if (ticket == generation) { ReadFailed = true; Notify("影视设置读取失败"); } }
         finally
         {
             if (ReferenceEquals(read, currentRead)) read = null;

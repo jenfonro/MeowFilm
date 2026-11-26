@@ -223,6 +223,8 @@ public partial class FilmPlaybackView : UserControl
             UpdatePlayerProgress();
             return;
         }
+        if (e.PropertyName == nameof(FilmPlaybackPage.ReportFailed) && boundPage?.ReportFailed == true)
+            NoticeOutlet.Post(this, "观看上报失败", boundPage);
         if (e.PropertyName is nameof(FilmPlaybackPage.PlaybackRate) or nameof(FilmPlaybackPage.PlaybackAspect)) UpdateControlSelections();
         if (e.PropertyName is nameof(FilmPlaybackPage.Sources) or nameof(FilmPlaybackPage.Lines) or
             nameof(FilmPlaybackPage.SelectedSource) or nameof(FilmPlaybackPage.SelectedLine) || string.IsNullOrEmpty(e.PropertyName))
@@ -388,7 +390,7 @@ public partial class FilmPlaybackView : UserControl
         catch (OperationCanceledException) { }
         catch (Exception error)
         {
-            if (ReferenceEquals(boundPage, page)) Notices.Message = FilmPlaybackError.Message(error, failure);
+            if (ReferenceEquals(boundPage, page)) NoticeOutlet.Post(this, FilmPlaybackError.Message(error, failure));
         }
     }
 
@@ -511,7 +513,7 @@ public partial class FilmPlaybackView : UserControl
     }
     private async void ShortVideo_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not CheckBox box) return;
+        if (sender is not ToggleButton box) return;
         try { await ActAsync("shortvideo", new { enabled = box.IsChecked == true }); }
         finally { if (boundPage is { } page) box.IsChecked = page.ShortVideo; }
     }
@@ -570,7 +572,7 @@ public partial class FilmPlaybackView : UserControl
         catch (OperationCanceledException) { }
         catch (Exception error)
         {
-            if (ReferenceEquals(boundPage, page)) Notices.Message = FilmPlaybackError.Message(error, "原始目录打开失败");
+            if (ReferenceEquals(boundPage, page)) NoticeOutlet.Post(this, FilmPlaybackError.Message(error, "原始目录打开失败"));
         }
         finally { if (dialog is not null && ReferenceEquals(directory, dialog)) directory = null; }
     }
@@ -640,7 +642,7 @@ public partial class FilmPlaybackView : UserControl
         {
             if (ticket != rateGeneration || !ReferenceEquals(page, boundPage) || identity != page.MediaIdentity) return;
             selectingControl = true; RateBox.SelectedIndex = previous; selectingControl = false;
-            if (error is not OperationCanceledException) Notices.Message = FilmPlaybackError.Message(error, "倍速设置失败");
+            if (error is not OperationCanceledException) NoticeOutlet.Post(this, FilmPlaybackError.Message(error, "倍速设置失败"));
         }
     }
     private async void Aspect_Changed(object sender, SelectionChangedEventArgs e)
@@ -659,7 +661,7 @@ public partial class FilmPlaybackView : UserControl
         {
             if (ticket != aspectGeneration || !ReferenceEquals(page, boundPage) || identity != page.MediaIdentity) return;
             selectingControl = true; box.SelectedIndex = previous; selectingControl = false;
-            if (error is not OperationCanceledException) Notices.Message = FilmPlaybackError.Message(error, "比例设置失败");
+            if (error is not OperationCanceledException) NoticeOutlet.Post(this, FilmPlaybackError.Message(error, "比例设置失败"));
         }
     }
     private void Fullscreen_Click(object sender, RoutedEventArgs e) {  ToggleFullscreen(); }
@@ -710,7 +712,7 @@ public partial class FilmPlaybackView : UserControl
             if (pictureInPicture) page.RetainOwner(dialog);
             ShowPlayerControls();
         }
-        catch { Restore(); dialog?.Close(); Notices.Message = "播放器窗口打开失败"; }
+        catch { Restore(); dialog?.Close(); NoticeOutlet.Post(this, "播放器窗口打开失败"); }
     }
     private sealed class FilmPlayerWindow : DesktopWindow
     {

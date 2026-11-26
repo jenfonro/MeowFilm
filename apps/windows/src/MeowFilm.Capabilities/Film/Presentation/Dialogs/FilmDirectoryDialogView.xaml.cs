@@ -21,13 +21,11 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
     private string currentPath = "/";
     private bool canBack;
     private bool canPlay;
-    private string errorMessage = "";
     private IReadOnlyList<FilmDirectoryRow> rows = [];
 
     public string CurrentPath => currentPath;
     public bool CanBack => canBack;
     public bool CanPlay => canPlay;
-    public string ErrorMessage => errorMessage;
     public IReadOnlyList<FilmDirectoryRow> Rows => rows;
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -110,23 +108,14 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
         }
     }
 
-    private void ClearError()
-    {
-        if (errorMessage.Length == 0) return;
-        errorMessage = "";
-        Changed(nameof(ErrorMessage));
-    }
-
     private async void Play_Click(object sender, RoutedEventArgs e)
     {
         if (FileList.SelectedItem is not FilmDirectoryRow { IsDirectory: false, ItemId: { Length: > 0 } itemId } || !IsCurrent(page)) return;
-        ClearError();
         try { await page.SelectItemAsync(itemId); }
         catch (OperationCanceledException) { }
         catch (Exception error)
         {
-            errorMessage = FilmPlaybackError.Message(error, "文件播放失败");
-            Changed(nameof(ErrorMessage));
+            NoticeOutlet.Post(this, FilmPlaybackError.Message(error, "文件播放失败"));
         }
     }
 
@@ -139,7 +128,6 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
 
     private void Populate()
     {
-        ClearError();
         currentPath = directory.Path;
         canBack = directory.CanBack;
         canPlay = false;

@@ -107,7 +107,7 @@
       </local:DesktopPageHeader.Navigation>
       <local:DesktopPageHeader.Center>
        <Grid x:Name="SearchInput" MaxWidth="430" Height="34" VerticalAlignment="Center">
-        <TextBox x:Name="SearchBox" MinWidth="0" Height="34" MinHeight="34" Padding="36,4,52,4" FontSize="12" Style="{StaticResource MeowFilm.TextBox}" TextChanged="OnSearchTextChanged" KeyDown="OnSearchKeyDown" TextCompositionStarted="OnSearchCompositionStarted" TextCompositionEnded="OnSearchCompositionEnded" AutomationProperties.Name="搜索" AutomationProperties.AcceleratorKey="Ctrl+K"/>
+        <TextBox x:Name="SearchBox" MinWidth="0" Height="34" MinHeight="34" Padding="36,0,52,0" FontSize="12" Style="{StaticResource MeowFilm.TextBox}" TextChanged="OnSearchTextChanged" KeyDown="OnSearchKeyDown" TextCompositionStarted="OnSearchCompositionStarted" TextCompositionEnded="OnSearchCompositionEnded" AutomationProperties.Name="搜索" AutomationProperties.AcceleratorKey="Ctrl+K"/>
         <local:ShellSearchScope x:Name="SearchTargetPicker" Width="92" Height="28" MinHeight="0" Padding="0" Template="{StaticResource SearchScopeTemplate}" Foreground="{ThemeResource MeowFilm.Brush.Text}" FontSize="12" Margin="1,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Visibility="Collapsed" Background="Transparent" BorderThickness="0" AutomationProperties.Name="搜索目标"/>
         <FontIcon Glyph="&#xE721;" FontSize="14" Width="28" Margin="1,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Foreground="{ThemeResource MeowFilm.Brush.Muted}" IsHitTestVisible="False"/>
         <Border x:Name="SearchDivider" Width="1" Height="16" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="94,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Visibility="Collapsed"/>
@@ -130,9 +130,7 @@
       <Button x:Name="PlayerDetailBackButton" HorizontalAlignment="Left" VerticalAlignment="Top" Style="{StaticResource MeowFilm.IconButton}" Width="40" Height="40" Margin="20,12,0,0" Foreground="#ECECEE" Click="OnBackClick" Content="&#xE70D;" AutomationProperties.Name="收起播放器"/>
      </Grid>
     </Grid>
-    <Button x:Name="QueueDismissSurface" Grid.RowSpan="2" Grid.ColumnSpan="2" Canvas.ZIndex="28" Visibility="Collapsed" Background="Transparent" BorderThickness="0" Padding="0" IsTabStop="False" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Click="OnQueueDismissClick" AutomationProperties.Name="收起播放列表">
-     <Button.Template><ControlTemplate TargetType="Button"><Border Background="Transparent"><VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates"><VisualState x:Name="Normal"/><VisualState x:Name="PointerOver"/><VisualState x:Name="Pressed"/><VisualState x:Name="Disabled"/></VisualStateGroup></VisualStateManager.VisualStateGroups></Border></ControlTemplate></Button.Template>
-    </Button>
+    <Button x:Name="QueueDismissSurface" Grid.RowSpan="2" Grid.ColumnSpan="2" Canvas.ZIndex="28" Visibility="Collapsed" Background="Transparent" BorderThickness="0" Padding="0" IsTabStop="False" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Template="{StaticResource MeowFilm.ContentButtonTemplate}" Click="OnQueueDismissClick" AutomationProperties.Name="收起播放列表"/>
     <Border x:Name="QueueSurface" Translation="0,0,16" Grid.RowSpan="2" Grid.ColumnSpan="2" Canvas.ZIndex="30" Width="386" Margin="0,76,12,16" HorizontalAlignment="Right" Style="{StaticResource MeowFilm.FloatingSurface}" CornerRadius="12" Visibility="Collapsed">
      <Border.RenderTransform><TranslateTransform x:Name="QueueTransform"/></Border.RenderTransform>
      <Border.Shadow><ThemeShadow/></Border.Shadow>

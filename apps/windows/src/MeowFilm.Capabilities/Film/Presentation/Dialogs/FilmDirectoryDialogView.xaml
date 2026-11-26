@@ -14,6 +14,5 @@
    </ListView.ItemTemplate>
   </ListView>
   <Button Content="播放所选文件" MinHeight="32" HorizontalAlignment="Left" IsEnabled="{x:Bind CanPlay, Mode=OneWay}" Click="Play_Click"/>
-  <desktop:NoticeOutlet Message="{x:Bind ErrorMessage, Mode=OneWay}"/>
  </StackPanel>
 </UserControl>

@@ -16,7 +16,6 @@ public partial class ColorPicker : UserControl
     public event EventHandler<ColorCommittedEventArgs>? ColorCommitted;
     private bool editing;
     private IDisposable? visibility;
-    private readonly NoticeOutlet notice = new();
     public ColorPicker()
     {
         InitializeComponent(); UpdateSelected();
@@ -59,7 +58,7 @@ public partial class ColorPicker : UserControl
             if (await DesktopModalHost.ShowDialogAsync(this, request) == DesktopDialogResult.Primary && IsEnabled && DesktopVisual.IsVisible(this))
                 ColorCommitted?.Invoke(this, new(AppearanceColors.Hex(picker.Color)));
         }
-        catch (Exception) { NoticeOutlet.Publish(this, new(notice, "暂时无法打开颜色设置")); }
+        catch (Exception) { NoticeOutlet.Post(this, "暂时无法打开颜色设置", this); }
         finally { editing = false; }
     }
 }

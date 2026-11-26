@@ -9,7 +9,7 @@
      </Grid>
     </DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer>
     <StackPanel x:Name="FilmTools" Grid.Column="1" Orientation="Horizontal" Visibility="Collapsed" Margin="16,0,0,0"><TextBlock Text="{x:Bind Page.MetadataStatus, Mode=OneWay}" Margin="0,0,16,0" Style="{StaticResource Capability.Muted}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/><TextBlock Text="原始列表" VerticalAlignment="Center" Margin="0,0,8,0"/><CheckBox x:Name="RawListToggle" IsChecked="{x:Bind Page.RawListMode, Mode=OneWay}" Click="RawList_Click" Style="{StaticResource MeowFilm.Switch}" VerticalAlignment="Center" AutomationProperties.Name="原始列表"/></StackPanel>
-   </Grid><desktop:NoticeOutlet Message="{x:Bind Page.Error, Mode=OneWay}"/>
+   </Grid>
   </StackPanel>
   <ContentControl x:Name="MusicHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
   <ScrollViewer x:Name="NovelScroll" x:FieldModifier="internal" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" AutomationProperties.Name="小说搜索结果">

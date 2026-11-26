@@ -40,7 +40,7 @@ internal sealed class ShellSearchCoordinator(
             picker.ItemsSource = searchPage.Targets;
             picker.Visibility = Visibility.Visible;
             searchDivider.Visibility = Visibility.Visible;
-            searchBox.Padding = new(100, 4, 52, 4);
+            searchBox.Padding = new(100, 0, 52, 0);
         }
     }
 

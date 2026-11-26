@@ -28,7 +28,7 @@
    </ScrollViewer>
   </Border>
   <ScrollViewer x:Name="SettingsScroller" Grid.Row="1" Style="{StaticResource MeowFilm.SettingsScrollViewer}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" ViewChanged="Settings_ViewChanged" SizeChanged="Settings_ViewportChanged" AutomationProperties.Name="全部音乐设置">
-   <StackPanel x:Name="SectionsStack" MaxWidth="1248" Margin="0,0,12,0" HorizontalAlignment="Left">
+   <StackPanel x:Name="SectionsStack" MaxWidth="1248" HorizontalAlignment="Left">
     <Border x:Name="AccountsSection" Style="{StaticResource Settings.Section}">
      <StackPanel>
       <Grid Margin="0,0,0,8">
@@ -69,7 +69,6 @@
         </StackPanel>
        </Grid>
        <Button Content="清空搜索历史" Click="SearchHistoryClear_Click" Style="{StaticResource Settings.Button}" IsEnabled="{x:Bind Settings.HasSearchHistory,Mode=OneWay}" HorizontalAlignment="Left" Margin="0,16,0,0"/>
-       <desktop:NoticeOutlet Message="{x:Bind Settings.SearchPreferenceStatus,Mode=OneWay}"/>
      </StackPanel>
     </Border>
     <Border x:Name="QualitySection" Style="{StaticResource Settings.Section}">
@@ -85,7 +84,6 @@
         <local:SettingsPriorityList x:Name="QualityPriorities" Title="音质优先顺序" Tag="quality" ItemsSource="{x:Bind Settings.QualityCategories}" CanEdit="{x:Bind Settings.CanEditQuality,Mode=OneWay}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
         <local:SettingsPriorityList x:Name="SpatialPriorities" Title="空间音频优先顺序" Tag="spatial" Grid.Column="2" ItemsSource="{x:Bind Settings.SpatialQualities}" CanEdit="{x:Bind Settings.CanEditQuality,Mode=OneWay}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
        </Grid>
-       <desktop:NoticeOutlet Message="{x:Bind Settings.QualityStatus,Mode=OneWay}"/>
      </StackPanel>
     </Border>
     <Border x:Name="ExclusionSection" Style="{StaticResource Settings.Section}">
@@ -101,7 +99,7 @@
        <ItemsControl x:Name="ExclusionList" ItemsSource="{x:Bind Settings.SourceExclusions}" Visibility="{x:Bind Settings.HasSourceExclusions,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="错源记录">
         <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
         <ItemsControl.Template><ControlTemplate TargetType="ItemsControl">
-         <ScrollViewer Style="{StaticResource MeowFilm.SettingsScrollViewer}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><ItemsPresenter/></ScrollViewer>
+         <ScrollViewer Style="{StaticResource MeowFilm.OverlayScrollViewer}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><ItemsPresenter/></ScrollViewer>
         </ControlTemplate></ItemsControl.Template>
         <ItemsControl.ItemTemplate><DataTemplate x:DataType="local:MusicSourceExclusionRow">
          <Border Style="{StaticResource Settings.RowDivider}"><Grid Height="44" Margin="8,0">
@@ -134,7 +132,7 @@
     <Border x:Name="EndSpace" Height="0"/>
    </StackPanel>
   </ScrollViewer>
-  <local:MusicSourcesSettingsView x:Name="SourcesPage" Grid.Row="1" Visibility="Collapsed"/>
+  <local:MusicSourcesSettingsView x:Name="SourcesPage" Grid.Row="1" Style="{StaticResource MeowFilm.SettingsBody}" Visibility="Collapsed"/>
   <Grid x:Name="ModalStash" Visibility="Collapsed">
    <Border x:Name="ExclusionPopupSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="10" Padding="20" Width="360" TabFocusNavigation="Cycle">
     <StackPanel>
@@ -161,13 +159,13 @@
       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="76"/></Grid.ColumnDefinitions>
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <TextBlock Text="单次请求页数" VerticalAlignment="Center"/>
-      <TextBox x:Name="SearchPagesBox" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" HorizontalContentAlignment="Right"
+      <TextBox x:Name="SearchPagesBox" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" TextAlignment="Right"
                MaxLength="10" LostFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="单次请求页数"/>
       <TextBlock Grid.Row="1" Text="平台并发数" VerticalAlignment="Center" Margin="0,10,0,0"/>
-      <TextBox x:Name="SearchConcurrencyBox" Grid.Row="1" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" Margin="0,10,0,0" HorizontalContentAlignment="Right"
+      <TextBox x:Name="SearchConcurrencyBox" Grid.Row="1" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" Margin="0,10,0,0" TextAlignment="Right"
                MaxLength="10" LostFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="平台并发数"/>
       <TextBlock Grid.Row="2" Text="缓存时长（分钟）" VerticalAlignment="Center" Margin="0,10,0,0"/>
-      <TextBox x:Name="SearchCacheBox" Grid.Row="2" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" Margin="0,10,0,0" HorizontalContentAlignment="Right"
+      <TextBox x:Name="SearchCacheBox" Grid.Row="2" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" Margin="0,10,0,0" TextAlignment="Right"
                MaxLength="4" LostFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="缓存时长（分钟）"/>
      </Grid>
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
@@ -176,6 +174,5 @@
     </StackPanel>
    </Border>
   </Grid>
-  <desktop:NoticeOutlet Message="{x:Bind Settings.Status,Mode=OneWay,TargetNullValue=''}"/>
  </Grid>
 </UserControl>

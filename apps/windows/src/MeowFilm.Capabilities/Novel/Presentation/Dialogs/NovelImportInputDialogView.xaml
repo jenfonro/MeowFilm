@@ -7,6 +7,7 @@
   <TextBlock x:Name="LabelText" Style="{StaticResource MeowFilm.MutedText}"
              FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0"/>
   <TextBox x:Name="InputBox" Style="{StaticResource MeowFilm.ManagementInput}"
-           HorizontalAlignment="Stretch" TextWrapping="Wrap"/>
+           HorizontalAlignment="Stretch" AcceptsReturn="True" TextWrapping="Wrap"
+           VerticalContentAlignment="Top"/>
  </StackPanel>
 </UserControl>

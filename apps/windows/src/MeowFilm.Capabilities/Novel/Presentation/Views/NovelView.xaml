@@ -44,6 +44,5 @@
     </desktop:WrapPanel>
    </StackPanel>
   </Grid>
-  <desktop:NoticeOutlet x:Name="NoticeHost"/>
  </Grid>
 </UserControl>

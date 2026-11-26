@@ -4,6 +4,23 @@
  xmlns:local="using:MeowFilm.Capabilities">
  <UserControl.Resources>
   <ResourceDictionary>
+   <ResourceDictionary.ThemeDictionaries>
+    <ResourceDictionary x:Key="Default">
+     <StaticResource x:Key="ToggleButtonBackgroundPointerOver" ResourceKey="MeowFilm.Brush.SubtleHover"/>
+     <StaticResource x:Key="ToggleButtonBackgroundPressed" ResourceKey="MeowFilm.Brush.SubtlePressed"/>
+     <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="MeowFilm.Brush.Text"/>
+     <StaticResource x:Key="ToggleButtonForegroundPressed" ResourceKey="MeowFilm.Brush.Text"/>
+     <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="MeowFilm.Brush.ItemSelected"/>
+     <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="MeowFilm.Brush.ItemSelected"/>
+     <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="MeowFilm.Brush.ItemSelected"/>
+     <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="MeowFilm.Brush.Text"/>
+     <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="MeowFilm.Brush.Text"/>
+     <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="MeowFilm.Brush.Text"/>
+     <SolidColorBrush x:Key="ToggleButtonBorderBrushChecked" Color="Transparent"/>
+     <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPointerOver" Color="Transparent"/>
+     <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPressed" Color="Transparent"/>
+    </ResourceDictionary>
+   </ResourceDictionary.ThemeDictionaries>
    <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}">
     <Setter Property="MinWidth" Value="36"/>
     <Setter Property="MinHeight" Value="36"/>
@@ -11,7 +28,7 @@
     <Setter Property="Padding" Value="6"/>
     <Setter Property="CornerRadius" Value="8"/>
    </Style>
-   <Style x:Key="Source.Choice" TargetType="ToggleButton">
+   <Style x:Key="Source.Choice" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
     <Setter Property="HorizontalAlignment" Value="Stretch"/>
     <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
     <Setter Property="Padding" Value="12,10"/>
@@ -20,30 +37,6 @@
     <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="BorderThickness" Value="0"/>
-    <Setter Property="UseSystemFocusVisuals" Value="True"/>
-    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
-     <Grid>
-      <VisualStateManager.VisualStateGroups>
-       <VisualStateGroup x:Name="CommonStates">
-        <VisualState x:Name="Normal"/>
-        <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtleHover}"/></VisualState.Setters></VisualState>
-        <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtlePressed}"/></VisualState.Setters></VisualState>
-        <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
-        <VisualState x:Name="Checked"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.ItemSelected}"/></VisualState.Setters></VisualState>
-        <VisualState x:Name="CheckedPointerOver"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.ItemSelected}"/><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtleHover}"/></VisualState.Setters></VisualState>
-        <VisualState x:Name="CheckedPressed"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.ItemSelected}"/><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtlePressed}"/></VisualState.Setters></VisualState>
-        <VisualState x:Name="CheckedDisabled"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.ItemSelected}"/><Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
-       </VisualStateGroup>
-      </VisualStateManager.VisualStateGroups>
-      <Border x:Name="Surface" Background="{TemplateBinding Background}" CornerRadius="{TemplateBinding CornerRadius}"/>
-      <Border x:Name="StateLayer" Background="Transparent" CornerRadius="{TemplateBinding CornerRadius}" IsHitTestVisible="False"/>
-      <ContentPresenter x:Name="Content" Margin="{TemplateBinding Padding}" Content="{TemplateBinding Content}"
-                        ContentTemplate="{TemplateBinding ContentTemplate}"
-                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-                        Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}"
-                        FontSize="{TemplateBinding FontSize}"/>
-     </Grid>
-    </ControlTemplate></Setter.Value></Setter>
    </Style>
   </ResourceDictionary>
  </UserControl.Resources>

@@ -44,7 +44,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     private static readonly string[] PlaybackProperties =
     [
         nameof(HasCurrent), nameof(CanBlockAttempt), nameof(ActiveItemId), nameof(ShortVideo),
-        nameof(ReportFailed), nameof(ReportErrorMessage),
+        nameof(ReportFailed),
         nameof(PlayerPanLabel), nameof(PlayerQualityLabel),
         nameof(PlayerPanOptions), nameof(PlayerQualityOptions), nameof(ShowPlayerSwitchActions),
         nameof(PlayerBusy), nameof(PlayerBuffering), nameof(PlayerStatusVisible), nameof(PlayerStatusText),
@@ -241,7 +241,6 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public bool ExecutionFailed => session?.IsCurrentPage(this) == true && session.ExecutionError.Length > 0;
     public bool NeedsRecovery => ConnectionFailed || ExecutionFailed;
     public bool ReportFailed => (snapshot?.ReportError.Length ?? 0) > 0;
-    public string ReportErrorMessage => ReportFailed ? "观看上报失败" : "";
     public event PropertyChangedEventHandler? PropertyChanged;
 
     internal void Apply(FilmPlaybackSnapshot value)

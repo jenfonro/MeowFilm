@@ -8,53 +8,53 @@
     <TextBlock Text="{x:Bind Name, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" VerticalAlignment="Center" Margin="6,0" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Cat.Type" x:DataType="local:FilmSettingsCatRow">
-    <TextBlock Text="{x:Bind TypeText, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" VerticalAlignment="Center" Margin="6,0" />
+    <TextBlock Text="{x:Bind TypeText, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,0" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Cat.State" x:DataType="local:FilmSettingsCatRow">
-    <desktop:ManagementStatus Content="{x:Bind StateText, Mode=OneWay}" Tone="{x:Bind StateTone, Mode=OneWay}" HorizontalAlignment="Left" Margin="4,0,0,0" AutomationProperties.Name="{x:Bind StateAccessibleName, Mode=OneWay}" AutomationProperties.HelpText="{x:Bind ErrorHelpText, Mode=OneWay}" />
+    <desktop:ManagementStatus Content="{x:Bind StateText, Mode=OneWay}" Tone="{x:Bind StateTone, Mode=OneWay}" HorizontalAlignment="Center" Margin="6,0" AutomationProperties.Name="{x:Bind StateAccessibleName, Mode=OneWay}" AutomationProperties.HelpText="{x:Bind ErrorHelpText, Mode=OneWay}" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Cat.Enabled" x:DataType="local:FilmSettingsCatRow">
     <CheckBox IsChecked="{x:Bind Enabled, Mode=OneWay}" Click="CatEnabled_Click" Style="{StaticResource MeowFilm.Switch}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind EnabledAccessibleName, Mode=OneWay}" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Cat.Modified" x:DataType="local:FilmSettingsCatRow">
-    <TextBlock Text="{x:Bind ModifiedText, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" VerticalAlignment="Center" Margin="6,0" />
+    <TextBlock Text="{x:Bind ModifiedText, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,0" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Cat.Update" x:DataType="local:FilmSettingsCatRow">
-    <desktop:ManagementStatus Content="{x:Bind UpdateText, Mode=OneWay}" Tone="{x:Bind UpdateTone, Mode=OneWay}" HorizontalAlignment="Left" Margin="4,0,0,0" AutomationProperties.Name="{x:Bind UpdateAccessibleName, Mode=OneWay}" AutomationProperties.HelpText="{x:Bind UpdateErrorHelpText, Mode=OneWay}" />
+    <desktop:ManagementStatus Content="{x:Bind UpdateText, Mode=OneWay}" Tone="{x:Bind UpdateTone, Mode=OneWay}" HorizontalAlignment="Center" Margin="6,0" AutomationProperties.Name="{x:Bind UpdateAccessibleName, Mode=OneWay}" AutomationProperties.HelpText="{x:Bind UpdateErrorHelpText, Mode=OneWay}" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Cat.Actions" x:DataType="local:FilmSettingsCatRow">
-    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-     <Button Content="编辑" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="6,0" Click="EditCat_Click" AutomationProperties.Name="{x:Bind EditAccessibleName, Mode=OneWay}" />
-     <Button Content="更新" Style="{StaticResource MeowFilm.ManagementRowButton.Primary}" Padding="6,0" Click="UpdateCat_Click" AutomationProperties.Name="{x:Bind UpdateActionAccessibleName, Mode=OneWay}" />
-     <Button Content="重启" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="6,0" IsEnabled="{x:Bind CanRestart, Mode=OneWay}" Click="RestartCat_Click" AutomationProperties.Name="{x:Bind RestartAccessibleName, Mode=OneWay}" />
-     <Button Content="删除" Style="{StaticResource MeowFilm.ManagementRowButton.Danger}" Padding="6,0" Click="DeleteCat_Click" AutomationProperties.Name="{x:Bind DeleteAccessibleName, Mode=OneWay}" />
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,0">
+     <Button Content="编辑" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="8,0" Click="EditCat_Click" AutomationProperties.Name="{x:Bind EditAccessibleName, Mode=OneWay}" />
+     <Button Content="更新" Style="{StaticResource MeowFilm.ManagementRowButton.Primary}" Padding="8,0" Click="UpdateCat_Click" AutomationProperties.Name="{x:Bind UpdateActionAccessibleName, Mode=OneWay}" />
+     <Button Content="重启" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="8,0" IsEnabled="{x:Bind CanRestart, Mode=OneWay}" Click="RestartCat_Click" AutomationProperties.Name="{x:Bind RestartAccessibleName, Mode=OneWay}" />
+     <Button Content="删除" Style="{StaticResource MeowFilm.ManagementRowButton.Danger}" Padding="8,0" Click="DeleteCat_Click" AutomationProperties.Name="{x:Bind DeleteAccessibleName, Mode=OneWay}" />
     </StackPanel>
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Video.Name" x:DataType="local:FilmSettingsVideoRow">
     <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="6,0">
-     <Border Style="{StaticResource FilmSettings.AggregateBadge}" CornerRadius="4" BorderThickness="1" Margin="6,0,0,0" Padding="0,2" Visibility="{x:Bind AggregateImages, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
+     <Border Style="{StaticResource FilmSettings.AggregateBadge}" CornerRadius="4" BorderThickness="1" Margin="0,0,6,0" Padding="0,2" Visibility="{x:Bind AggregateImages, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
       <TextBlock Text="聚合" Style="{StaticResource FilmSettings.AggregateText}" Margin="6,0" />
      </Border>
      <TextBlock Text="{x:Bind Name, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" VerticalAlignment="Center" Margin="0" />
     </StackPanel>
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Video.State" x:DataType="local:FilmSettingsVideoRow">
-    <desktop:ManagementStatus Content="{x:Bind StateText, Mode=OneWay}" Tone="{x:Bind StateTone, Mode=OneWay}" IsTabStop="{x:Bind HasDiagnostics, Mode=OneWay}" Click="VideoStatus_Click" HorizontalAlignment="Left" Margin="4,0,0,0" AutomationProperties.Name="{x:Bind StateAccessibleName, Mode=OneWay}" />
+    <desktop:ManagementStatus Content="{x:Bind StateText, Mode=OneWay}" Tone="{x:Bind StateTone, Mode=OneWay}" IsTabStop="{x:Bind HasDiagnostics, Mode=OneWay}" Click="VideoStatus_Click" HorizontalAlignment="Center" Margin="6,0" AutomationProperties.Name="{x:Bind StateAccessibleName, Mode=OneWay}" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Video.Enabled" x:DataType="local:FilmSettingsVideoRow">
     <CheckBox Tag="enabled" IsChecked="{x:Bind Enabled, Mode=OneWay}" Click="VideoOption_Click" Style="{StaticResource MeowFilm.Switch}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind EnabledAccessibleName, Mode=OneWay}" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Video.Home" x:DataType="local:FilmSettingsVideoRow">
-    <CheckBox Tag="home" IsChecked="{x:Bind HomeVisible, Mode=OneWay}" Click="VideoOption_Click" Style="{StaticResource MeowFilm.ManagementCheck}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind HomeAccessibleName, Mode=OneWay}" />
+    <CheckBox Tag="home" IsChecked="{x:Bind HomeVisible, Mode=OneWay}" Click="VideoOption_Click" Style="{StaticResource MeowFilm.ManagementCheck}" Padding="0" MinHeight="0" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind HomeAccessibleName, Mode=OneWay}" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Video.Search" x:DataType="local:FilmSettingsVideoRow">
-    <CheckBox Tag="search" IsChecked="{x:Bind SearchEnabled, Mode=OneWay}" Click="VideoOption_Click" Style="{StaticResource MeowFilm.ManagementCheck}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind SearchAccessibleName, Mode=OneWay}" />
+    <CheckBox Tag="search" IsChecked="{x:Bind SearchEnabled, Mode=OneWay}" Click="VideoOption_Click" Style="{StaticResource MeowFilm.ManagementCheck}" Padding="0" MinHeight="0" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind SearchAccessibleName, Mode=OneWay}" />
    </DataTemplate>
    <DataTemplate x:Key="FilmSettings.Video.Actions" x:DataType="local:FilmSettingsVideoRow">
-    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-     <Button Content="检测" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="6,0" IsEnabled="{x:Bind CanDetect, Mode=OneWay}" Click="DetectVideo_Click" AutomationProperties.Name="{x:Bind DetectAccessibleName, Mode=OneWay}" />
-     <Button Content="删除" Style="{StaticResource MeowFilm.ManagementRowButton.Danger}" Padding="6,0" Click="DeleteVideo_Click" AutomationProperties.Name="{x:Bind DeleteAccessibleName, Mode=OneWay}" />
-     <Button Content="···" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="6,0" AutomationProperties.Name="{x:Bind MoreAccessibleName, Mode=OneWay}">
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,0">
+     <Button Content="检测" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="8,0" IsEnabled="{x:Bind CanDetect, Mode=OneWay}" Click="DetectVideo_Click" AutomationProperties.Name="{x:Bind DetectAccessibleName, Mode=OneWay}" />
+     <Button Content="删除" Style="{StaticResource MeowFilm.ManagementRowButton.Danger}" Padding="8,0" Click="DeleteVideo_Click" AutomationProperties.Name="{x:Bind DeleteAccessibleName, Mode=OneWay}" />
+     <Button Content="···" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="8,0" AutomationProperties.Name="{x:Bind MoreAccessibleName, Mode=OneWay}">
       <Button.Flyout>
        <MenuFlyout Placement="BottomEdgeAlignedLeft">
         <ToggleMenuFlyoutItem Text="设置聚合图片" Tag="{x:Bind}" IsChecked="{x:Bind AggregateImages, Mode=OneWay}" Click="VideoAggregate_Click" />
@@ -91,13 +91,10 @@
     <RowDefinition Height="Auto" />
     <RowDefinition />
    </Grid.RowDefinitions>
-   <StackPanel Orientation="Horizontal">
-    <TextBlock Text="正在处理数据源设置…" VerticalAlignment="Center" Visibility="{x:Bind MetadataBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.LiveSetting="Polite" />
-    <Button Content="重试" Click="MetadataRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind MetadataFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind MetadataIdle, Mode=OneWay}" AutomationProperties.Name="重新读取数据源设置" />
-   </StackPanel>
+   <Button Content="重试" Click="MetadataRetry_Click" Style="{StaticResource Settings.Button}" Margin="0,8,0,0" HorizontalAlignment="Left" Visibility="{x:Bind MetadataFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind MetadataIdle, Mode=OneWay}" AutomationProperties.Name="重新读取数据源设置" />
    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="数据源配置">
-    <ContentControl IsEnabled="{x:Bind CanEditMetadata, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
-     <StackPanel Visibility="{x:Bind MetadataLoaded, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" Margin="0,0,12,0">
+    <ContentControl IsEnabled="{x:Bind MetadataLoaded, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
+     <StackPanel Visibility="{x:Bind MetadataLoaded, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
       <Border Style="{StaticResource Settings.Section}">
        <StackPanel>
         <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
@@ -198,15 +195,11 @@
     <RowDefinition Height="Auto" />
     <RowDefinition />
    </Grid.RowDefinitions>
-   <StackPanel Orientation="Horizontal">
-    <TextBlock Text="正在处理规则…" VerticalAlignment="Center" Visibility="{x:Bind RulesBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.LiveSetting="Polite" />
-    <Button Content="重试" Click="RulesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind RulesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind RulesIdle, Mode=OneWay}" AutomationProperties.Name="重新读取魔法规则" />
-    <Button Content="取消" Click="RulesCancel_Click" Margin="8,0,0,0" Style="{StaticResource Settings.QuietButton}" Visibility="{x:Bind RulesBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="取消规则操作" />
-   </StackPanel>
+   <Button Content="重试" Click="RulesRetry_Click" Style="{StaticResource Settings.Button}" Margin="0,8,0,0" HorizontalAlignment="Left" Visibility="{x:Bind RulesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind RulesIdle, Mode=OneWay}" AutomationProperties.Name="重新读取魔法规则" />
    <ScrollViewer x:Name="RulesScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="魔法匹配设置">
     <StackPanel>
-     <ContentControl IsEnabled="{x:Bind CanEditRules, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
-      <StackPanel x:Name="RuleSections" Margin="0,0,12,0" Visibility="{x:Bind RulesLoaded, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
+     <ContentControl IsEnabled="{x:Bind RulesLoaded, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
+      <StackPanel x:Name="RuleSections" Visibility="{x:Bind RulesLoaded, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
        <Border Style="{StaticResource Settings.Section}">
         <StackPanel>
          <Grid Margin="0,0,0,8">
@@ -326,9 +319,8 @@
     </StackPanel>
    </ScrollViewer>
   </Grid>
-  <Grid x:Name="CatsPage" Grid.Row="1" Visibility="Collapsed">
+  <Grid x:Name="CatsPage" Grid.Row="1" Style="{StaticResource MeowFilm.SettingsBody}" Visibility="Collapsed">
    <Grid.RowDefinitions>
-    <RowDefinition Height="Auto" />
     <RowDefinition Height="Auto" />
     <RowDefinition />
    </Grid.RowDefinitions>
@@ -337,19 +329,12 @@
     <Button Content="添加本地文件" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{x:Bind CanEditSources, Mode=OneWay}" Click="ImportLocal_Click" AutomationProperties.Name="添加本地文件" />
     <Button Content="添加网络源" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{x:Bind CanEditSources, Mode=OneWay}" Click="ImportNetwork_Click" AutomationProperties.Name="添加网络猫源" />
     <Button Content="删除所选" Style="{StaticResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{x:Bind CanDeleteCats, Mode=OneWay}" Click="DeleteSelectedCats_Click" AutomationProperties.Name="删除选中猫源" />
+    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Margin="8,0,0,0" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重试猫源读取" />
    </StackPanel>
-   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{x:Bind HasSourceWork, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
-    <TextBlock Text="{x:Bind SourceWork, Mode=OneWay}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
-    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{x:Bind SourcesBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="取消猫源操作" />
-    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重试猫源读取" />
-   </StackPanel>
-   <ContentControl IsEnabled="{x:Bind CanEditSources, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False" Grid.Row="2">
-    <desktop:ManagementList x:Name="CatsList" AutomationProperties.Name="猫源列表" />
-   </ContentControl>
+   <desktop:ManagementList x:Name="CatsList" Grid.Row="1" AutomationProperties.Name="猫源列表" />
   </Grid>
-  <Grid x:Name="VideosPage" Grid.Row="1" Visibility="Collapsed">
+  <Grid x:Name="VideosPage" Grid.Row="1" Style="{StaticResource MeowFilm.SettingsBody}" Visibility="Collapsed">
    <Grid.RowDefinitions>
-    <RowDefinition Height="Auto" />
     <RowDefinition Height="Auto" />
     <RowDefinition />
    </Grid.RowDefinitions>
@@ -357,17 +342,10 @@
     <TextBlock Text="视频源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" Margin="0,0,12,0" />
     <Button Content="检测所选" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{x:Bind CanDetectVideos, Mode=OneWay}" Click="DetectSelectedVideos_Click" AutomationProperties.Name="检测选中视频源" />
     <Button Content="删除所选" Style="{StaticResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{x:Bind CanDeleteVideos, Mode=OneWay}" Click="DeleteSelectedVideos_Click" AutomationProperties.Name="删除选中视频源" />
+    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Margin="8,0,0,0" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重试视频源读取" />
    </StackPanel>
-   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{x:Bind HasSourceWork, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
-    <TextBlock Text="{x:Bind SourceWork, Mode=OneWay}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
-    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{x:Bind SourcesBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="取消视频源操作" />
-    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重试视频源读取" />
-   </StackPanel>
-   <ContentControl IsEnabled="{x:Bind CanEditSources, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False" Grid.Row="2">
-    <desktop:ManagementList x:Name="VideosList" AutomationProperties.Name="视频源列表" />
-   </ContentControl>
+   <desktop:ManagementList x:Name="VideosList" Grid.Row="1" AutomationProperties.Name="视频源列表" />
   </Grid>
-  <desktop:NoticeOutlet x:Name="Notices" />
   <Grid x:Name="ModalStash" Visibility="Collapsed">
    <Border x:Name="PopupSurface" Width="380" Padding="20" CornerRadius="10" Style="{StaticResource Settings.PopupSurface}" TabFocusNavigation="Cycle">
     <ScrollViewer x:Name="PopupScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
