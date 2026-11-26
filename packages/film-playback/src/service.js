@@ -3,8 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { isSmartSiteAllowed, normalizePreferences, readPreferences } from './policy.js';
 import { createFilmCatalog } from './catalog.js';
 import { createSnapshotStream } from './sse.js';
-import { clone, codeOf, fail, fields, identity, isIdentifier, object, requireValue,
-  sourceRevision, text } from './identity.js';
+import { clone, codeOf, fail, fields, identity, isIdentifier, object, requireValue, text } from './identity.js';
 import { addressLifetime, cancelled, manualIdentity } from './session-helpers.js';
 import { createSessionMetadata } from './session-metadata.js';
 import { createSessionSnapshot } from './session-snapshot.js';
@@ -15,12 +14,23 @@ import { createSessionPrefetch } from './session-prefetch.js';
 import { createSessionLifecycle } from './session-lifecycle.js';
 import { createSessionCommands } from './session-commands.js';
 
-/** A page schedules finite business work. Cache producers and native media leases outlive observation. */
-export function createPlaybackService({ data, library, media, rules, catalog = createFilmCatalog({ library }), debug }) {
-  const sessions = new Map(), jobs = new Set(), calculations = new Set();
-  const episodeMaps = new WeakMap(), browsingProjections = new WeakMap();
+/** Keyword-anchored playback session owner shared identically by Windows and iOS. */
+export function createPlaybackService({
+  data,
+  library,
+  media,
+  rules,
+  sourceRegistry,
+  catalog = createFilmCatalog(),
+  debug,
+}) {
+  const sessions = new Map();
+  const sessionsByKey = new Map();
+  const jobs = new Set();
+  const calculations = new Set();
+  const episodeMaps = new WeakMap();
   let closed = false, closing;
-  requireValue(rules && typeof rules.snapshot === 'function');
+  requireValue(rules && typeof rules.snapshot === 'function' && sourceRegistry);
 
   const preferences = () => readPreferences(library.read().preferences);
   let observedPreferences;
@@ -83,7 +93,8 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   function detached(session, work) {
     tracked(work).catch(error => {
       if (!session.released && !closed && !cancelled(error)) {
-        session.error = codeOf(error); publish(session);
+        session.error = codeOf(error);
+        publish(session);
       }
     });
   }
@@ -100,31 +111,27 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   }
 
   function currentSource(session, source) {
+    if (!source) return false;
     if (source.engine === 'pan') return true;
-    if (session.selectionKind === 'group' && !session.sourceScope.some(value =>
-      value.key === source.key && sourceRevision(value) === sourceRevision(source))) return false;
     const current = session.sources.find(value => value.key === source.key);
-    return current && current.enabled !== false && current.generation === source.generation &&
-      current.revision === source.revision;
+    return Boolean(current && current.enabled !== false && current.generation === source.generation &&
+      current.revision === source.revision);
   }
 
   function sourceAllowed(session, source) {
-    return currentSource(session, source) &&
-      (session.selectionKind !== 'source' || source.key === session.selectionSource.key);
+    return currentSource(session, source);
   }
 
   function smartSourceAllowed(session, source) {
-    const current = source.engine === 'pan' ? source : session.sources.find(value => value.key === source.key);
-    return sourceAllowed(session, source) && isSmartSiteAllowed(current, preferences());
-  }
-
-  function groupScopeAvailable(session) {
-    return session.target.kind !== 'group' || session.target.members.length > 0 || session.seedWaitGroup;
+    if (!source) return false;
+    if (source.engine === 'pan') return true;
+    const current = session.sources.find(value => value.key === source.key);
+    return Boolean(current && isSmartSiteAllowed(current, preferences()));
   }
 
   function preparedValid(value) {
-    return value?.descriptor && !value.resourceReleased && Date.now() < (Number.isFinite(value.descriptor.expiresAt)
-      ? Math.min(value.descriptor.expiresAt, value.preparedAt + addressLifetime) : value.preparedAt + addressLifetime);
+    return Boolean(value?.descriptor && !value.resourceReleased && Date.now() < (Number.isFinite(value.descriptor.expiresAt)
+      ? Math.min(value.descriptor.expiresAt, value.preparedAt + addressLifetime) : value.preparedAt + addressLifetime));
   }
 
   async function retire(session, value) {
@@ -134,7 +141,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
 
   function currentManual(session, value) {
     return library.read().manual.find(row => row?.id === value.manualId && row.enabled !== false &&
-      row.targetId === session.target.id && manualIdentity(row) === value.manualIdentity);
+      row.targetId === session.targetId && manualIdentity(row) === value.manualIdentity);
   }
 
   function excluded(session, candidate) {
@@ -142,32 +149,25 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     if (candidate.fileIdentity && !candidate.variant) session.excluded.add(candidate.fileIdentity);
   }
 
-  function addMember(session, sourceKey, detailId) {
-    requireValue(groupScopeAvailable(session), 'SOURCE_NOT_FOUND');
-    if (!session.target.members.some(row => row.sourceKey === sourceKey && row.detailId === detailId))
-      session.target.members.push({ sourceKey, detailId });
-    session.seedWaitGroup = false;
-  }
-
   function selectionError(session, fallback) {
     return session.feedbackFailure?.code ?? session.selectionError ?? fallback;
   }
 
   const ctx = {
-    data, library, media, rules, catalog, debug,
-    sessions, episodeMaps, browsingProjections,
+    data, library, media, rules, sourceRegistry, catalog, debug,
+    sessions, sessionsByKey, episodeMaps,
     isClosed: () => closed,
     preferences, get, tracked, calculate, cancelCalculations, publish, detached,
-    valid, runIO, currentSource, sourceAllowed, smartSourceAllowed, groupScopeAvailable,
-    preparedValid, retire, currentManual, excluded, addMember, selectionError,
+    valid, runIO, currentSource, sourceAllowed, smartSourceAllowed,
+    preparedValid, retire, currentManual, excluded, selectionError,
   };
 
   ctx.metadata = createSessionMetadata(ctx);
-  ctx.snapshot = createSessionSnapshot(ctx);
   ctx.browsing = createSessionBrowsing(ctx);
   ctx.candidates = createSessionCandidates(ctx);
   ctx.selection = createSessionSelection(ctx);
   ctx.prefetch = createSessionPrefetch(ctx);
+  ctx.snapshot = createSessionSnapshot(ctx);
   ctx.lifecycle = createSessionLifecycle(ctx);
   ctx.commands = createSessionCommands(ctx);
 
@@ -219,8 +219,9 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     async setSettings(input) {
       requireValue(library.configurationOwner !== 'native', 'PERMISSION_DENIED');
       const next = normalizePreferences(input);
-      if (!isDeepStrictEqual(preferences(), next))
+      if (!isDeepStrictEqual(preferences(), next)) {
         await library.update(document => { document.preferences = { ...document.preferences, ...next }; });
+      }
       await refreshPreferences();
       return clone(next);
     },
@@ -264,73 +265,30 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
             (text(input.item.sourceKey) && isIdentifier(input.item.detailId) || object(input.item.share) && text(input.item.provider)));
           const id = input.item.id ?? randomUUID();
           requireValue(text(id));
-          const matches = document.manual.filter(row => row?.id === id);
-          requireValue(matches.length <= 1, 'CORRUPT_STORAGE');
-          previous = matches[0];
+          const normalizedTargetId = library.normalizeTargetId(input.item.targetId);
+          previous = document.manual.find(row => row?.id === id);
           const item = {
-            ...fields(input.item, ['targetId', 'kind', 'title', 'name', 'sourceKey', 'detailId', 'provider',
+            ...fields(input.item, ['kind', 'title', 'name', 'sourceKey', 'detailId', 'provider',
               'seasonHint', 'enabled', 'autoDisable']),
-            id, failureCount: 0,
+            targetId: normalizedTargetId,
+            id,
+            failureCount: 0,
           };
           if (input.item.share !== undefined) {
             requireValue(object(input.item.share));
             item.share = fields(input.item.share, ['url', 'password']);
-          }
-          if (item.share !== undefined) {
-            requireValue(object(item.share) && typeof item.share.url === 'string' &&
-              (item.share.password === undefined || typeof item.share.password === 'string'));
             let url;
             try { url = new URL(item.share.url); } catch { throw fail('INVALID_REQUEST'); }
             requireValue(['https:', 'http:'].includes(url.protocol) && !url.username && !url.password);
           }
-          for (const key of ['enabled', 'autoDisable'])
-            requireValue(item[key] === undefined || typeof item[key] === 'boolean');
-          requireValue(item.seasonHint === undefined || Number.isSafeInteger(item.seasonHint) && item.seasonHint >= 0);
           updated = item;
           document.manual = [...document.manual.filter(row => row?.id !== item.id), item];
         }
       });
-      if (previous && updated && manualIdentity(previous) === manualIdentity(updated) &&
-          (previous.enabled !== false) === (updated.enabled !== false)) return library.read().manual;
-      const id = (previous ?? updated)?.id;
+      const affectedTargetIds = new Set([previous?.targetId, updated?.targetId].filter(Boolean));
       for (const session of sessions.values()) {
-        if (!id || ![previous?.targetId, updated?.targetId].includes(session.target.id)) continue;
-        const affectedPending = session.pending?.candidate.manualId === id;
-        const active = session.runWork && !session.stopped;
-        // Revoke publication before an old detail/resolve can complete. Its
-        // finite producer may still populate the shared cache for the old key.
-        if (affectedPending || active) { session.generation++; session.runKey = null; }
-        const generation = session.generation;
-        session.discoveryComplete = false;
-        for (const [key, candidate] of session.candidates) {
-          if (candidate.manualId === id) session.candidates.delete(key);
-        }
-        const removed = new Set();
-        for (const result of session.results) {
-          if (result.manualId !== id) continue;
-          if (result.source.engine === 'pan') { removed.add(result.id); continue; }
-          delete result.recognized; delete result.directories; delete result.browsing;
-          delete result.manualId; delete result.manualIdentity; delete result.linkedTargetId;
-          delete result.source.manualSeasonHint;
-          if (result.detail) await ctx.candidates.candidatesFrom(session, result, result.detail);
-        }
-        if (removed.size) {
-          session.results = session.results.filter(value => !removed.has(value.id));
-          session.resultKeys = new Set(session.results.map(value => value.id));
-          if (removed.has(session.browsing.sourceId)) {
-            session.browseGeneration++;
-            session.browsing = { sourceId: null, lineId: null, loading: false, error: null, lines: [], episodes: [] };
-          }
-        }
-        if ([...session.prefetch.values()].some(value => value.candidate?.manualId === id)) {
-          detached(session, ctx.prefetch.clearPrefetch(session));
-        }
-        await ctx.browsing.refreshBrowsing(session);
-        if (closed || session.released || generation !== session.generation) continue;
-        if (affectedPending || active) {
-          void ctx.selection.start(session, { prepareOnly: session.prepareOnly, constraint: session.constraint });
-        }
-        publish(session);
+        if (session.released || !affectedTargetIds.has(session.targetId)) continue;
+        await ctx.lifecycle.refreshSources();
       }
       return library.read().manual;
     },
@@ -340,18 +298,25 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       return closing ??= (async () => {
         closed = true;
         for (const controller of calculations) controller.abort();
-        const results = await Promise.allSettled([...sessions.values()].map(session => ctx.lifecycle.releaseSession(session, {})));
+        const results = await Promise.allSettled([...sessions.values()].map(session =>
+          ctx.lifecycle.destroySession(session)));
         await Promise.allSettled([...jobs]);
+        sessionsByKey.clear();
         const failure = results.find(result => result.status === 'rejected');
         if (failure) throw failure.reason;
       })();
     },
     diagnostics() {
       let activeEventStreams = 0;
-      for (const session of sessions.values()) activeEventStreams += session.listeners?.size ?? 0;
+      let attachedSessions = 0;
+      for (const session of sessions.values()) {
+        activeEventStreams += session.listeners?.size ?? 0;
+        if (session.attached) attachedSessions++;
+      }
       return {
         closed,
         activeSessions: sessions.size,
+        attachedSessions,
         activeJobs: jobs.size,
         activeCalculations: calculations.size,
         activeEventStreams,

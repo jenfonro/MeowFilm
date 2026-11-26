@@ -108,36 +108,41 @@ public struct DoubanFilmSource: FilmCategorySource {
         var identities = Set<String>()
         for row in rows {
             guard let fields = row.filmObject else { continue }
-            let title = text(fields["title"])
-            let id = scalar(fields["id"])
+            let inner = fields["subject"]?.filmObject ?? fields
+            let title = text(inner["title"])
+            let id = scalar(inner["id"])
             guard !title.isEmpty, !id.isEmpty else { continue }
-            let seed: Data
-            let businessID: String
-            let target: FilmPlaybackTarget
+            let entry: FilmEntry
             do {
-                businessID = try fields.filmString("businessId")
-                target = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
-                seed = try RuntimeJSON.encode(.object(fields))
+                entry = try FilmEntry(value: fields.filmValue("card"))
             } catch {
                 DebugRuntime.logError(.filmCatalog, sub: "douban", event: "row.skipped", error: error,
                                       data: .object(["id": .string(id)]))
                 continue
             }
             guard identities.insert(id).inserted else { continue }
-            let pic = fields["pic"]?.filmObject
-            let coverImage = fields["cover"]?.filmObject?["image"]?.filmObject
+            let pic = inner["pic"]?.filmObject
+            let coverImage = inner["cover"]?.filmObject?["image"]?.filmObject
             let coverNormal = coverImage?["normal"]?.filmObject?["url"]
             let coverLarge = coverImage?["large"]?.filmObject?["url"]
-            // Per metadata-data.md, cover.url is a web page link, never a poster image.
             let address = [pic?["normal"], pic?["large"], coverNormal, coverLarge]
-                .map(text).first { !$0.isEmpty } ?? ""
+                .map(text).first { !$0.isEmpty } ?? entry.poster
             let posterURL = FilmPosterAddress.normalize(address)
             let largeAddress = [pic?["large"], coverLarge].map(text).first { !$0.isEmpty } ?? ""
             let largeURL = FilmPosterAddress.normalize(largeAddress)
-            items.append(FilmItem(sourceID: sourceID, id: id, title: title, kind: FilmItemKind(rawValue: target.kind.rawValue), posterURL: posterURL,
-                                  largePosterURL: largeURL == posterURL ? nil : largeURL,
-                                  score: score(fields["rating"]), subtitle: text(fields["card_subtitle"]),
-                                  metadataSeed: seed, businessID: businessID, playbackTarget: target))
+            let scoreText = score(inner["rating"])
+            let subtitleText = text(inner["card_subtitle"])
+            items.append(FilmItem(
+                sourceID: sourceID,
+                id: id,
+                title: title,
+                kind: entry.kind,
+                posterURL: posterURL,
+                largePosterURL: largeURL == posterURL ? nil : largeURL,
+                score: scoreText.isEmpty ? entry.score : scoreText,
+                subtitle: subtitleText.isEmpty ? entry.subtitle : subtitleText,
+                entry: entry
+            ))
         }
         guard rows.isEmpty || !items.isEmpty else { throw FilmHomeError.invalidResponse }
         return items

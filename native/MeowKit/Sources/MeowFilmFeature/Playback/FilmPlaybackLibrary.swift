@@ -6,18 +6,17 @@ public struct FilmPlaybackHistory: Equatable, Sendable {
     public let value: RuntimeObject
     public let targetID: String
     public let title: String
-    public var businessID: String? { value["businessId"]?.filmText }
-    public var playbackTarget: FilmPlaybackTarget? {
-        guard let raw = value["playbackTarget"] else { return nil }
-        do { return try FilmPlaybackTarget(raw) }
-        catch {
-            DebugRuntime.logError(.filmPlayback, sub: "library", event: "history.target.invalid", error: error)
-            return nil
-        }
-    }
+    public let entry: FilmEntry?
+
     init(_ raw: RuntimeValue) throws {
         value = try raw.filmRequiredObject()
-        targetID = try value.filmString("targetId"); title = try value.filmString("title")
+        targetID = try value.filmString("targetId")
+        title = try value.filmString("title")
+        if let cardVal = value["card"], cardVal != .null {
+            entry = try? FilmEntry(value: cardVal)
+        } else {
+            entry = nil
+        }
     }
 }
 
@@ -55,12 +54,18 @@ public struct FilmPlaybackBlock: Equatable, Sendable {
     public let targetID: String
     public let sourceKey: String
     public let detailID: FilmPlaybackIdentifier
-    public let lineID: FilmPlaybackIdentifier
+    public let lineID: FilmPlaybackIdentifier?
+
     init(_ raw: RuntimeValue) throws {
         value = try raw.filmRequiredObject()
-        targetID = try value.filmString("targetId"); sourceKey = try value.filmString("sourceKey")
+        targetID = try value.filmString("targetId")
+        sourceKey = try value.filmString("sourceKey")
         detailID = try FilmPlaybackIdentifier(value.filmValue("detailId"))
-        lineID = try FilmPlaybackIdentifier(value.filmValue("lineId"))
+        if let rawLine = value["lineId"], rawLine != .null {
+            lineID = try FilmPlaybackIdentifier(rawLine)
+        } else {
+            lineID = nil
+        }
     }
 }
 

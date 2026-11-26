@@ -217,7 +217,7 @@ public sealed record FilmCardItem(string Id, string Title, string Poster, string
     public bool HasTextBadge => TextBadge.Length > 0;
     public bool HasSubtitle => Subtitle.Length > 0;
     public FilmSearchContext? SearchContext { get; init; }
-    public FilmPlaybackRequest? PlaybackContext { get; init; }
+    public FilmEntry? Entry { get; init; }
     public FilmCardItem ToCard() => this;
 
     internal bool HasSameContent(FilmCardItem other)
@@ -225,16 +225,7 @@ public sealed record FilmCardItem(string Id, string Title, string Poster, string
         if (this == other) return true;
         return Id == other.Id && Title == other.Title && Poster == other.Poster && Score == other.Score &&
             TextBadge == other.TextBadge && Subtitle == other.Subtitle && SearchContext == other.SearchContext &&
-            SameRequest(PlaybackContext, other.PlaybackContext);
-
-        static bool SameRequest(FilmPlaybackRequest? left, FilmPlaybackRequest? right) =>
-            left == right || left is not null && right is not null &&
-            left.Target == right.Target && left.Sources == right.Sources && left.Query == right.Query && left.EntrySurface == right.EntrySurface &&
-            left.DataOwner == right.DataOwner && SameJson(left.Results, right.Results) &&
-            SameJson(left.Search, right.Search) && SameJson(left.Metadata, right.Metadata) &&
-            SameJson(left.CacheEntries, right.CacheEntries);
-        static bool SameJson(JsonElement? left, JsonElement? right) =>
-            left is { } value && right is { } other ? JsonElement.DeepEquals(value, other) : left is null && right is null;
+            (Entry is null ? other.Entry is null : Entry.SameContent(other.Entry));
     }
 }
 

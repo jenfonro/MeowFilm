@@ -268,24 +268,122 @@ const parseChineseSeasonNo = (rawValue) => {
   return map[raw] || 0;
 };
 
-const extractSeriesVariantMetaFromText = (rawValue) => {
+const DEFAULT_SEASON_RULES = [
+  {
+    pattern: '^.*?(?:[Ss](?:eason)?\\s*0*(\\d{1,2})(?=\\b|[Ee]|\\D)|第\\s*0*(\\d{1,2})\\s*(?:季|部|篇)|(?:^|\\s)0*(\\d{1,2})\\s*季(?![度节])).*$',
+    replace: 'S$1$2$3',
+    flags: 'i',
+  },
+  {
+    pattern: '^.*?(?<!新)年\\s*番\\s*0*(\\d{1,2}).*$',
+    replace: 'S$1',
+    flags: 'i',
+  },
+  {
+    pattern: '^.*?(?<!新)年\\s*番(?!\\s*\\d).*$',
+    replace: 'S1',
+    flags: 'i',
+  },
+  {
+    pattern: '^\\s*(.*(?:[^A-Za-z0-9\\s]|\\s))\\s*0*([1-9]\\d?)\\s*$',
+    replace: 'S$2',
+    flags: 'i',
+  },
+];
+
+const SEASON_BRACKET_RE = /\(([^()]*)\)|（([^（）]*)）|\[([^\[\]]*)\]|\{([^{}]*)\}|【([^【】]*)】/g;
+const SEASON_INNER_RE = /(?:[Ss](?:eason)?\s*0*\d{1,2}(?=\b|[Ee]|\D)|第\s*0*\d{1,2}\s*(?:季|部|篇)|(?<!新)年\s*番|(?:^|\s)0*\d{1,2}\s*季(?![度节]))/;
+const SEASON_NOISE_RE = /(?:更新\s*中|(?:更新(?:至|到)?|更(?:至|到)?|更|首\s*更)\s*(?:第\s*)?(?:EP?|E)?\s*(?:\d{1,4}|[一二三四五六七八九十百千万两零〇]{1,20})(?:\s*(?:\+|＋|多|余))?\s*(?:集|话|期|回)?|(?:全|共)\s*\d{1,4}\s*(?:集|话|期|回)|\b\d{1,4}\s*\/\s*\d{1,4}\b|最\s*新\s*(?:一\s*集|更\s*新)|(?:HD\s*)?(?:4[kK]|8[kK])|(?:4320|2160|1080|720|540|480)[pPiI]|\b(?:60|120)\s*(?:fps|帧)|10\s*[- ]?bit|\b(?:HDR(?:10\+?)?|DV|Dolby\s*Vision|x264|x265|h\.?264|h\.?265|hevc|avc|av1|vp9|mp4|mkv|aac\d*|ac3|eac3|ddp\s*\d(?:\.\d)?|dts(?:-hd)?|truehd|atmos|web-?dl|webrip|bluray|bdrip|remux)\b|杜\s*比\s*(?:视\s*界|音\s*效)|高\s*码\s*(?:率|资源|直链)?|国\s*漫|臻\s*彩|已\s*刮\s*削|连\s*载\s*中|完\s*结|未\s*删\s*减|(?:^|\s)(?:19\d{2}|20\d{2})(?=$|\s))/gi;
+
+const normalizeChineseMarkers = (rawValue) =>
+  normalizeString(rawValue)
+    .replace(/[０-９]/g, (char) => String('０１２３４５６７８９'.indexOf(char)))
+    .replace(/第\s*([0-9]{1,3}|[一二三四五六七八九十两〇零]{1,6})\s*([季集话部篇])/g, (full, token, unit) => {
+      const value = parseChineseSeasonNo(token);
+      return value > 0 ? `第${value}${unit}` : full;
+    })
+    .replace(/(?<!新)年\s*番\s*([0-9]{1,3}|[一二三四五六七八九十两〇零]{1,6})/g, (full, token) => {
+      const value = parseChineseSeasonNo(token);
+      return value > 0 ? `年番${value}` : full;
+    });
+
+const cleanTitleForSeasonRules = (rawValue) => {
+  let out = normalizeChineseMarkers(preCleanForRules(rawValue));
+  let prev = '';
+  while (out && out !== prev) {
+    prev = out;
+    out = out.replace(SEASON_BRACKET_RE, (_full, g1, g2, g3, g4, g5) => {
+      const inner = g1 ?? g2 ?? g3 ?? g4 ?? g5 ?? '';
+      return SEASON_INNER_RE.test(inner) ? ` ${inner} ` : ' ';
+    });
+  }
+  out = out.replace(SEASON_NOISE_RE, ' ');
+  return normalizeChineseMarkers(out.replace(/\s+/g, ' ').trim());
+};
+
+const compileSeasonRules = (rawRules) => {
+  const rows = Array.isArray(rawRules) && rawRules.length ? rawRules : DEFAULT_SEASON_RULES;
+  return rows
+    .map((rule) => {
+      if (!rule || typeof rule !== 'object') return null;
+      const pattern = normalizeRegexText(normalizeString(rule.pattern));
+      if (!pattern) return null;
+      const flags = normalizeString(rule.flags) || 'i';
+      const replace = typeof rule.replace === 'string' ? rule.replace.replace(/\\(\d+)/g, '$$$1') : '';
+      try {
+        return { re: new RegExp(pattern, flags), replace };
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        return null;
+      }
+    })
+    .filter(Boolean);
+};
+
+const extractSeasonByCompiledRules = (rawValue, compiledSeasonRules) => {
+  const cleaned = cleanTitleForSeasonRules(rawValue);
+  if (!cleaned) return { kind: '', index: 0 };
+  const isYearbang = /(?<!新)年\s*番/i.test(cleaned);
+  for (let i = 0; i < compiledSeasonRules.length; i += 1) {
+    const rule = compiledSeasonRules[i];
+    if (rule.re.global || rule.re.sticky) rule.re.lastIndex = 0;
+    if (!rule.re.test(cleaned)) continue;
+    if (rule.re.global || rule.re.sticky) rule.re.lastIndex = 0;
+    const rewritten = rule.replace ? normalizeChineseMarkers(cleaned.replace(rule.re, rule.replace)).trim() : cleaned;
+    const match = /(?:^|[^a-z0-9])s(?:eason)?\s*0*(\d{1,3})(?=e|\b|[^a-z0-9])/i.exec(rewritten)
+      || /第\s*0*(\d{1,3})\s*(?:季|部|篇)/.exec(rewritten)
+      || /(?<!新)年\s*番\s*0*(\d{1,3})/.exec(rewritten)
+      || /^\s*0*([1-9]\d{0,2})\s*$/.exec(rewritten);
+    const parsed = match ? Number.parseInt(match[1], 10) : 0;
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return { kind: isYearbang ? 'yearbang' : 'season', index: parsed };
+    }
+  }
+  return { kind: '', index: 0 };
+};
+
+const extractSeriesVariantMetaFromText = (rawValue, compiledSeasonRules = null) => {
   const text = normalizeString(rawValue);
   if (!text) return { kind: '', index: 0 };
+  if (Array.isArray(compiledSeasonRules) && compiledSeasonRules.length) {
+    const byRules = extractSeasonByCompiledRules(text, compiledSeasonRules);
+    if (byRules.index > 0) return byRules;
+  }
   const cleaned = preCleanForRules(text) || text;
   const matchSeasonEpisode = cleaned.match(/\bS\s*(\d{1,2})\s*E\s*\d{1,5}\b/i);
   if (matchSeasonEpisode && matchSeasonEpisode[1]) {
     const parsed = Number.parseInt(String(matchSeasonEpisode[1]), 10);
     if (Number.isFinite(parsed) && parsed > 0) return { kind: 'season', index: parsed };
   }
-  const matchCnSeason = cleaned.match(/(?:第\s*)?([0-9０-９]{1,3}|[一二三四五六七八九十两〇零]{1,6})\s*季/i);
+  const matchCnSeason = cleaned.match(/(?:第\s*)?([0-9０-９]{1,3}|[一二三四五六七八九十两〇零]{1,6})\s*季(?![度节])/i);
   if (matchCnSeason && matchCnSeason[1]) {
     return { kind: 'season', index: parseChineseSeasonNo(String(matchCnSeason[1])) };
   }
-  const matchYearbang = cleaned.match(/年番\s*([0-9０-９]{1,3}|[一二三四五六七八九十两〇零]{1,6})/i);
+  const matchYearbang = cleaned.match(/(?<!新)年番\s*([0-9０-９]{1,3}|[一二三四五六七八九十两〇零]{1,6})/i);
   if (matchYearbang && matchYearbang[1]) {
     return { kind: 'yearbang', index: parseChineseSeasonNo(String(matchYearbang[1])) };
   }
-  if (/年番/i.test(cleaned)) return { kind: 'yearbang', index: 1 };
+  if (/(?<!新)年番/i.test(cleaned)) return { kind: 'yearbang', index: 1 };
   return { kind: '', index: 0 };
 };
 
@@ -560,9 +658,13 @@ const mergeDisplayedSiteItem = (item, tmdbMatch = null, { canAggregate = false }
     || rawOriginalTitle
     || rawTitle;
   const nextTitle = tmdbTitle || rawOriginalTitle || rawTitle;
+  const keyword = tmdbItem
+    ? (normalizeString(tmdbItem.keyword) || stripSearchAliasMarkers(tmdbTitle, { contentKind: tmdbItem.tmdbType || 'tv' }) || tmdbTitle)
+    : (normalizeString(source.keyword) || aggregateContentKey || rawTitle);
   return {
     ...source,
     title: nextTitle,
+    keyword,
     contentKey,
     tmdbId: 0,
     tmdbType: '',
@@ -691,6 +793,7 @@ const mapTmdbItems = (data, computeMatchScore, { rawQuery = '', contentKind = 't
       return {
         id: `tmdb:${tmdbType}:${tmdbId}`,
         contentKey,
+        keyword: stripSearchAliasMarkers(title, { contentKind: tmdbType }) || title,
         sourceKind: 'tmdb',
         siteKey: 'tmdb',
         siteName: 'TMDB',
@@ -746,13 +849,14 @@ const compareSiteSequence = (left, right) => {
 
 const siteItemIdentity = (item) => `site:${JSON.stringify([item.siteKey, item.detailId])}`;
 
-const mapSitePage = ({ query, aggregateRules, site, page, payload }) => {
+const mapSitePage = ({ query, aggregateRules, seasonRules, site, page, payload }) => {
   const safeQuery = normalizeString(query);
   const computeMatchScore = computeMatchScoreFactory(safeQuery);
   const queryTrailingDigitsMatch = safeQuery.match(/(\d+)\s*$/);
   const queryTrailingDigits = queryTrailingDigitsMatch ? String(queryTrailingDigitsMatch[1] || '') : '';
   const ruleErrors = [];
   const compiledRules = compileCleanRules(aggregateRules, ruleErrors);
+  const compiledSeasonRules = compileSeasonRules(seasonRules);
   const siteKey = site.siteKey;
   const siteName = normalizeString(site.siteName) || siteKey;
   const items = normalizeSiteSearchList(payload).map((item, innerIndex) => {
@@ -760,10 +864,14 @@ const mapSitePage = ({ query, aggregateRules, site, page, payload }) => {
     const aggregateContentKey = buildCanonicalSearchTitle(rawTitle, compiledRules, {
       queryTrailingDigits,
     }) || rawTitle;
-    const titleMeta = extractSeriesVariantMetaFromText(rawTitle);
+    const sessionKeyword = buildCanonicalSearchTitle(rawTitle, compiledRules, {
+      queryTrailingDigits: /(?:19|20)\d{2}$/.test(rawTitle) ? rawTitle.slice(-4) : '',
+    }) || aggregateContentKey;
+    const isExplicitMovie = item.raw && item.raw.type_name === '电影';
+    const titleMeta = isExplicitMovie ? { kind: '', index: 0 } : extractSeriesVariantMetaFromText(rawTitle, compiledSeasonRules);
     const variantMeta = normalizeInt(titleMeta && titleMeta.index) > 0
       ? titleMeta
-      : extractSeriesVariantMetaFromText(item.remark);
+      : (isExplicitMovie ? { kind: '', index: 0 } : extractSeriesVariantMetaFromText(item.remark, null));
     const seasonHint = normalizeInt(variantMeta && variantMeta.index);
     const seasonHintLabel = normalizeString(variantMeta && variantMeta.kind) === 'yearbang'
       ? `年番${Math.floor(seasonHint) || 1}`
@@ -781,6 +889,7 @@ const mapSitePage = ({ query, aggregateRules, site, page, payload }) => {
       raw: item.raw,
       title: rawTitle,
       rawTitle,
+      keyword: sessionKeyword,
       contentKey: rawTitle,
       aggregateContentKey,
       poster: item.poster,

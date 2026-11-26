@@ -1,46 +1,11 @@
 import { isDeepStrictEqual } from 'node:util';
-import { checkTarget, fields, identity, requireValue, variantParentId } from './identity.js';
+import { fields, identity, requireValue, variantParentId } from './identity.js';
 
 export const addressLifetime = 3 * 60_000;
+export const IDLE_SESSION_TTL_MS = 15 * 60_000;
+export const MAX_IDLE_SESSIONS = 24;
 
-export const publicSource = source => fields(source, ['key', 'engine', 'installationId', 'siteId', 'revision',
-  'generation', 'name', 'detailId']);
-
-export const publicCandidate = (candidate, target, catalog) => ({
-  ...fields(candidate, ['id', 'lineId', 'lineLabel', 'provider',
-    'name', 'path', 'season', 'episode', 'globalEpisode', 'quality', 'resolution', 'fps', 'codec']),
-  source: publicSource(candidate.source),
-  ...catalog.candidate(target, candidate),
-});
-
-export const publicTarget = target => ({
-  ...fields(target, ['id', 'kind', 'title', 'year', 'metadataProvider',
-    'metadataId', 'season', 'episode', 'globalEpisode', 'members']),
-  ...(target.source ? {
-    source: fields(target.source, ['key', 'engine', 'installationId', 'siteId', 'detailId', 'lineId', 'candidateId']),
-  } : {}),
-});
-
-export const sameEpisode = (a, b) => {
-  if (a?.id !== b?.id || a?.kind !== b?.kind) return false;
-  if (a?.source?.candidateId !== undefined || b?.source?.candidateId !== undefined)
-    return a?.source?.candidateId === b?.source?.candidateId;
-  if (a?.source?.key !== b?.source?.key || a?.source?.detailId !== b?.source?.detailId) return false;
-  if (a?.globalEpisode !== undefined && b?.globalEpisode !== undefined) return a.globalEpisode === b.globalEpisode;
-  if (a?.episode !== undefined || b?.episode !== undefined) return a?.season === b?.season && a?.episode === b?.episode;
-  return a?.source?.lineId === b?.source?.lineId;
-};
-
-export const sameActualEpisode = (a, b) => a?.id === b?.id && a?.kind === b?.kind &&
-  ['source', 'group'].includes(a?.kind) && (a.kind === 'group' || a.source?.key === b.source?.key &&
-    a.source?.detailId === b.source?.detailId) &&
-  (a.episode !== undefined ? a.season === b.season && a.episode === b.episode &&
-    (a.globalEpisode === undefined || a.globalEpisode === b.globalEpisode)
-    : a.globalEpisode !== undefined && a.globalEpisode === b.globalEpisode ||
-      !!variantParentId(a.source?.candidateId) &&
-        variantParentId(a.source.candidateId) === variantParentId(b.source?.candidateId));
-
-export const canDiscoverVariants = candidate => candidate.source.engine === 'cat' &&
+export const canDiscoverVariants = candidate => candidate?.source?.engine === 'cat' &&
   !candidate.file && !candidate.share && !candidate.variant;
 
 export const sameVariantFile = (a, b) => !!a?.variant && !!b?.variant && a.parentId === b.parentId &&
@@ -51,40 +16,33 @@ export const cancelled = error =>
   ['CLOSED', 'CANCELLED', 'STALE_ACCOUNT', 'STALE_SOURCE', 'STALE_SESSION', 'STALE_METADATA'].includes(error?.code);
 
 export function historyPosition(row) {
+  if (!row || row.ended) return 0;
   requireValue(Number.isFinite(row.position) && row.position >= 0, 'CORRUPT_STORAGE');
   return row.position;
-}
-
-export function episodeTarget(target, episode) {
-  const next = { ...target };
-  for (const name of ['season', 'episode', 'globalEpisode']) {
-    if (episode[name] === undefined) delete next[name];
-    else next[name] = episode[name];
-  }
-  return checkTarget(next);
-}
-
-export function targetForCandidate(target, candidate) {
-  const source = { key: candidate.source.key, detailId: candidate.source.detailId,
-    lineId: candidate.lineId, candidateId: candidate.id };
-  return episodeTarget({
-    ...(['source', 'group'].includes(target.kind) ? target
-      : { ...fields(target, ['id', 'title', 'year', 'members']), kind: 'source' }),
-    source,
-  }, candidate);
 }
 
 export const manualIdentity = row => identity(fields(row, ['targetId', 'kind', 'sourceKey', 'detailId',
   'provider', 'share', 'seasonHint']));
 
-export const metadataIdentity = row => identity(row.provider, row.kind, String(row.metadataId));
+export const metadataIdentity = row => `meta:${row.provider}:${row.kind}:${String(row.metadataId)}`;
 
-export function mergeSeason(target, metadata, season, value) {
-  const key = target.metadataProvider === 'douban' ? 'doubanSeasons' : 'seasons';
+export function samePlayIntent(a, b) {
+  if (!a || !b || a.mode !== b.mode || a.kind !== b.kind) return false;
+  if (a.mode === 'direct') return a.candidateId === b.candidateId;
+  if (a.kind === 'movie') return true;
+  if (a.globalEpisode !== undefined && b.globalEpisode !== undefined) return a.globalEpisode === b.globalEpisode;
+  return a.season === b.season && a.episode === b.episode;
+}
+
+export function mergeSeason(provider, metadata, season, value) {
+  const key = provider === 'douban' ? 'doubanSeasons' : 'seasons';
   const rows = [...(metadata?.[key] ?? [])];
   const index = rows.findIndex(row => (row.season_number ?? row.season) === season);
-  const row = { ...(index < 0 ? {} : rows[index]), ...value,
-    [key === 'seasons' ? 'season_number' : 'season']: season };
+  const row = {
+    ...(index < 0 ? {} : rows[index]),
+    ...value,
+    [key === 'seasons' ? 'season_number' : 'season']: season,
+  };
   if (key === 'doubanSeasons' && !Object.hasOwn(value, 'episodes')) delete row.episodes;
   if (index >= 0 && isDeepStrictEqual(rows[index], row)) return metadata;
   if (index < 0) rows.push(row);
@@ -101,10 +59,46 @@ export function replaceLine(result, detail, index, line) {
   return result.detail = { ...detail, lines };
 }
 
-export function actualSourceEpisodes(session) {
-  const candidate = session.current?.candidate ?? session.pending?.candidate;
-  const result = session.results.find(value => value.source.key === candidate?.source.key &&
-    value.source.detailId === candidate?.source.detailId);
-  const line = result?.detail?.lines.find(value => value.id === candidate.lineId);
-  return line?.episodes ?? [];
+export function extractMaxEpisodeFromRemark(textValue) {
+  const raw = typeof textValue === 'string' ? textValue.trim() : '';
+  if (!raw) return 0;
+  const mUp = /(?:更新至|更至|更)\s*(\d{1,5})\s*(?:集|话|回|期|EP|E)?/i.exec(raw);
+  if (mUp?.[1]) return Number.parseInt(mUp[1], 10) || 0;
+  const mRange = /(\d{1,4})\s*\/\s*(\d{1,4})/.exec(raw);
+  if (mRange?.[1] && mRange?.[2]) {
+    const left = Number.parseInt(mRange[1], 10) || 0;
+    const right = Number.parseInt(mRange[2], 10) || 0;
+    if (left > 0 && right >= left) return left;
+  }
+  const mFull = /(?:全|共)\s*(\d{1,4})\s*(?:集|话|回|期)/i.exec(raw);
+  if (mFull?.[1]) return Number.parseInt(mFull[1], 10) || 0;
+  return 0;
+}
+
+export function formatQualityBadge(rawQuality) {
+  if (typeof rawQuality !== 'string' || !rawQuality.trim()) return '';
+  switch (rawQuality.trim().toLowerCase()) {
+    case '8k': return '8K';
+    case '4k_hdr': return '4K·HDR';
+    case '4k_fps': return '4K·60帧';
+    case '4k': return '4K';
+    case '1080p': return '1080P';
+    case '720p': return '720P';
+    default: return rawQuality.trim();
+  }
+}
+
+export function panDisplayLabel(provider) {
+  switch (provider) {
+    case 'yidong': return '移动云盘';
+    case 'tianyi': return '天翼云盘';
+    case 'quark': return '夸克网盘';
+    case 'uc': return 'UC网盘';
+    case 'baidu': return '百度网盘';
+    default: return provider || '';
+  }
+}
+
+export function variantParentOrSelf(id) {
+  return variantParentId(id) ?? id;
 }

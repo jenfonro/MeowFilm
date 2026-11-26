@@ -344,6 +344,9 @@ export async function requestDouban(input, { settings, request, signal }) {
   const body = await fetchMetadata(config.base + input.path + query, config, request, signal, false);
   let payload;
   try { payload = parseJSONText(body); } catch { throw new Failure('UPSTREAM_FORMAT'); }
+  if (Array.isArray(payload)) {
+    return rewriteDoubanImages({ items: payload }, settings, input.path).items;
+  }
   requireValue(object(payload), 'UPSTREAM_FORMAT');
   businessError(payload);
   return rewriteDoubanImages(payload, settings, input.path);

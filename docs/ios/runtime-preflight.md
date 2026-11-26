@@ -46,7 +46,7 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 
 ### 原生设置私密通道
 
-`RuntimeEmbeddedLauncher(..., settings: RuntimeSettingsAccess?)` 在注入时向一次启动配置加入 `nativeSettings:true`；未注入仍为 `{sessionId,dataRoot}`，不创建设置能力。`MeowfilmNativeSettings.access` 允许读取共同契约中的六块，唯一可写块为 `pan.accounts`。Node 在 `configuration` 阶段读齐快照后才装配业务模块；端点帧仍只有 `{baseUrl}`，没有凭据。
+`RuntimeEmbeddedLauncher(..., settings: RuntimeSettingsAccess?)` 在注入时向一次启动配置加入 `nativeSettings:true`；未注入仍为 `{sessionId,dataRoot}`，不创建设置能力。`MeowfilmNativeSettings.access` 允许读取共同契约中的七块（`cat.sources`、`pan.accounts`、`tmdb`、`douban`、`film.rules`、`film.preferences`、`film.video-sources`），唯一可写块为 `pan.accounts`。Node 在 `configuration` 阶段读齐快照后才装配业务模块；端点帧仍只有 `{baseUrl}`，没有凭据。
 
 通道使用 LF 分隔 JSON，不设置单帧正文的业务字节配额：
 

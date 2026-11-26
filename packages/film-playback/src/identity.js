@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { cloneJSONValue, parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { normalizeNFKC } from '@meowfilm/script-host/unicode';
 
 export const fail = code => Object.assign(new Error(code), { code });
 export const requireValue = (value, code = 'INVALID_REQUEST') => { if (!value) throw fail(code); };
@@ -18,8 +19,7 @@ export function freeze(value) {
   }
   return value;
 }
-// Only the shared site's explicit projection has an opaque UI id. A provider's
-// unknown raw field is still part of its original row, not a projection marker.
+
 const isSearchProjection = value => value?.vod_id == null &&
   value?.sourceKind === 'site' && !!text(value.siteKey) && object(value.raw);
 export const resultDetailId = value => value?.vod_id ??
@@ -41,7 +41,20 @@ export const sourceRevision = source => identity(sourceIdentity(source), source.
 export const codeOf = error => typeof error?.code === 'string' && /^[A-Z][A-Z_]+$/.test(error.code)
   ? error.code : 'UPSTREAM_ERROR';
 
-// Windows and Apple public native failure codes, never arbitrary text or URLs.
+// Unicode 15.0 Cf + punctuation/whitespace, without \p{...} for ICU-less NodeMobile.
+const workKeyStrip = /[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\u{110bd}\u{110cd}\u{13430}-\u{1343f}\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0001}\u{e0020}-\u{e007f}\s.\-_,，:：;；!！?？·•/\\|《》「」『』【】()（）\[\]{}]+/gu;
+
+export function normalizeWorkKey(value) {
+  const normalized = normalizeNFKC(text(value)).toLowerCase().replace(workKeyStrip, '');
+  return normalized || normalizeNFKC(text(value)).toLowerCase();
+}
+
+export function workTargetId(keyword) {
+  const key = normalizeWorkKey(keyword);
+  requireValue(key.length > 0);
+  return `work:${key}`;
+}
+
 export const nativeMediaErrorCodes = new Set([
   'MEDIA_INVALID_REQUEST', 'MEDIA_UNSUPPORTED_URI', 'MEDIA_UNSUPPORTED_HEADERS', 'MEDIA_INVALID_HEADERS',
   'MEDIA_UNSUPPORTED_ADAPTIVE', 'MEDIA_ADAPTIVE_INVALID', 'MEDIA_ADAPTIVE_VARIANT_UNSUPPORTED',
@@ -64,9 +77,9 @@ export const nativeMediaErrorCodes = new Set([
   'FILM_AUDIO_FAILED', 'FILM_RENDER_FAILED', 'FILM_HDR_DISPLAY_UNSUPPORTED',
   'FILM_DOVI_UNSUPPORTED', 'FILM_DEVICE_LOST',
 ]);
-// Existing film/bridge receipts can fail before native preparation begins.
+
 const playbackFeedbackErrorCodes = new Set([
-  'INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'RESOURCE_LIMIT', 'NOT_FOUND', 'NO_MATCH',
+  'INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'RESOURCE_LIMIT', 'NOT_FOUND', 'NO_MATCH', 'NO_VIDEO_SOURCES',
   'SOURCE_NOT_FOUND', 'SOURCE_DISABLED', 'STALE_SOURCE', 'STALE_SESSION', 'STALE_ACCOUNT', 'STALE_METADATA',
   'NOT_CONFIGURED', 'AUTH_REQUIRED', 'AUTH_FAILED', 'CHALLENGE_REQUIRED', 'UNSUPPORTED_OPERATION',
   'CAPABILITY_UNAVAILABLE', 'MEDIA_UNAVAILABLE', 'NETWORK_ERROR', 'TIMEOUT', 'UPSTREAM_HTTP',
@@ -85,6 +98,7 @@ const playbackFeedbackErrorCodes = new Set([
   'UNSUPPORTED_ACTION', 'UNSUPPORTED_RULE', 'UNSUPPORTED_DEPENDENCY', 'SOURCE_CLEANUP', 'HTTP_ERROR',
   'VIRTUAL_ROUTE_NOT_FOUND',
 ]);
+
 export function playbackFeedbackFailure(code, stage) {
   requireValue(['prepare', 'playback'].includes(stage));
   requireValue(code === undefined || code === 'FAILED' ||
@@ -101,49 +115,6 @@ export function checkSource(source) {
   requireValue(source.key === undefined || text(source.key));
   return { ...clone(source), engine: source.engine ?? 'cat',
     key: source.key === undefined ? sourceIdentity(source) : text(source.key) };
-}
-
-const targetFields = ['id', 'kind', 'title', 'year', 'metadataProvider', 'metadataId',
-  'season', 'episode', 'globalEpisode'];
-const targetSourceFields = ['key', 'engine', 'installationId', 'siteId', 'revision',
-  'generation', 'detailId', 'lineId', 'candidateId'];
-
-export function checkTarget(target) {
-  requireValue(object(target) && text(target.id) && text(target.title) &&
-    ['movie', 'tv', 'source', 'group'].includes(target.kind));
-  for (const name of ['season', 'episode', 'globalEpisode']) {
-    if (target[name] !== undefined) requireValue(Number.isSafeInteger(target[name]) &&
-      target[name] >= (name === 'globalEpisode' ? 1 : 0));
-  }
-  if (target.metadataProvider !== undefined) requireValue(['tmdb', 'douban'].includes(target.metadataProvider) &&
-    /^[1-9][0-9]*$/.test(String(target.metadataId)));
-  if (target.kind === 'source') requireValue(object(target.source) && text(target.source.key) &&
-    isIdentifier(target.source.detailId));
-  if (target.kind === 'group') {
-    requireValue(Array.isArray(target.members) &&
-      target.members.every(member => object(member) && text(member.sourceKey) && isIdentifier(member.detailId)) &&
-      target.metadataProvider === undefined);
-  } else if (target.members !== undefined) {
-    requireValue(Array.isArray(target.members) &&
-      target.members.every(member => object(member) && text(member.sourceKey) && isIdentifier(member.detailId)));
-  }
-  if (target.source !== undefined) {
-    requireValue(object(target.source) && text(target.source.key) && isIdentifier(target.source.detailId));
-  }
-  const result = {};
-  for (const field of targetFields) {
-    if (target[field] !== undefined) result[field] = clone(target[field]);
-  }
-  if (target.members !== undefined) {
-    result.members = target.members.map(({ sourceKey, detailId }) => ({ sourceKey, detailId }));
-  }
-  if (target.source !== undefined) {
-    result.source = {};
-    for (const field of targetSourceFields) {
-      if (target.source[field] !== undefined) result.source[field] = clone(target.source[field]);
-    }
-  }
-  return result;
 }
 
 export function parseSourceValue(value) {

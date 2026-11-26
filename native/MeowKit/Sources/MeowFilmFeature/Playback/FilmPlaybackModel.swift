@@ -17,14 +17,14 @@ public enum FilmPlaybackStatus: Equatable {
         case .playing: "播放中"
         case .paused: "已暂停"
         case .ended: "播放结束"
-        case .unavailable: "无可用视频源"
+        case .unavailable: "暂无可用视频源"
         case .failed: "播放失败"
         }
     }
     public var busy: Bool { self == .loading || self == .searching || self == .preparing || self == .buffering }
 }
 
-/// Node owns matching, freshness, episode mapping and persistent playback facts.
+/// Node owns keyword sessions, smart list, matching, freshness, and persistent playback facts.
 /// This owner holds one observation and one admitted native preparation at a time.
 @MainActor
 public final class FilmPlaybackModel {
@@ -71,15 +71,6 @@ public final class FilmPlaybackModel {
         get { presentationStore.actionError }
         set { guard presentationStore.actionError != newValue else { return }; presentationStore.actionError = newValue }
     }
-    public internal(set) var metadataViewProvider: FilmMetadataProvider {
-        get { presentationStore.metadataViewProvider }
-        set { guard presentationStore.metadataViewProvider != newValue else { return }; presentationStore.metadataViewProvider = newValue }
-    }
-    var selectedAggregateProvider: FilmMetadataProvider? {
-        get { presentationStore.selectedAggregateProvider }
-        set { guard presentationStore.selectedAggregateProvider != newValue else { return }; presentationStore.selectedAggregateProvider = newValue }
-    }
-    /// Independent close failures; media.stop includes its media-receipt drain.
     public private(set) var mediaStopError: FilmPlaybackError? {
         get { presentationStore.mediaStopError }
         set { guard presentationStore.mediaStopError != newValue else { return }; presentationStore.mediaStopError = newValue }
@@ -113,10 +104,12 @@ public final class FilmPlaybackModel {
             presentationStore.nativeStatus = coarsePresentation
         }
     }
+
     public var playbackStatus: FilmPlaybackStatus {
         if let nativeStatus { return nativeStatus }
+        if snapshot?.noSources == true { return .unavailable }
         switch executionStage {
-        case "loading": return .loading
+        case "loading", "cached", "history", "manual": return .loading
         case "searching": return .searching
         case "resolving", "pending": return .preparing
         case "prepared": return .prepared
@@ -126,38 +119,35 @@ public final class FilmPlaybackModel {
         default: return .idle
         }
     }
+
     public var canControlPlayback: Bool {
         guard !runtimeClosed, let committed, committed.started, !committed.terminal, !committed.retired else { return false }
         return media.isCurrent(sessionID: committed.sessionID, attemptID: committed.attempt.id)
     }
+
     public var canStartPlayback: Bool {
         guard executionStage != nil, !playbackStatus.busy, !restoringRead, let snapshot,
-              snapshot.initializationError == nil,
-              snapshot.entryResolution != "loading", snapshot.entryResolution != "error",
-              snapshot.stage != "unavailable", snapshot.stage != "error" else { return false }
-        return snapshot.current != nil || snapshot.attempt != nil ||
-            !(snapshot.searchComplete && snapshot.sources.isEmpty && snapshot.candidates.isEmpty)
+              !snapshot.noSources, snapshot.stage != "error" else { return false }
+        if snapshot.current != nil || snapshot.attempt != nil { return true }
+        if !snapshot.directoryItems.isEmpty {
+            return snapshot.directoryItems.contains(where: \.isPlayable)
+        }
+        return snapshot.work.kind == .movie || snapshot.sourceCanLoadMore || !snapshot.sourceOptions.isEmpty
     }
+
     public var canSelectFromPresentation: Bool {
-        guard executionStage != nil, !restoringRead, let presentation else { return false }
-        return !presentation.browsing.loading && presentation.browsing.error == nil &&
-            presentation.entryResolution != "loading" && presentation.entryResolution != "error"
+        guard executionStage != nil, !restoringRead, let presentation, !presentation.noSources else { return false }
+        return !presentation.directoryLoading && presentation.directoryError == nil
     }
+
     public var canRetryMedia: Bool {
         executionStage != nil && snapshot?.retryMediaAttemptID != nil
     }
+
     public var directoryHasNoVideoSource: Bool {
-        guard let presentation, canSelectFromPresentation else { return false }
-        if presentation.browsing.sourceID != nil {
-            return !presentation.browsing.files.contains { $0.candidateID != nil }
-        }
-        return presentation.searchComplete && presentation.sources.isEmpty && presentation.candidates.isEmpty
+        presentation?.noSources == true
     }
-    public var aggregateSourceProvider: FilmMetadataProvider? {
-        guard let presentation, presentation.browsing.sourceID == nil else { return nil }
-        return presentation.metadataSources.first { $0.provider == selectedAggregateProvider }?.provider ??
-            presentation.metadataSources.first?.provider
-    }
+
     public var playerPreferences: FilmPlayerPreferences { preferencesStore.preferences }
     public var actualEngine: PlaybackVideoEngine { mediaState.engine }
     public var availableRates: [Double] {
@@ -171,12 +161,10 @@ public final class FilmPlaybackModel {
     var restoringRead: Bool { restorePresentation != nil }
     public var executionStage: String? {
         guard !closed, !runtimeClosed, observationError == nil else { return nil }
-        if restorePresentation != nil { return snapshot?.browsing.loading == true ? "loading" : nil }
+        if restorePresentation != nil { return snapshot?.directoryLoading == true ? "loading" : nil }
         return snapshot?.stage
     }
     public var isReleased: Bool { released && mediaStopped }
-    /// A dead runtime cannot acknowledge release. Keep that failure visible,
-    /// but do not trap navigation after the precise local resources have drained.
     public var canLeave: Bool {
         isReleased || runtimeClosed && closeDrained &&
             (allocatedSessionID.map { media.isLocallyDrained(sessionID: $0) } ?? true)
@@ -185,33 +173,17 @@ public final class FilmPlaybackModel {
     let transport: FilmPlaybackTransport
     let makeRequest: @Sendable () async throws -> FilmPlaybackRequest
     let searchContext: FilmSearchContext?
-    var searchObservation: AnyCancellable?
-    nonisolated(unsafe) var searchUpdateTask: Task<Void, Never>?
     var restorePresentation: FilmPlaybackSnapshot?
-    var selectedDirectory: FilmPlaybackDirectoryKey?
-    var directorySelectionExplicit = false
-    var directoryLoading = false
-    var directoryError: String?
-    var directoryAdmission = UUID()
-    var directories: [FilmPlaybackDirectoryKey: FilmPlaybackDirectorySlice] = [:]
-    var directoryOrder: [FilmPlaybackDirectoryKey] = []
-    var searchRevision = -1
-    var openedSources: [FilmPlaybackSource]?
-    var reentryTarget: FilmPlaybackTarget?
-    var reentryError: String?
     let media: any FilmPlaybackMediaControlling
     let preferencesStore: FilmPlayerPreferencesStore
     let playbackPreferences: FilmPlaybackSettingsModel?
     let chapterModel: FilmPlaybackChapterModel
     private var preferencesObservation: AnyCancellable?
-    private var metadataPreferencesObservation: AnyCancellable?
     private var chaptersObservation: AnyCancellable?
     private var chapterErrorObservation: AnyCancellable?
     var heldRate: (token: UUID, identity: FilmPlayerControlIdentity)?
     var allocatedSessionID: UUID?
     var openingTask: Task<Void, Never>?
-    var metadataSelectionTask: Task<Void, Never>?
-    var metadataSelectionAdmission = UUID()
     nonisolated(unsafe) var observationTask: Task<Void, Never>?
     var observationAdmission = UUID()
     nonisolated(unsafe) var runtimeClosureTask: Task<Void, Never>?
@@ -255,8 +227,8 @@ public final class FilmPlaybackModel {
 
     @MainActor
     final class Preparation {
-        let attempt: FilmPlaybackAttempt
-        let target: FilmPlaybackTarget
+        let attempt: FilmAttemptInfo
+        let targetID: String
         let contentKind: FilmPlaybackKind
         let sessionID: UUID
         let admission: UUID
@@ -264,18 +236,19 @@ public final class FilmPlaybackModel {
         var didCommit = false
         var started = false
         var terminal = false
-        // The native release callback starts only after physical disposal. Its
-        // RPC may publish a hidden receipt before returning, so retire output
-        // synchronously without discarding the captured terminal identity.
         var retired = false
         var resourceID: String?
         var state: FilmMediaState?
         private var resourceReleased = false
         private var releaseTask: Task<Void, Error>?
-        init(attempt: FilmPlaybackAttempt, target: FilmPlaybackTarget, contentKind: FilmPlaybackKind,
+        init(attempt: FilmAttemptInfo, targetID: String, contentKind: FilmPlaybackKind,
              sessionID: UUID, admission: UUID, generation: UUID) {
-            self.attempt = attempt; self.target = target; self.contentKind = contentKind; self.sessionID = sessionID
-            self.admission = admission; self.generation = generation
+            self.attempt = attempt
+            self.targetID = targetID
+            self.contentKind = contentKind
+            self.sessionID = sessionID
+            self.admission = admission
+            self.generation = generation
         }
         func releaseResource(transport: FilmPlaybackTransport) async throws {
             guard !resourceReleased, let resourceID else { return }
@@ -301,7 +274,6 @@ public final class FilmPlaybackModel {
         let key: String
         let intent: UUID?
         let ui: Bool
-        var directoryAdmission: UUID? = nil
     }
 
     public init(transport: FilmPlaybackTransport, media: any FilmPlaybackMediaControlling,
@@ -326,12 +298,6 @@ public final class FilmPlaybackModel {
             previousPreferences = value
             mediaStore.notifyChange()
         }
-        metadataPreferencesObservation = playbackPreferences?.$preferences.compactMap { $0?.metadataViewProvider }
-            .removeDuplicates().sink { [weak self] provider in
-                guard let self, metadataViewProvider != provider else { return }
-                metadataViewProvider = provider
-                reconcileMetadataView()
-            }
         chaptersObservation = chapterModel.$segments.dropFirst().sink { [weak self] _ in
             self?.mediaStore.notifyChange()
         }
@@ -359,7 +325,7 @@ public final class FilmPlaybackModel {
                     }
                 }
                 guard !closed, self.generation == generation else { return }
-                observeRuntimeClosure(); observe(); observeSearchContext()
+                observeRuntimeClosure(); observe()
             }
             return openingTask
         }
@@ -372,21 +338,13 @@ public final class FilmPlaybackModel {
             do {
                 try await self.playbackPreferences?.reloadPreferences()
                 let previous = self.presentation
-                let base = try await self.makeRequest()
-                var request = self.reentryTarget.map { base.retargeted($0, errorCode: self.reentryError) } ?? base
+                var request = try await self.makeRequest()
                 request.restoreOnly = restoreOnly || previous != nil
                 self.restorePresentation = request.restoreOnly ? previous : nil
-                if request.restoreOnly, let previous { request.restoreBrowsing(previous) }
-                if let context = self.searchContext {
-                    self.searchRevision = Int(context.snapshot.sequence)
-                }
                 guard !self.closed, self.generation == generation else {
                     self.restorePresentation = nil
                     return
                 }
-                self.openedSources = request.sources
-                // Once admitted, an open is drained rather than cancelled: its
-                // returned session must still be released if the page leaves.
                 let value = try await self.transport.call("session.open", parameters: request.value)
                 if let id = value.filmObject?["sessionId"]?.filmText.flatMap(UUID.init(uuidString:)) {
                     self.allocatedSessionID = id
@@ -395,16 +353,16 @@ public final class FilmPlaybackModel {
                 self.allocatedSessionID = snapshot.sessionID
                 DebugRuntime.log(.filmPlayback, sub: "session", event: "open.ok", level: .debug, data: .object([
                     "sessionId": .string(snapshot.sessionID.uuidString.lowercased()),
+                    "targetId": .string(snapshot.targetID),
                     "restoreOnly": .bool(request.restoreOnly),
-                    "sourceCount": .int(request.sources.count),
                 ]))
                 self.observeRuntimeClosure()
                 guard !self.closed, self.generation == generation else {
                     self.restorePresentation = nil
                     return
                 }
-                self.accept(snapshot); self.observe()
-                if self.restorePresentation == nil { self.observeSearchContext() }
+                self.accept(snapshot)
+                self.observe()
             } catch {
                 self.restorePresentation = nil
                 if !self.closed, !Self.cancelled(error) {
@@ -437,8 +395,7 @@ public final class FilmPlaybackModel {
             if self.retained {
                 self.closed = false; self.retained = false
                 self.restorePresentation = nil
-                self.reconcileMetadataView()
-                self.observe(); self.observeSearchContext()
+                self.observe()
                 return
             }
             if !self.isReleased { await self.closeSession() }
@@ -453,20 +410,17 @@ public final class FilmPlaybackModel {
     private func resetSession() {
         generation = UUID(); closed = false; retained = false; released = false
         closeDrained = false
-        allocatedSessionID = nil; snapshot = nil; openedSources = nil
+        allocatedSessionID = nil; snapshot = nil
         restorePresentation = nil
         observationError = nil; actionError = nil
         mediaStopError = nil; sessionReleaseError = nil
         committed = nil; preparing = nil; mediaStopped = true
-        // An explicit selection can own the drain/reopen. Its publication fence
-        // survives until that exact command, not the opening snapshot, is accepted.
         mediaState = FilmMediaState(); nativeStatus = nil; blockedAttemptID = nil; continuingFrom = nil
     }
 
     public func acknowledgeError() { actionError = nil }
     public func reportMediaControlError(_ error: FilmPlaybackError) { actionError = error }
 
-    /// Reconnect only the observer. Disconnection never ends the business or media owner.
     public func reconnect() {
         if runtimeClosed { _ = recoverRuntime(); return }
         guard !closed, snapshot != nil else { return }
@@ -487,8 +441,6 @@ public final class FilmPlaybackModel {
         if presentationOwners.isEmpty { cancelTemporaryRate() }
     }
 
-    /// App runtime availability, not a replay of a playback intent. Hidden
-    /// pages retain display data and rebind when they are next activated.
     public func runtimeDidBecomeAvailable() {
         guard !presentationOwners.isEmpty else { return }
         runtimeAvailabilityTask?.cancel()
@@ -572,8 +524,6 @@ public final class FilmPlaybackModel {
             }
             guard let self, self.generation == generation else { return }
             DebugRuntime.log(.filmPlayback, sub: "session", event: "runtime.closed", level: .warn)
-            // Detach the completed wait before close: its drain must never await
-            // this task. Revoke retained admission before any existing close wait.
             self.runtimeClosureTask = nil
             self.runtimeClosed = true
             self.closed = true; self.retained = false
@@ -615,31 +565,18 @@ public final class FilmPlaybackModel {
     func accept(_ value: FilmPlaybackSnapshot, reconcileMedia: Bool = true) {
         guard value.sessionID == allocatedSessionID else { return }
         if let current = snapshot, current.sessionID == value.sessionID, value.sequence <= current.sequence { return }
-        if snapshot?.previewEpisodes != value.previewEpisodes, value.metadataError == nil,
-           !value.browsing.loading, value.browsing.error == nil {
-            for key in directoryOrder where key.metadata == value.metadataSourceID && key.season == value.browsing.season {
-                guard var cached = directories[key] else { continue }
-                cached.episodes = value.episodes
-                directories[key] = cached
-            }
-        }
         snapshot = value
         if let previous = restorePresentation {
-            if !value.browsing.loading {
+            if !value.directoryLoading {
                 restorePresentation = nil
-                if let error = value.browsing.error ?? value.error {
+                if let error = value.directoryError ?? (value.noSources ? nil : value.error) {
                     actionError = FilmPlaybackError(code: error)
                 }
-                publishDirectory(value.retainingLoadedPresentation(previous))
-                observeSearchContext()
+                presentation = value.retainingLoadedPresentation(previous)
             }
-        } else { publishDirectory(value) }
-        if selectedAggregateProvider == nil {
-            selectedAggregateProvider = value.entryTarget?.metadataProvider ?? value.target.metadataProvider
+        } else {
+            presentation = value.retainingLoadedPresentation(presentation)
         }
-        reconcileMetadataView()
-        reentryTarget = value.target
-        reentryError = value.error
         if reconcileMedia { reconcilePreparation() }
         updateChapters()
     }
@@ -674,15 +611,11 @@ public final class FilmPlaybackModel {
             (sessionID.map { !media.isLocallyDrained(sessionID: $0) } ?? false)
         closed = true
         closeDrained = false
-        searchObservation?.cancel(); searchObservation = nil
-        searchUpdateTask?.cancel()
         retained = allowSystemOwner && !runtimeClosed && hasSystemOwner && committed?.started == true
         cancelPreparation(); observationAdmission = UUID(); observationTask?.cancel()
         let keepNative = retained
         closingAdmission = UUID()
         closingTask = Task { [self] in
-            await metadataSelectionTask?.value
-            await searchUpdateTask?.value
             await observationTask?.value; observationTask = nil
             await preparationWorker?.value
             await cancellingPreparation?.value
@@ -738,7 +671,7 @@ public final class FilmPlaybackModel {
     }
 
     static let mediaActions: Set<String> = [
-        "prepare", "play", "select.target", "pan", "quality", "switch", "block", "next", "previous", "stop",
+        "prepare", "play", "select.item", "pan", "quality", "switch", "block", "next", "previous", "stop",
         "media.retry",
     ]
     static func cancelled(_ error: Error) -> Bool {
@@ -772,7 +705,7 @@ public final class FilmPlaybackModel {
         runtimeAvailabilityTask?.cancel()
         ownerCloseTask?.cancel()
         recoveryTask?.cancel()
-        runtimeClosureTask?.cancel(); searchUpdateTask?.cancel()
+        runtimeClosureTask?.cancel()
         observationTask?.cancel(); activePreparation?.cancel()
     }
 }

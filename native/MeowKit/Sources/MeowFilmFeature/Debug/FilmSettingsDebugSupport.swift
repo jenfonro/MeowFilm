@@ -12,6 +12,8 @@ extension FilmSettingsViewController: DebugPageInspectable, DebugPageActionable 
         switch section {
         case "search-rules":
             page = FilmRulePageViewController(owner: model.rules, group: .search, themeProvider: themeProvider)
+        case "season-rules":
+            page = FilmRulePageViewController(owner: model.rules, group: .season, themeProvider: themeProvider)
         case "rules":
             page = FilmSmartMatchingViewController(model: model, themeProvider: themeProvider)
         case "cats":
@@ -78,7 +80,7 @@ extension FilmSettingsViewController: DebugPageInspectable, DebugPageActionable 
             settings: .object([
                 "domain": .string("film"),
                 "section": .string("root"),
-                "sections": .array(["rules", "search-rules", "cats", "videos", "metadata", "pan", "pan-routing", "preferences", "preferences-detail", "site-clean", "auto-prepare", "player", "cache"].map(DebugJSONValue.string)),
+                "sections": .array(["rules", "search-rules", "season-rules", "cats", "videos", "metadata", "pan", "pan-routing", "preferences", "preferences-detail", "site-clean", "auto-prepare", "player", "cache"].map(DebugJSONValue.string)),
                 "values": .object([
                     "playerEngine": .string(String(describing: model.player.preferences.engine)),
                     "playbackAvailable": .bool(model.playback != nil),
@@ -140,7 +142,7 @@ extension FilmMetadataCacheSettingsViewController: DebugPageInspectable, DebugPa
 
 extension FilmRulePageViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
-        let sec = group == .search ? "search-rules" : "rules"
+        let sec = group == .search ? "search-rules" : group == .season ? "season-rules" : "rules"
         return DebugPageStatus(
             target: "settings.film",
             moduleId: "film",
@@ -153,7 +155,7 @@ extension FilmRulePageViewController: DebugPageInspectable, DebugPageActionable 
     }
 
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        let sec = group == .search ? "search-rules" : "rules"
+        let sec = group == .search ? "search-rules" : group == .season ? "season-rules" : "rules"
         let rules = owner.rules(group)
         let rows = rules.prefix(maxItems).enumerated().map { idx, rule in
             DebugContentRow(

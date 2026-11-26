@@ -4,13 +4,12 @@ import MeowDebug
 import MeowRuntime
 
 /// Owns consumer admission and display lifetimes; the borrowed Node runtime owns
-/// search sessions, rules and all content/cache state.
+/// live video sources, search sessions, rules and all content/cache state.
 @MainActor
 public final class FilmSearchService {
-    public typealias Sites = @Sendable () async throws -> [FilmSearchSite]
     let transport: FilmSearchTransport
-    let sites: Sites
     private(set) var metadataRevision = UUID()
+    private(set) var currentSourceSignature: String?
     private var current: FilmSearchSession?
     private final class WeakSession {
         weak var value: FilmSearchSession?
@@ -18,13 +17,12 @@ public final class FilmSearchService {
     }
     private nonisolated(unsafe) var sessions: [WeakSession] = []
     private var retirements: [UUID: Task<Void, Never>] = [:]
-    private var sourceScope: [Data: RuntimeValue]?
     private var closed = false
     private var closing: Task<Void, Never>?
     private nonisolated(unsafe) var sourceObservation: Task<Void, Never>?
 
-    public init(transport: FilmSearchTransport, sites: @escaping Sites) {
-        self.transport = transport; self.sites = sites
+    public init(transport: FilmSearchTransport) {
+        self.transport = transport
     }
 
     public convenience init(sources: FilmSourceService,
@@ -33,10 +31,7 @@ public final class FilmSearchService {
     }
 
     convenience init(sources: FilmSourceService, transport: FilmSearchTransport) {
-        self.init(transport: transport, sites: {
-            try await sources.refresh()
-            return Self.searchableSites(await sources.snapshot)
-        })
+        self.init(transport: transport)
         sourceObservation = Task { [weak self] in
             for await _ in await sources.snapshots() {
                 guard !Task.isCancelled else { return }
@@ -47,30 +42,22 @@ public final class FilmSearchService {
         }
     }
 
-    nonisolated static func searchableSites(_ snapshot: FilmSourceSnapshot) -> [FilmSearchSite] {
-        snapshot.videos.compactMap { source in
-            guard source.options.enabled, source.options.searchEnabled, source.actions.contains("search"),
-                  let cat = snapshot.cats.first(where: { $0.installationId.utf8.elementsEqual(source.key.installationId.utf8) }),
-                  cat.enabled else { return nil }
-            return FilmSearchSite(cat: cat, source: source)
-        }.sorted { $0.source.order < $1.source.order }
-    }
-
-    nonisolated static func authorizationScope(_ sources: [FilmPlaybackSource]) -> [Data: RuntimeValue] {
-        Dictionary(
-            sources.compactMap { source in source.key.map { (Data($0.utf8), RuntimeValue.object(source.value)) } },
-            uniquingKeysWith: { _, latest in latest }
-        )
-    }
-
-    func accepts(_ sources: [FilmPlaybackSource]) -> Bool {
-        sourceScope.map { Self.authorizationScope(sources) == $0 } ?? true
+    nonisolated static func signature(for snapshot: FilmSourceSnapshot) -> String {
+        snapshot.videos
+            .sorted { $0.order < $1.order }
+            .compactMap { source -> String? in
+                guard source.options.enabled, source.options.searchEnabled, source.actions.contains("search"),
+                      let cat = snapshot.cats.first(where: { $0.installationId == source.key.installationId }),
+                      cat.enabled else { return nil }
+                return "\(cat.installationId):\(cat.generation):\(source.key.siteKey):\(source.order):\(source.options.aggregateImages)"
+            }
+            .joined(separator: "|")
     }
 
     private func sourcesChanged(_ snapshot: FilmSourceSnapshot) {
-        let scope = Self.authorizationScope(Self.searchableSites(snapshot).map(\.playbackSource))
-        sourceScope = scope
-        let stale = sessions.compactMap(\.value).filter { $0.hasDifferentSources(scope) }
+        let sig = Self.signature(for: snapshot)
+        currentSourceSignature = sig
+        let stale = sessions.compactMap(\.value).filter { $0.hasDifferentSources(sig) }
         if !stale.isEmpty {
             DebugRuntime.log(.search, sub: "service", event: "sources.changed", level: .debug,
                              data: .object(["releasedCount": .int(stale.count)]))
@@ -85,7 +72,7 @@ public final class FilmSearchService {
             candidate.belongs(to: self) && candidate.snapshot.query.utf8.elementsEqual(query.utf8)
         }
         let reusable = previous.flatMap { candidate in
-            !candidate.invalidated && (sourceScope.map { !candidate.hasDifferentSources($0) } ?? true) ? candidate : nil
+            !candidate.invalidated && (currentSourceSignature.map { !candidate.hasDifferentSources($0) } ?? true) ? candidate : nil
         }
         let session = reusable ?? FilmSearchSession(query: query, service: self, presentation: previous?.snapshot)
         sessions.removeAll { $0.value == nil }

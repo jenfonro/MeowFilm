@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import MeowRuntime
 import MeowUI
 
 @MainActor
@@ -110,10 +111,10 @@ final class FilmManualMatchEditor: SettingsFormViewController {
         var choices: [(String, () -> Void)] = []
         var identities = Set<Data>()
         if let snapshot = owner.playbackSnapshot?() {
-            identities.insert(Data(snapshot.target.id.utf8))
-            choices.append((snapshot.target.title, { [weak self] in
-                self?.target.text = snapshot.target.id
-                self?.name.text = snapshot.target.title
+            identities.insert(Data(snapshot.targetID.utf8))
+            choices.append((snapshot.work.title, { [weak self] in
+                self?.target.text = snapshot.targetID
+                self?.name.text = snapshot.work.title
             }))
         }
         for item in owner.library?.history ?? [] where identities.insert(Data(item.targetID.utf8)).inserted {
@@ -124,21 +125,23 @@ final class FilmManualMatchEditor: SettingsFormViewController {
         }
         choose("影片", choices: choices)
     }
-    private var siteChoices: [(String, FilmPlaybackSource)] {
+    private var siteChoices: [(title: String, sourceKey: String, detailID: String, isNumeric: Bool)] {
         guard let snapshot = owner.playbackSnapshot?() else { return [] }
-        // These are real detail identities, not an installation list masquerading
-        // as content or a pan candidate supplied with an invented Cat identity.
-        return snapshot.sources.compactMap { row in
-            guard row.source.value["engine"]?.filmText != "pan", row.source.detailID != nil else { return nil }
-            return ("\(row.source.name) · \(row.title)", row.source)
+        return snapshot.sourceOptions.compactMap { row in
+            guard row.kind == "site",
+                  let decoded = try? RuntimeJSON.decode(Data(row.id.utf8)),
+                  let tuple = decoded.filmArray, tuple.count == 2,
+                  let sourceKey = tuple[0].filmText, !sourceKey.isEmpty,
+                  let detailScalar = tuple[1].filmScalar, !detailScalar.isEmpty else { return nil }
+            return (row.displayTitle, sourceKey, detailScalar, tuple[1].filmNumber != nil)
         }
     }
     private func chooseSource() {
-        choose("站点详情", choices: siteChoices.map { title, source in
-            (title, { [weak self] in
-                self?.sourceKey.text = source.key
-                self?.detailID.text = source.detailID?.filmScalar
-                self?.numericDetailID = source.detailID?.filmNumber != nil
+        choose("站点详情", choices: siteChoices.map { choice in
+            (choice.title, { [weak self] in
+                self?.sourceKey.text = choice.sourceKey
+                self?.detailID.text = choice.detailID
+                self?.numericDetailID = choice.isNumeric
                 self?.update()
             })
         })

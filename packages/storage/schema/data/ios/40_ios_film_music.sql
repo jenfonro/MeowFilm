@@ -21,12 +21,6 @@ CREATE TABLE ios_film_player_preferences (
     haptic_seek INTEGER NOT NULL CHECK (haptic_seek IN (0, 1))
 ) STRICT;
 
-CREATE TABLE ios_film_favorite_identity (
-    favorite_id TEXT PRIMARY KEY NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
-    source_id TEXT NOT NULL,
-    kind TEXT
-) STRICT;
-
 CREATE TABLE ios_novel_reading_background (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES novel_reading_settings(singleton) ON DELETE CASCADE,
     background_image_blob BLOB NOT NULL

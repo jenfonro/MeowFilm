@@ -16,7 +16,7 @@
 
 ## 详情和收藏
 
-详情以显式传入的 `FilmDetail` 为初始展示；带 `FilmPlaybackModel` 的播放实现随后投影 Node 会话的真实元数据、季集与来源快照，加载和错误不冒充成功空数据。豆瓣首页摘要本身仍只有海报、标题、评分与摘要副标题，不授予播放地址或虚构剧集。缺失内容保持空状态；浏览、选源与播放通过会话命令处理，不在 UIKit 重写智能选路或填入示例。
+详情以显式传入的 `FilmDetail`（携带轻量 `FilmEntry`，统一持久身份 `targetId = "work:<sessionKey>"`）为初始展示，无 TMDB／豆瓣元数据时保底展示入口标题、操作栏与选集区，演职员与相似推荐为空时连同区块标题干净收起；带 `FilmPlaybackModel` 的播放实现投影 Node 会话的规范化 `work`、`sourceMenu`、`lineMenu`、`directory`、`player`、`noSources` 快照。当可用视频源与人工匹配源均为 0 时（`noSources: true`），来源控件与播放提示统一显示 `暂无可用视频源`，不弹报错浮层；无 TMDB／豆瓣且有效剧集站点 `>= 2` 时支持选择首位的 `智能列表` 并在选集区触发 `episodes.more`（「加载更多」）。选集、候选与原始目录文件统一提交 `select.item {itemId}`，来源、线路、季度与资料视图切换分别提交 `browse.source`、`browse.line`、`browse.season`、`browse.metadata`。影片收藏由 `FilmFavoriteRepository` 直接读写共享表 `film_favorites`（统一 `target_id`、`keyword` 及可选 `tmdb_*`／`douban_*`／`site_*` 列，不再设 `ios_film_favorite_identity` 或 `film_favorite_members` 子表）。
 
 `FilmPlaybackModel` 将高频播放态（`FilmMediaStateStore`）与低频目录／元数据／选集浏览态（`FilmPresentationStateStore`）物理隔离：全屏播放器消费媒体态，详情页与目录页只订阅浏览态，视频播放进度不再唤醒后台详情页重绘或调用 `applyTheme()`。详情页选集列表、演职员表与相似推荐均由虚拟化 `UICollectionView`（`FilmEpisodeCollectionView`、`FilmCastRailView`、`FilmRelatedRailView`，位于 `FilmDetailVirtualLists.swift`）+ Diffable 数据源承载，支持复用与按目录保留滚动位置。
 

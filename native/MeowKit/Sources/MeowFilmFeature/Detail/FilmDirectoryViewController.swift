@@ -10,9 +10,7 @@ final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybac
     var filmPlaybackModel: FilmPlaybackModel? { model }
     let model: FilmPlaybackModel
     private let sourceID: String
-    private let lineID: FilmPlaybackIdentifier?
-    private let metadataSourceID: String?
-    private let season: Int?
+    private let lineID: String?
     private let path: [String]
     private let presentationOwner = UUID()
     var displayedEntries: [FilmPlaybackDirectory.Entry]?
@@ -20,11 +18,12 @@ final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybac
     private var playbackAvailable = false
     var onPresentPlayback: (() -> Void)?
 
-    init(model: FilmPlaybackModel, sourceID: String, lineID: FilmPlaybackIdentifier?,
-         metadataSourceID: String?, season: Int?, path: [String] = [],
-         themeProvider: any PageThemeProviding) {
-        self.model = model; self.sourceID = sourceID; self.lineID = lineID; self.path = path
-        self.metadataSourceID = metadataSourceID; self.season = season
+    init(model: FilmPlaybackModel, sourceID: String, lineID: String?,
+         path: [String] = [], themeProvider: any PageThemeProviding) {
+        self.model = model
+        self.sourceID = sourceID
+        self.lineID = lineID
+        self.path = path
         super.init(themeProvider: themeProvider)
         pageTitle = path.last.map { $0.isEmpty ? "/" : $0 } ?? "原始目录"
     }
@@ -55,13 +54,13 @@ final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybac
 
     private func update() {
         let selected = model.presentation
-        let ownsSelection = selected?.browsing.sourceID == sourceID && selected?.browsing.lineID == lineID &&
-            selected?.metadataSourceID == metadataSourceID && selected?.browsing.season == season
+        let ownsSelection = selected?.sourceSelectedID == sourceID &&
+            (lineID == nil || selected?.lineSelectedID == lineID)
         let failure = ownsSelection ? model.actionError ?? model.observationError ??
-            selected?.browsing.error.map { FilmPlaybackError(code: $0) } : model.observationError
+            selected?.directoryError.map { FilmPlaybackError(code: $0) } : model.observationError
         syncErrorSource(
             "directory",
-            message: failure?.localizedDescription,
+            message: failure?.code == "NO_VIDEO_SOURCES" ? nil : failure?.localizedDescription,
             token: failure?.code,
             retry: { [weak self] in
                 guard let self else { return }
@@ -69,12 +68,9 @@ final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybac
                 else { model.refreshBrowsing() }
             }
         )
-        let directory = ownsSelection && selected?.browsing.error != nil ? nil :
-            model.loadedDirectory(sourceID: sourceID, lineID: lineID,
-                                  metadataSourceID: metadataSourceID, season: season)
-        guard let browsing = directory?.browsing else {
-            let loading = model.presentation?.browsing.loading == true
-            let state = loading ? "加载中" : "无可用视频源"
+        guard let selected, ownsSelection, selected.directoryError == nil, !selected.directoryRawItems.isEmpty else {
+            let loading = selected?.directoryLoading == true
+            let state = loading ? "加载中" : "暂无可用视频源"
             if displayedEntries != nil || displayedState != state {
                 displayedEntries = nil
                 displayedState = state
@@ -85,8 +81,8 @@ final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybac
             return
         }
         displayedState = nil
-        let entries = FilmPlaybackDirectory(files: browsing.originalFiles).children(at: path)
-        let available = model.executionStage != nil && !model.restoringRead
+        let entries = FilmPlaybackDirectory(files: selected.directoryRawItems).children(at: path)
+        let available = model.executionStage != nil && !model.restoringRead && !selected.noSources
         if entries == displayedEntries && playbackAvailable == available { return }
         displayedEntries = entries
         playbackAvailable = available
@@ -101,7 +97,6 @@ final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybac
                         guard let self else { return }
                         let page = FilmDirectoryViewController(
                             model: model, sourceID: sourceID, lineID: lineID,
-                            metadataSourceID: metadataSourceID, season: season,
                             path: path + [name], themeProvider: themeProvider
                         )
                         page.onPresentPlayback = onPresentPlayback
@@ -109,13 +104,14 @@ final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybac
                     }
                 )
             case .file(let file):
+                let displayTitle = file.fileName.isEmpty ? file.title : file.fileName
                 return SettingsListRow(
                     id: "film.directory.file.\(file.id)",
-                    title: file.name,
-                    enabled: file.candidateID != nil && available,
+                    title: displayTitle,
+                    enabled: file.isPlayable && available,
                     action: { [weak self] in
-                        guard let self, file.candidateID != nil else { return }
-                        model.selectTarget(file.playbackTarget, metadataSourceID: metadataSourceID)
+                        guard let self, file.isPlayable else { return }
+                        model.selectItem(file.id)
                         onPresentPlayback?()
                     }
                 )
@@ -123,7 +119,7 @@ final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybac
         }
         applySections([SettingsListSection(
             id: "directory",
-            rows: rows.isEmpty ? [SettingsListRow(id: "film.directory.empty", title: "无可用视频源", enabled: false)] : rows
+            rows: rows.isEmpty ? [SettingsListRow(id: "film.directory.empty", title: "暂无可用视频源", enabled: false)] : rows
         )])
     }
 }

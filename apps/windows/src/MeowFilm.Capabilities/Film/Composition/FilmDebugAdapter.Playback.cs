@@ -55,7 +55,7 @@ internal sealed partial class FilmDebugAdapter
         var page = capability.Playback;
         var playerView = capability.DebugView.PlaybackViewControl;
 
-        string? snapshotError = page?.CurrentSnapshotError is { Length: > 0 } snapErr ? snapErr : null;
+        string? snapshotError = page?.CurrentSnapshotError is { Length: > 0 } snapErr && snapErr != "NO_VIDEO_SOURCES" ? snapErr : null;
         string? lastError = !string.IsNullOrEmpty(nativeFilmPlayback.LastErrorCode) ? nativeFilmPlayback.LastErrorCode
             : !string.IsNullOrEmpty(filmPlayback.ExecutionError) ? filmPlayback.ExecutionError
             : snapshotError;
@@ -65,6 +65,10 @@ internal sealed partial class FilmDebugAdapter
         {
             state = filmPlayback.IsBuffering ? "buffering"
                 : filmPlayback.IsPlaying ? "playing" : "paused";
+        }
+        else if (page?.NoSources == true)
+        {
+            state = "unavailable";
         }
         else if (page is { ExecutionFailed: true } or { ConnectionFailed: true } ||
                  page?.CurrentStage is "error" or "unavailable")

@@ -227,7 +227,7 @@ public partial class FilmPlaybackView : UserControl
         if (e.PropertyName is nameof(FilmPlaybackPage.Sources) or nameof(FilmPlaybackPage.Lines) or
             nameof(FilmPlaybackPage.SelectedSource) or nameof(FilmPlaybackPage.SelectedLine) || string.IsNullOrEmpty(e.PropertyName))
             UpdateSourceSelections();
-        if (e.PropertyName is nameof(FilmPlaybackPage.CurrentCandidateId) or nameof(FilmPlaybackPage.CanBrowseRaw) or
+        if (e.PropertyName is nameof(FilmPlaybackPage.ActiveItemId) or nameof(FilmPlaybackPage.CanBrowseRaw) or
             nameof(FilmPlaybackPage.EpisodeDirectory) || string.IsNullOrEmpty(e.PropertyName))
         {
             if (directory is { } dialog && boundPage is { } page)
@@ -245,7 +245,9 @@ public partial class FilmPlaybackView : UserControl
             nameof(FilmPlaybackPage.PlayerBuffering) or
             nameof(FilmPlaybackPage.Volume) or nameof(FilmPlaybackPage.CanRetryMedia) or nameof(FilmPlaybackPage.NoOutput) or
             nameof(FilmPlaybackPage.PlayerPanLabel) or nameof(FilmPlaybackPage.PlayerQualityLabel) or
-            nameof(FilmPlaybackPage.OverviewExpanded) or nameof(FilmPlaybackPage.IsFavorite) or nameof(FilmPlaybackPage.Overview) or
+            nameof(FilmPlaybackPage.OverviewExpanded) or nameof(FilmPlaybackPage.IsFavorite) or
+            nameof(FilmPlaybackPage.Overview) or nameof(FilmPlaybackPage.HasOverview) or
+            nameof(FilmPlaybackPage.HasDirectors) or nameof(FilmPlaybackPage.HasCast) or
             nameof(FilmPlaybackPage.HasOutput) or nameof(FilmPlaybackPage.PlayerPanOptions) or nameof(FilmPlaybackPage.PlayerQualityOptions) or
             nameof(FilmPlaybackPage.ShowPlayerSwitchActions) or nameof(FilmPlaybackPage.CanBlockAttempt))
             UpdatePlayerState();
@@ -277,6 +279,11 @@ public partial class FilmPlaybackView : UserControl
                     {
                         if (boundPage is { } current)
                             await ExecuteAsync(current, () => current.SelectCandidateAsync(candidate.Id), "候选播放失败");
+                    };
+                    view.LoadMoreRequested += async () =>
+                    {
+                        if (boundPage is { } current)
+                            await ExecuteAsync(current, current.LoadMoreEpisodesAsync, "加载更多选集失败");
                     };
                     directoryViews.Add(selected, view);
                 }
@@ -482,16 +489,9 @@ public partial class FilmPlaybackView : UserControl
     }
     private async void SearchMoreSources_Click(object sender, RoutedEventArgs e)
     {
-
         if (DataContext is not FilmPlaybackPage { CanSearchMore: true } page) return;
         SourcePicker.IsDropDownOpen = false;
         await ExecuteAsync(page, page.SearchMoreSourcesAsync, "搜索失败，请重试");
-    }
-    private async void SearchSources_Click(object sender, RoutedEventArgs e)
-    {
-
-        if (DataContext is FilmPlaybackPage page)
-            await ExecuteAsync(page, page.SearchSourcesAsync, "搜索失败，请重试");
     }
     private async void Reconnect_Click(object sender, RoutedEventArgs e)
     {

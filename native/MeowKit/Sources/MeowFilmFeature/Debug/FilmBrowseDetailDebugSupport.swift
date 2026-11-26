@@ -18,8 +18,7 @@ public extension FilmPlaybackModel {
         case .ended: stateStr = "ended"
         case .unavailable, .failed: stateStr = "error"
         }
-        let currentCandidate = snapshot?.current?.candidate ?? snapshot?.attempt?.candidate
-        let titleStr = snapshot?.workInfo?.title ?? snapshot?.target.title ?? ""
+        let titleStr = snapshot?.work.title ?? ""
         let videoSizeJSON: DebugJSONValue = (mediaState.videoWidth > 0 && mediaState.videoHeight > 0)
             ? .object(["width": .int(mediaState.videoWidth), "height": .int(mediaState.videoHeight)])
             : .null
@@ -65,11 +64,11 @@ public extension FilmPlaybackModel {
         return .object([
             "state": .string(stateStr),
             "stage": .optional(snapshot?.stage),
+            "noSources": .bool(snapshot?.noSources == true),
             "engine": .string(mediaState.engine.rawValue),
             "title": .string(titleStr),
-            "source": .optional(currentCandidate?.source.name),
-            "episode": .optional(currentCandidate?.name),
-            "line": .optional(currentCandidate?.lineLabel),
+            "source": .optional(snapshot?.activeSourceLabel.isEmpty == false ? snapshot?.activeSourceLabel : nil),
+            "episode": .optional(snapshot?.activeEpisodeLabel.isEmpty == false ? snapshot?.activeEpisodeLabel : nil),
             "positionSec": .number(mediaState.position),
             "durationSec": .number(mediaState.duration),
             "bufferedSec": .number(mediaState.bufferedPosition),
@@ -90,9 +89,8 @@ public extension FilmPlaybackModel {
             "selectedSubtitleTrack": .optional(subtitleTracks.first(where: \.isEnabled)?.id),
             "chapters": .array(chaptersJSON),
             "diagnostics": diagJSON,
-            "sourcesCount": .int(snapshot?.sources.count ?? 0),
-            "episodesCount": .int((snapshot?.episodes.isEmpty == false ? snapshot?.episodes.count : snapshot?.browsing.files.count) ?? 0),
-            "candidatesCount": .int(snapshot?.candidates.count ?? 0),
+            "sourcesCount": .int(snapshot?.sourceOptions.count ?? 0),
+            "episodesCount": .int(snapshot?.directoryItems.count ?? 0),
             "lastError": .optional(lastErrorCode)
         ])
     }
@@ -206,78 +204,40 @@ public extension FilmPlaybackModel {
                 throw DebugAPIError.invalidArgument("Invalid resource quality")
             }
             await send("quality", parameters: ["quality": .string(quality.rawValue)])?.value
-        case "select_episode":
-            let episodes = snapshot?.episodes ?? []
-            let target: FilmPlaybackTarget
-            if !episodes.isEmpty {
-                if let idx = params["index"]?.intValue {
-                    guard episodes.indices.contains(idx) else {
-                        throw DebugAPIError.invalidArgument("Episode index \(idx) out of range (0..<\(episodes.count))")
-                    }
-                    target = episodes[idx].playbackTarget
-                } else if let id = params["id"]?.stringValue {
-                    guard let found = episodes.first(where: { $0.displayID == id || $0.name == id }) else {
-                        throw DebugAPIError.notFound("Episode not found: \(id)")
-                    }
-                    target = found.playbackTarget
-                } else {
-                    throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_episode")
+        case "select_episode", "select_candidate":
+            let items = snapshot?.directoryItems ?? []
+            let chosen: FilmDirectoryItem
+            if let idx = params["index"]?.intValue {
+                guard items.indices.contains(idx) else {
+                    throw DebugAPIError.invalidArgument("Item index \(idx) out of range (0..<\(items.count))")
                 }
+                chosen = items[idx]
+            } else if let id = params["id"]?.stringValue {
+                guard let found = items.first(where: { $0.id == id || $0.title == id || $0.fileName == id }) else {
+                    throw DebugAPIError.notFound("Directory item not found: \(id)")
+                }
+                chosen = found
             } else {
-                let files = snapshot?.browsing.files ?? []
-                if let idx = params["index"]?.intValue {
-                    guard files.indices.contains(idx) else {
-                        throw DebugAPIError.invalidArgument("Episode index \(idx) out of range (0..<\(files.count))")
-                    }
-                    target = files[idx].playbackTarget
-                } else if let id = params["id"]?.stringValue {
-                    guard let found = files.first(where: { $0.id == id || $0.businessID == id || $0.name == id }) else {
-                        throw DebugAPIError.notFound("Episode not found: \(id)")
-                    }
-                    target = found.playbackTarget
-                } else {
-                    throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_episode")
-                }
+                throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for \(command)")
             }
-            await selectTarget(target, metadataSourceID: presentation?.metadataSourceID)?.value
+            await selectItem(chosen.id)?.value
         case "select_source":
-            let sources = snapshot?.sources ?? []
-            let chosen: FilmPlaybackSourceRow
+            let sources = snapshot?.sourceOptions ?? []
+            let chosen: FilmSelectionOption
             if let idx = params["index"]?.intValue {
                 guard sources.indices.contains(idx) else {
                     throw DebugAPIError.invalidArgument("Film source index \(idx) out of range (0..<\(sources.count))")
                 }
                 chosen = sources[idx]
             } else if let id = params["id"]?.stringValue {
-                guard let found = sources.first(where: { $0.id == id || $0.title == id || $0.source.key == id }) else {
+                guard let found = sources.first(where: { $0.id == id || $0.label == id || $0.displayTitle == id }) else {
                     throw DebugAPIError.notFound("Film source not found: \(id)")
                 }
                 chosen = found
             } else {
                 throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_source")
             }
-            if params["browseOnly"]?.boolValue == true {
-                browse(sourceID: chosen.id)
-            } else {
-                await selectTarget(chosen.playbackTarget, metadataSourceID: presentation?.metadataSourceID)?.value
-            }
-        case "select_candidate":
-            let candidates = snapshot?.candidates ?? []
-            let chosen: FilmPlaybackCandidate
-            if let idx = params["index"]?.intValue {
-                guard candidates.indices.contains(idx) else {
-                    throw DebugAPIError.invalidArgument("Candidate index \(idx) out of range (0..<\(candidates.count))")
-                }
-                chosen = candidates[idx]
-            } else if let id = params["id"]?.stringValue {
-                guard let found = candidates.first(where: { $0.id == id || $0.businessID == id || $0.name == id }) else {
-                    throw DebugAPIError.notFound("Film candidate not found: \(id)")
-                }
-                chosen = found
-            } else {
-                throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_candidate")
-            }
-            await selectTarget(chosen.playbackTarget, metadataSourceID: presentation?.metadataSourceID)?.value
+            browseSource(chosen.id)
         case "select_video_track", "select_audio_track", "select_subtitle_track":
             guard canControlPlayback else {
                 throw DebugAPIError.invalidState("No active film playback for track selection")
@@ -322,7 +282,7 @@ public extension FilmPlaybackModel {
 extension FilmHomeViewController: DebugPageInspectable, DebugPageActionable, DebugPageRefreshable {
     public func debugFindItem(id: String) -> (item: FilmItem, category: FilmCategory)? {
         for sec in sections {
-            if let found = sec.items.first(where: { $0.id == id || $0.businessID == id }) {
+            if let found = sec.items.first(where: { $0.id == id || $0.targetID == id }) {
                 let cat = model.categoryModel(sectionID: sec.id)?.category ?? .movie
                 return (found, cat)
             }
@@ -350,7 +310,7 @@ extension FilmHomeViewController: DebugPageInspectable, DebugPageActionable, Deb
             let items = sec.items.prefix(take).enumerated().map { iIdx, item in
                 DebugContentItem(
                     index: iIdx,
-                    id: item.businessID ?? item.id,
+                    id: item.targetID ?? item.id,
                     kind: "film",
                     title: item.title,
                     subtitle: item.subtitle.isEmpty ? nil : item.subtitle,
@@ -391,7 +351,7 @@ extension FilmHomeViewController: DebugPageInspectable, DebugPageActionable, Deb
                 }
                 item = sec.items[iIdx]
             } else if let id = request.params["itemId"]?.stringValue {
-                guard let found = sec.items.first(where: { $0.id == id || $0.businessID == id }) else {
+                guard let found = sec.items.first(where: { $0.id == id || $0.targetID == id }) else {
                     throw DebugAPIError.notFound("Film item not found: \(id)")
                 }
                 item = found
@@ -485,7 +445,7 @@ extension FilmCategoryViewController: DebugPageInspectable, DebugPageActionable,
         let items = renderedItems.prefix(maxItems).enumerated().map { idx, item in
             DebugContentItem(
                 index: idx,
-                id: item.businessID ?? item.id,
+                id: item.targetID ?? item.id,
                 kind: "film",
                 title: item.title,
                 subtitle: item.subtitle.isEmpty ? nil : item.subtitle,
@@ -564,7 +524,7 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
             target: "film.detail",
             moduleId: "film",
             route: "film/detail/\(originalDetail.item.id)",
-            title: model?.snapshot?.workInfo?.title ?? originalDetail.item.title,
+            title: model?.snapshot?.work.title ?? originalDetail.item.title,
             isBusy: model?.playbackStatus.busy == true || model?.opening == true,
             statusText: model?.playbackStatus.title,
             isError: model?.actionError != nil || model?.observationError != nil,
@@ -574,27 +534,38 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
 
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
         let snap = model?.presentation ?? model?.snapshot
-        let sources = (snap?.sources ?? []).prefix(maxItems).enumerated().map { idx, s -> DebugJSONValue in
-            .object(["index": .int(idx), "id": .string(s.id), "title": .string(s.title), "state": .string(s.state), "error": .optional(s.error)])
+        let sources = (snap?.sourceOptions ?? []).prefix(maxItems).enumerated().map { idx, s -> DebugJSONValue in
+            .object([
+                "index": .int(idx),
+                "id": .string(s.id),
+                "title": .string(s.displayTitle),
+                "kind": .string(s.kind),
+                "state": .optional(s.state),
+                "error": .optional(s.error)
+            ])
         }
-        let episodes = (snap?.episodes ?? []).prefix(maxItems).enumerated().map { idx, ep -> DebugContentRow in
+        let episodes = (snap?.directoryItems ?? []).prefix(maxItems).enumerated().map { idx, item -> DebugContentRow in
             DebugContentRow(
                 index: idx,
-                id: ep.displayID,
-                title: ep.name ?? "第\(ep.position.episode ?? (idx + 1))集",
-                selected: snap?.target.id == ep.playbackTarget.id,
+                id: item.id,
+                title: item.fileName.isEmpty ? item.title : item.fileName,
+                selected: item.active,
                 actions: ["play", "select"]
             )
         }
         let metrics = DebugUIMetrics.shared.snapshot()
         let detailJSON: DebugJSONValue = .object([
             "id": .string(originalDetail.item.id),
-            "title": .string(snap?.workInfo?.title ?? originalDetail.item.title),
+            "targetId": .optional(snap?.targetID),
+            "title": .string(snap?.work.title ?? originalDetail.item.title),
             "stage": .optional(snap?.stage),
-            "searchComplete": .bool(snap?.searchComplete ?? false),
+            "noSources": .bool(snap?.noSources == true),
+            "sourceSelectedId": .optional(snap?.sourceSelectedID),
+            "sourceCanLoadMore": .bool(snap?.sourceCanLoadMore ?? false),
+            "directoryMode": .optional(snap?.directoryMode),
+            "directoryCanLoadMore": .bool(snap?.directoryCanLoadMore ?? false),
             "sources": .array(sources),
-            "episodesCount": .int(snap?.episodes.count ?? 0),
-            "candidatesCount": .int(snap?.candidates.count ?? 0),
+            "episodesCount": .int(snap?.directoryItems.count ?? 0),
             "episodeListVisible": .bool(episodeListVisible),
             "virtualizedEpisodeItems": .int(episodeCollection.currentItems.count),
             "visibleEpisodeCells": .int(episodeCollection.collectionView.visibleCells.count),
@@ -607,6 +578,7 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
             loading: debugPageStatus.isBusy,
             error: debugPageStatus.errorText,
             rows: episodes,
+            hasMore: snap?.directoryCanLoadMore == true,
             detail: detailJSON
         )
     }
@@ -615,28 +587,32 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
         switch request.action {
         case "list.item.invoke":
             guard let model else { throw DebugAPIError.invalidState("Film playback model unavailable") }
-            let episodes = (model.presentation ?? model.snapshot)?.episodes ?? []
+            let items = (model.presentation ?? model.snapshot)?.directoryItems ?? []
             let idx = request.params["index"]?.intValue ?? 0
-            guard episodes.indices.contains(idx) else {
+            guard items.indices.contains(idx) else {
                 throw DebugAPIError.invalidArgument("Episode index \(idx) out of range")
             }
-            model.selectTarget(episodes[idx].playbackTarget)
+            model.selectItem(items[idx].id)
             if (request.params["verb"]?.stringValue ?? "play") == "play" {
                 onPresentPlayback?()
             }
-            return .object(["selectedEpisodeIndex": .int(idx)])
+            return .object(["selectedItemId": .string(items[idx].id)])
+        case "list.load_more":
+            guard let model else { throw DebugAPIError.invalidState("Film playback model unavailable") }
+            model.loadMoreEpisodes()
+            return .object(["triggered": .bool(true)])
         case "tab.select":
             guard let model else { throw DebugAPIError.invalidState("Film playback model unavailable") }
-            let sources = (model.presentation ?? model.snapshot)?.sources ?? []
+            let sources = (model.presentation ?? model.snapshot)?.sourceOptions ?? []
             if let idx = request.params["index"]?.intValue, sources.indices.contains(idx) {
-                model.browse(sourceID: sources[idx].id)
+                model.browseSource(sources[idx].id)
                 return .object(["selectedSourceId": .string(sources[idx].id)])
             }
             if let id = request.params["id"]?.stringValue {
                 guard sources.contains(where: { $0.id == id }) else {
                     throw DebugAPIError.notFound("Film source not found: \(id)")
                 }
-                model.browse(sourceID: id)
+                model.browseSource(id)
                 return .object(["selectedSourceId": .string(id)])
             }
             throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for source selection")
@@ -655,8 +631,8 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
     }
 
     public func debugOpenDirectory() throws {
-        guard let model, let browsing = model.presentation?.browsing, browsing.error == nil,
-              browsing.sourceID != nil, !browsing.originalFiles.isEmpty else {
+        guard let model, let snapshot = model.presentation, snapshot.directoryError == nil,
+              snapshot.sourceSelectedID != nil, !snapshot.directoryRawItems.isEmpty else {
             throw DebugAPIError.invalidState("Film directory is unavailable for the current detail")
         }
         showDirectory(animated: false)
@@ -670,7 +646,7 @@ extension FilmDirectoryViewController: DebugPageInspectable, DebugPageRefreshabl
             moduleId: "film",
             route: "film/directory",
             title: pageTitle ?? "原始目录",
-            isBusy: model.presentation?.browsing.loading == true,
+            isBusy: model.presentation?.directoryLoading == true,
             isError: model.actionError != nil || model.observationError != nil,
             errorText: model.actionError?.code ?? model.observationError?.code
         )
@@ -683,7 +659,8 @@ extension FilmDirectoryViewController: DebugPageInspectable, DebugPageRefreshabl
             case .folder(let name):
                 return DebugContentRow(index: idx, id: "folder:\(name)", title: name, subtitle: "目录", actions: ["open"])
             case .file(let file):
-                return DebugContentRow(index: idx, id: file.id, title: file.name, subtitle: file.quality ?? file.resolution, actions: ["open", "play"])
+                let name = file.fileName.isEmpty ? file.title : file.fileName
+                return DebugContentRow(index: idx, id: file.id, title: name, subtitle: file.quality.isEmpty ? nil : file.quality, actions: ["open", "play"])
             }
         }
         return DebugContentSnapshot(
@@ -706,7 +683,7 @@ extension FilmPlayerViewController: DebugPageInspectable {
             target: "film.playback",
             moduleId: "film",
             route: "film/playback",
-            title: model.snapshot?.workInfo?.title ?? "视频播放",
+            title: model.snapshot?.work.title ?? "视频播放",
             isBusy: model.playbackStatus.busy,
             statusText: model.playbackStatus.title,
             isError: model.actionError != nil || model.observationError != nil,
@@ -745,7 +722,7 @@ extension FilmSearchResultsContent: DebugPageInspectable, DebugPageActionable {
             guard let card = presentation.cards[id] else { return nil }
             return DebugContentRow(
                 index: idx,
-                id: card.selection.businessID,
+                id: card.selection.id,
                 title: card.content.item.title,
                 subtitle: card.content.label.isEmpty ? nil : card.content.label,
                 actions: ["open"]
@@ -771,7 +748,7 @@ extension FilmSearchResultsContent: DebugPageInspectable, DebugPageActionable {
                 throw DebugAPIError.invalidArgument("Film search index \(idx) out of range")
             }
             onSelect?(session.context(for: card.selection))
-            return .object(["openedFilmId": .string(card.selection.businessID)])
+            return .object(["openedFilmId": .string(card.selection.id)])
         case "list.load_more":
             session?.loadMore()
             return .object(["triggered": .bool(true)])

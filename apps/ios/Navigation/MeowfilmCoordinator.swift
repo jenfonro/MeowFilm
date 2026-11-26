@@ -325,11 +325,33 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func showFilm(_ item: FilmItem, kind: FilmPlaybackKind, entrySurface: String? = nil, animated: Bool = true) {
+        let resolvedKind = FilmItemKind(rawValue: kind.rawValue) ?? item.kind
+        let updatedEntry = item.entry.map { base in
+            FilmEntry(
+                targetId: base.targetId,
+                keyword: base.keyword,
+                title: base.title,
+                subtitle: base.subtitle,
+                poster: base.poster,
+                backdrop: base.backdrop,
+                score: base.score,
+                textBadge: base.textBadge,
+                siteLabel: base.siteLabel,
+                kind: resolvedKind ?? base.kind,
+                year: base.year,
+                season: base.season,
+                episode: base.episode,
+                seasonHint: base.seasonHint,
+                tmdb: base.tmdb,
+                douban: base.douban,
+                siteEntry: base.siteEntry
+            )
+        }
         let item = FilmItem(sourceID: item.sourceID, id: item.id, title: item.title,
-                            kind: FilmItemKind(rawValue: kind.rawValue) ?? item.kind,
+                            kind: resolvedKind,
                             posterURL: item.posterURL, largePosterURL: item.largePosterURL,
-                            score: item.score, subtitle: item.subtitle, metadataSeed: item.metadataSeed,
-                            businessID: item.businessID, playbackTarget: item.playbackTarget)
+                            score: item.score, subtitle: item.subtitle,
+                            entry: updatedEntry)
         let model: FilmPlaybackModel
         do { model = try assembly.makeFilmPlayback(item: item, entrySurface: entrySurface) }
         catch {

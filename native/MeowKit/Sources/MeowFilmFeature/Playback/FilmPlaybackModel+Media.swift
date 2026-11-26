@@ -16,14 +16,9 @@ extension FilmPlaybackModel {
             requestedPreparation != nil {
             cancelPreparation()
         }
-        // Revocation is a business authorization change, not UI cancellation.
-        // A replacement can coexist with the old current until real output starts.
-        if let committed, value.current?.attemptID != committed.attempt.id,
+        if let committed, value.current?.id != committed.attempt.id,
            value.attempt?.id != committed.attempt.id {
             if committed.retired {
-                // The Node snapshot hides a disposed receipt but retains its
-                // existing feedback identity. The captured preparation still
-                // owns an accurate terminal event; no tombstone map is needed.
                 mediaState = FilmMediaState(); nativeStatus = nil
             } else if stoppingMedia == nil {
                 stoppingMedia = Task { [weak self, media] in
@@ -51,17 +46,21 @@ extension FilmPlaybackModel {
                 self?.cancellingPreparation = nil
             }
         }
-        // Retain the worker until the cancelled HTTP/decoder/lease physically drains.
     }
 
-    private func prepare(_ attempt: FilmPlaybackAttempt, sessionID: UUID) {
+    private func prepare(_ attempt: FilmAttemptInfo, sessionID: UUID) {
         guard preparingID != attempt.id, requestedPreparation?.attempt.id != attempt.id else { return }
         cancelPreparation()
         if committed == nil { nativeStatus = .preparing }
         guard let snapshot else { return }
-        let contentKind = snapshot.workInfo?.kind ?? snapshot.target.kind
-        requestedPreparation = .init(attempt: attempt, target: snapshot.target, contentKind: contentKind, sessionID: sessionID,
-                                     admission: mediaAdmission, generation: generation)
+        requestedPreparation = .init(
+            attempt: attempt,
+            targetID: snapshot.targetID,
+            contentKind: snapshot.work.kind,
+            sessionID: sessionID,
+            admission: mediaAdmission,
+            generation: generation
+        )
         if preparationWorker == nil {
             preparationWorker = Task { [weak self] in
                 guard let self else { return }
@@ -90,7 +89,6 @@ extension FilmPlaybackModel {
         do {
             try Task.checkCancellation()
             guard ownsPending(request) else { throw CancellationError() }
-            // Do not cancel an admitted receipt RPC; obtain its lease ID to release it.
             let value = try await Task { [transport] in
                 try await transport.call("session.attempt", parameters: .object([
                     "sessionId": .string(request.sessionID.uuidString.lowercased()),
@@ -128,9 +126,6 @@ extension FilmPlaybackModel {
                     request.terminal = true
                     feedback("media.failed", attemptID: request.attempt.id, code: Self.failure(preparationError).code)
                 } else {
-                    // An RPC/receipt failure is not a decoder failure or a watch
-                    // fact. A fresh explicit intent may request this receipt
-                    // again; unrelated SSE updates must not retry it in a loop.
                     blockedAttemptID = request.attempt.id
                 }
             }
@@ -192,21 +187,16 @@ extension FilmPlaybackModel {
 
     private func preservesPosition(_ request: Preparation) -> Bool {
         guard let current = committed, current.started, !current.retired,
-              current.target.id.utf8.elementsEqual(request.target.id.utf8) else { return false }
+              current.targetID.utf8.elementsEqual(request.targetID.utf8) else { return false }
         if request.contentKind == .movie && current.contentKind == .movie { return true }
-        let previousGlobal = current.attempt.candidate.position.globalEpisode ?? current.target.position.globalEpisode
-        let nextGlobal = request.attempt.candidate.position.globalEpisode ?? request.target.position.globalEpisode
-        if let beforeGlobal = previousGlobal, let afterGlobal = nextGlobal {
+        if let beforeGlobal = current.attempt.globalEpisode, let afterGlobal = request.attempt.globalEpisode {
             return beforeGlobal == afterGlobal
         }
-        let previousSeason = current.attempt.candidate.position.season ?? current.target.position.season
-        let previousEpisode = current.attempt.candidate.position.episode ?? current.target.position.episode
-        let nextSeason = request.attempt.candidate.position.season ?? request.target.position.season
-        let nextEpisode = request.attempt.candidate.position.episode ?? request.target.position.episode
-        if let previousSeason, let previousEpisode, let nextSeason, let nextEpisode {
-            return previousSeason == nextSeason && previousEpisode == nextEpisode
+        if let prevSeason = current.attempt.season, let prevEp = current.attempt.episode,
+           let nextSeason = request.attempt.season, let nextEp = request.attempt.episode {
+            return prevSeason == nextSeason && prevEp == nextEp
         }
-        return current.attempt.candidate.id.utf8.elementsEqual(request.attempt.candidate.id.utf8) ||
+        return (!current.attempt.candidateID.isEmpty && current.attempt.candidateID == request.attempt.candidateID) ||
             continuingFrom == current.attempt.id
     }
 
@@ -231,8 +221,6 @@ extension FilmPlaybackModel {
         case .started(let id):
             guard id == request.attempt.id, admits(request), !request.started else { return }
             cancelTemporaryRate()
-            // The shared owner's started callback is synchronous with its final
-            // cancelled-task fence and real output commit. No second commit shim.
             committed = request; request.didCommit = true; request.started = true
             if let state = request.state { mediaState = state }
             let startedMediaStatus: FilmPlaybackStatus = mediaState.buffering ? .buffering : mediaState.paused ? .paused : .playing

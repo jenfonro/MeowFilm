@@ -59,10 +59,11 @@ final class FilmPlaybackLibraryController: SettingsListViewController {
             }
         case .blocks:
             rows = library.blocks.enumerated().map { index, item in
-                SettingsListRow(
+                let detailParts = [item.sourceKey, item.detailID.display, item.lineID?.display].compactMap { $0 }
+                return SettingsListRow(
                     id: "film.blocks.\(index)",
                     title: item.targetID,
-                    detail: "\(item.sourceKey) · \(item.detailID.display) · \(item.lineID.display)",
+                    detail: detailParts.joined(separator: " · "),
                     accessory: .disclosure,
                     enabled: !owner.busy,
                     action: { [weak self] in

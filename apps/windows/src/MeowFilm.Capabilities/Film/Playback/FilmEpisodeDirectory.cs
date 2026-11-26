@@ -3,185 +3,184 @@ using System.Text.Json;
 
 namespace MeowFilm.Capabilities;
 
-// Presentation state only. The runtime remains the owner of directory validity and data.
+/// <summary>Presentation projection of the runtime-normalized directory snapshot.</summary>
 public sealed class FilmEpisodeDirectory : INotifyPropertyChanged
 {
+    private string mode = "";
     private JsonElement rows;
-    private long metadataRevision = -1;
+    private string currentPoster = "";
+    private string currentOverview = "";
     private FilmEpisodeItem? selectedEpisode;
     private FilmCandidateItem? selectedCandidate;
+
     public IReadOnlyList<FilmEpisodeItem> Episodes { get; private set; } = [];
     public IReadOnlyList<FilmCandidateItem> Candidates { get; private set; } = [];
     public double HorizontalOffset { get; set; }
     internal double VerticalOffset { get; set; }
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    internal void Apply(string poster, string overview, JsonElement nextRows, JsonElement nextSeasons,
-        JsonElement nextCandidates, long revision, bool raw, bool movie, string sourceName, string lineProvider,
-        bool refreshCandidates)
+    internal void Apply(string nextMode, JsonElement nextRows, string poster, string overview)
     {
-        bool rowsChanged = !FilmJson.Equal(rows, nextRows), metadataChanged = metadataRevision != revision;
-        bool candidatesChanged = false;
-        if (rowsChanged || metadataChanged || refreshCandidates)
+        bool sameInputs = mode == nextMode && currentPoster == poster &&
+            currentOverview == overview && FilmJson.Equal(rows, nextRows);
+        if (sameInputs) return;
+
+        mode = nextMode;
+        currentPoster = poster;
+        currentOverview = overview;
+        rows = FilmJson.Copy(nextRows);
+
+        if (nextMode == "movies")
         {
             var duplicates = new Dictionary<string, int>(StringComparer.Ordinal);
-            var nextChoices = FilmJson.Array(nextCandidates).Select(row =>
+            var previousChoices = Candidates.ToDictionary(item => item.Id, StringComparer.Ordinal);
+            var nextChoices = FilmJson.Array(rows).Select(row =>
             {
-                var candidate = (raw ? FilmCandidateItem.ReadBrowsing(row, sourceName, lineProvider) : FilmCandidateItem.Read(row)) with
-                { Image = poster, Overview = overview };
-                if (!movie) return candidate;
+                var candidate = FilmCandidateItem.Read(row, poster, overview);
                 int count = duplicates.GetValueOrDefault(candidate.DisplayLabel) + 1;
                 duplicates[candidate.DisplayLabel] = count;
-                return count == 1 ? candidate : candidate with { DisplayLabel = $"{candidate.DisplayLabel} ({count})" };
+                if (count > 1) candidate = candidate with { DisplayLabel = $"{candidate.DisplayLabel} ({count})" };
+                if (previousChoices.TryGetValue(candidate.Id, out var existing) && existing.SameDisplay(candidate))
+                    candidate = existing;
+                candidate.Select(FilmJson.Bool(row, "active"));
+                return candidate;
             }).ToArray();
-            var previousChoices = Candidates.ToDictionary(item => item.Id, StringComparer.Ordinal);
-            for (int index = 0; index < nextChoices.Length; index++)
-                if (previousChoices.TryGetValue(nextChoices[index].Id, out var existing) && existing.SameDisplay(nextChoices[index]))
-                    nextChoices[index] = existing;
+
+            selectedCandidate = nextChoices.FirstOrDefault(c => c.IsSelected);
             if (!Candidates.SequenceEqual(nextChoices, ReferenceEqualityComparer.Instance))
-            { Candidates = nextChoices; candidatesChanged = true; PropertyChanged?.Invoke(this, new(nameof(Candidates))); }
-        }
-        if (!rowsChanged && !metadataChanged)
-        {
-            if (candidatesChanged) UpdateCandidateFields();
+            {
+                Candidates = nextChoices;
+                PropertyChanged?.Invoke(this, new(nameof(Candidates)));
+            }
+            if (Episodes.Count > 0)
+            {
+                selectedEpisode?.Select(false);
+                selectedEpisode = null;
+                Episodes = [];
+                PropertyChanged?.Invoke(this, new(nameof(Episodes)));
+            }
             return;
         }
-        rows = FilmJson.Copy(nextRows);
-        metadataRevision = revision;
-        var details = new Dictionary<(int? Season, int? Episode), JsonElement>();
-        var posters = new Dictionary<int, string>();
-        foreach (var season in FilmJson.Array(nextSeasons))
+
+        if (nextMode is "episodes" or "files")
         {
-            int? number = FilmJson.Integer(season, "season_number") ?? FilmJson.Integer(season, "season");
-            if (number is null) continue;
-            posters[number.Value] = FilmJson.Text(season, "poster_path");
-            foreach (var episode in FilmJson.Array(season, "episodes"))
-                details[(number, FilmJson.Integer(episode, "episode_number") ?? FilmJson.Integer(episode, "episode"))] = episode;
+            var previous = Episodes.ToDictionary(item => item.Identity, StringComparer.Ordinal);
+            var next = FilmJson.Array(rows).Select(row =>
+            {
+                string identity = FilmJson.RequiredText(row, "id");
+                if (!previous.TryGetValue(identity, out var item)) item = new(identity);
+                item.Apply(row, poster);
+                return item;
+            }).ToArray();
+
+            selectedEpisode = next.FirstOrDefault(e => e.IsSelected);
+            if (!Episodes.SequenceEqual(next, ReferenceEqualityComparer.Instance))
+            {
+                Episodes = next;
+                PropertyChanged?.Invoke(this, new(nameof(Episodes)));
+            }
+            if (Candidates.Count > 0)
+            {
+                selectedCandidate?.Select(false);
+                selectedCandidate = null;
+                Candidates = [];
+                PropertyChanged?.Invoke(this, new(nameof(Candidates)));
+            }
+            return;
         }
-        var previous = Episodes.ToDictionary(item => item.Identity, StringComparer.Ordinal);
-        var next = FilmJson.Array(rows).Select(row =>
-        {
-            string identity = FilmEpisodeItem.IdentityOf(row);
-            if (!previous.TryGetValue(identity, out var item)) item = new(raw, identity);
-            int? season = FilmJson.Integer(row, "season") ?? FilmJson.Integer(row, "season_number");
-            int? episode = FilmJson.Integer(row, "episode") ?? FilmJson.Integer(row, "episode_number");
-            item.Apply(row, raw ? details.GetValueOrDefault((season, episode)) : row,
-                season is { } value ? posters.GetValueOrDefault(value, "") : "", poster, overview);
-            return item;
-        }).ToArray();
-        if (!Episodes.SequenceEqual(next)) { Episodes = next; PropertyChanged?.Invoke(this, new(nameof(Episodes))); }
-        UpdateCandidateFields();
-    }
 
-    private void UpdateCandidateFields()
-    {
-        var candidates = Candidates.ToDictionary(item => item.Id, StringComparer.Ordinal);
-        foreach (var item in Episodes)
-            item.SetCandidate(item.CandidateId is { } id ? candidates.GetValueOrDefault(id) : null);
-    }
-
-    internal void Select(FilmPlaybackPage page)
-    {
-        var nextEpisode = selectedEpisode is not null && Episodes.Contains(selectedEpisode) && page.Selected(selectedEpisode)
-            ? selectedEpisode : Episodes.FirstOrDefault(page.Selected);
-        if (!ReferenceEquals(nextEpisode, selectedEpisode))
+        if (Episodes.Count > 0)
         {
             selectedEpisode?.Select(false);
-            nextEpisode?.Select(true);
-            selectedEpisode = nextEpisode;
+            selectedEpisode = null;
+            Episodes = [];
+            PropertyChanged?.Invoke(this, new(nameof(Episodes)));
         }
-        var nextCandidate = Candidates.FirstOrDefault(item => item.Id == page.CurrentCandidateId);
-        if (!ReferenceEquals(nextCandidate, selectedCandidate))
+        if (Candidates.Count > 0)
         {
             selectedCandidate?.Select(false);
-            nextCandidate?.Select(true);
-            selectedCandidate = nextCandidate;
+            selectedCandidate = null;
+            Candidates = [];
+            PropertyChanged?.Invoke(this, new(nameof(Candidates)));
         }
     }
 }
 
 public sealed class FilmEpisodeItem : INotifyPropertyChanged
 {
-    private sealed record Display(int? Season, int? Number, int? GlobalEpisode, string? CandidateId,
-        string OriginalName, string Title, string Overview, string Image, string Duration, string Path);
-    private readonly bool raw;
-    private Display display = new(null, null, null, null, "", "", "", "", "", "");
+    private sealed record Display(int? Season, int? Number, string NumberLabel, string Title,
+        string FileName, string Overview, string Image, string Duration, string Path, string Quality);
+    private Display display = new(null, null, "", "", "", "", "", "", "", "");
     private bool selected;
-    private string quality = "", provider = "";
-    internal FilmEpisodeItem(bool raw, string identity) { this.raw = raw; Identity = identity; }
-    internal string Identity { get; }
-    public FilmPlaybackTarget? PlaybackTarget { get; private set; }
-    internal static string IdentityOf(JsonElement row) => FilmJson.RequiredText(row, "businessId");
 
-    internal void Apply(JsonElement row, JsonElement detail, string seasonPoster, string poster, string overview)
+    internal FilmEpisodeItem(string identity) { Identity = identity; }
+    public string Identity { get; }
+
+    internal void Apply(JsonElement row, string fallbackPoster)
     {
-        PlaybackTarget = raw ? FilmJson.FileTarget(FilmJson.Member(row, "playbackTarget")) :
-            FilmJson.Target(FilmJson.Member(row, "playbackTarget"));
-        PlaybackTarget.Validate();
-        int? season = FilmJson.Integer(row, "season") ?? FilmJson.Integer(row, "season_number");
-        int? episode = FilmJson.Integer(row, "episode") ?? FilmJson.Integer(row, "episode_number");
-        int? global = FilmJson.Integer(row, "globalEpisode");
-        if (!raw && (season is null or < 0 || episode is null or < 0 ||
-            (season == 0 || episode == 0) && global is not null))
-            throw new FilmPlaybackException("INVALID_RESPONSE");
-        string? candidateId = raw && FilmJson.Text(PlaybackTarget.Source ?? default, "candidateId") is { Length: > 0 } id
-            ? id : null;
-        string still = FilmJson.Text(detail, "still_path");
-        if (still.Length == 0) still = FilmJson.Text(row, "still_path");
-        var next = new Display(season, episode, global,
-            candidateId,
-            FilmJson.Text(row, "name"), FilmJson.Text(detail, "name"),
-            FilmJson.Text(detail, "overview") is { Length: > 0 } summary ? summary :
-                FilmJson.Text(row, "overview") is { Length: > 0 } original ? original : overview,
-            still.Length > 0 ? still : seasonPoster.Length > 0 ? seasonPoster : poster,
-            (FilmJson.Integer(detail, "runtime") ?? FilmJson.Integer(row, "runtime")) is > 0 and var minutes ? $"{minutes}分钟" : "",
-            FilmJson.Text(row, "path"));
-        if (display == next) return;
-        var old = display; display = next;
-        if (old.Season != next.Season) Changed(nameof(Season));
-        if (old.Number != next.Number) Changed(nameof(Number));
-        if (old.GlobalEpisode != next.GlobalEpisode) Changed(nameof(GlobalEpisode));
-        if (old.CandidateId != next.CandidateId) { Changed(nameof(CandidateId)); Changed(nameof(CanSelect)); }
-        if (old.OriginalName != next.OriginalName) Changed(nameof(OriginalName));
-        if (old.Title != next.Title) Changed(nameof(Title));
-        if (old.Overview != next.Overview) Changed(nameof(Overview));
-        if (old.Image != next.Image) Changed(nameof(Image));
-        if (old.Duration != next.Duration) Changed(nameof(Duration));
-        if (old.Path != next.Path) Changed(nameof(Path));
-        if (old.Number != next.Number || old.GlobalEpisode != next.GlobalEpisode ||
-            old.OriginalName != next.OriginalName || old.Title != next.Title)
+        int? season = FilmJson.Integer(row, "season");
+        int? episode = FilmJson.Integer(row, "episode");
+        string numberLabel = FilmJson.Text(row, "numberLabel");
+        string title = FilmJson.Text(row, "title");
+        string fileName = FilmJson.Text(row, "fileName");
+        string summary = FilmJson.Text(row, "summary");
+        string still = FilmJson.Text(row, "still");
+        string duration = FilmJson.Text(row, "duration");
+        string path = FilmJson.Text(row, "path");
+        string quality = FilmJson.Text(row, "quality");
+        bool active = FilmJson.Bool(row, "active");
+
+        var next = new Display(
+            season,
+            episode,
+            numberLabel,
+            title.Length > 0 ? title : fileName,
+            fileName,
+            summary,
+            still.Length > 0 ? still : fallbackPoster,
+            duration,
+            path,
+            quality);
+
+        if (display != next)
         {
-            Changed(nameof(EpisodeNumberLabel)); Changed(nameof(HasEpisodeTitle)); Changed(nameof(Label));
+            var old = display;
+            display = next;
+            if (old.Season != next.Season) Changed(nameof(Season));
+            if (old.Number != next.Number) Changed(nameof(Number));
+            if (old.NumberLabel != next.NumberLabel) Changed(nameof(EpisodeNumberLabel));
+            if (old.Title != next.Title) { Changed(nameof(Title)); Changed(nameof(Label)); }
+            if (old.FileName != next.FileName) Changed(nameof(OriginalName));
+            if (old.Overview != next.Overview) Changed(nameof(Overview));
+            if (old.Image != next.Image) Changed(nameof(Image));
+            if (old.Duration != next.Duration) { Changed(nameof(Duration)); Changed(nameof(HasDuration)); }
+            if (old.Path != next.Path) Changed(nameof(Path));
+            if (old.Quality != next.Quality) Changed(nameof(Quality));
         }
+
+        Select(active);
     }
-    internal void SetCandidate(FilmCandidateItem? candidate)
-    {
-        string nextQuality = candidate?.Quality ?? "", nextProvider = candidate?.Provider ?? "";
-        if (quality != nextQuality) { quality = nextQuality; Changed(nameof(Quality)); }
-        if (provider != nextProvider) { provider = nextProvider; Changed(nameof(Provider)); }
-    }
+
     internal void Select(bool value)
     {
         if (selected == value) return;
-        selected = value; Changed(nameof(IsSelected));
+        selected = value;
+        Changed(nameof(IsSelected));
     }
+
     public int? Season => display.Season;
     public int? Number => display.Number;
-    public int? GlobalEpisode => display.GlobalEpisode;
-    public string? CandidateId => display.CandidateId;
-    public string OriginalName => display.OriginalName;
+    public string OriginalName => display.FileName;
     public string Title => display.Title;
-    public string EpisodeNumberLabel => (Number ?? GlobalEpisode) is { } number ? $"第{number}集" : OriginalName;
-    public bool HasEpisodeTitle => Number is not null && Title.Length > 0;
-    public string Quality => quality;
-    public string Provider => provider;
+    public string EpisodeNumberLabel => display.NumberLabel.Length > 0 ? $"第{display.NumberLabel}集" : display.Title;
+    public string Label => display.Title;
+    public string Quality => display.Quality;
     public string Overview => display.Overview;
     public string Image => display.Image;
     public string Duration => display.Duration;
+    public bool HasDuration => display.Duration.Length > 0;
     public string Path => display.Path;
-    public string Label => Number is null && GlobalEpisode is null ? OriginalName :
-        HasEpisodeTitle ? $"{EpisodeNumberLabel} · {Title}" : EpisodeNumberLabel;
-    public bool CanSelect => raw ? CandidateId is not null : Season is >= 0 && Number is >= 0;
+    public bool CanSelect => Identity.Length > 0;
     public bool IsSelected => selected;
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed(string name) => PropertyChanged?.Invoke(this, new(name));

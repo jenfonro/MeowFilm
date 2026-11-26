@@ -226,6 +226,7 @@ final class MeowfilmNativeSettings: @unchecked Sendable {
                         "episodeRules": .array(encodeMatchRules(v.episodeRules)),
                         "movieRules": .array(encodeMatchRules(v.movieRules)),
                         "aggregateRegexRules": .array(v.aggregateRegexRules.map(RuntimeValue.string)),
+                        "seasonRules": .array(encodeMatchRules(v.seasonRules)),
                     ]),
                 ]),
                 revision: snap.revision
@@ -244,6 +245,29 @@ final class MeowfilmNativeSettings: @unchecked Sendable {
                         "keywords": .array(v.keywords.map(RuntimeValue.string)),
                         "siteCleanKeywords": .array(v.siteCleanKeywords.map(RuntimeValue.string)),
                     ]),
+                ]),
+                revision: snap.revision
+            )
+        case .videoSources:
+            let snap = try repository.readVideoSourcesSync()
+            guard snap.revision > 0 else { return .init(document: nil, revision: 0) }
+            let sources: [RuntimeValue] = snap.sources.enumerated().map { pos, v in
+                .object([
+                    "installationId": .string(v.installationId),
+                    "siteKey": .string(v.siteKey),
+                    "name": .string(v.name),
+                    "enabled": .bool(v.enabled),
+                    "homeVisible": .bool(v.homeVisible),
+                    "searchEnabled": .bool(v.searchEnabled),
+                    "aggregateImages": .bool(v.aggregateImages),
+                    "sortOrder": .number(Double(v.sortOrder)),
+                    "position": .number(Double(pos)),
+                ])
+            }
+            return .init(
+                document: .object([
+                    "version": .number(1),
+                    "sources": .array(sources),
                 ]),
                 revision: snap.revision
             )

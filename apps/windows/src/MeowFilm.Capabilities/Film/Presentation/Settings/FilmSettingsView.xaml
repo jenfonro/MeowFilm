@@ -291,6 +291,35 @@
          <ItemsControl x:Name="SearchResults" ItemsSource="{x:Bind SearchResultLines}" ItemTemplate="{StaticResource FilmSettings.RuleResultLine}" Margin="0,10,0,0" IsTabStop="False" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="搜索列表净化测试结果" />
         </StackPanel>
        </Border>
+       <Border Style="{StaticResource Settings.Section}">
+        <StackPanel>
+         <Grid Margin="0,0,0,8">
+          <Grid.ColumnDefinitions>
+           <ColumnDefinition Width="*" />
+           <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <Button Content="恢复默认规则" Tag="Season" Click="RestoreRules_Click" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复原始标题季度提取默认规则" Grid.Column="1" />
+          <Grid Grid.Column="0">
+           <TextBlock Text="原始标题季度提取设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
+          </Grid>
+         </Grid>
+         <local:FilmSettingsRuleEditor x:Name="SeasonEditor" Title="原始标题季度提取规则" Tag="season" HasReplacement="True" />
+         <TextBlock Text="基础片名（可空）" Margin="0,0,0,8" />
+         <TextBox x:Name="SeasonQuery" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="季度提取测试基础片名" />
+         <TextBlock Text="原始标题" Margin="0,12,0,8" />
+         <Grid>
+          <Grid.ColumnDefinitions>
+           <ColumnDefinition Width="*" />
+           <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <Button Content="测试" Tag="Season" Style="{StaticResource Settings.Button}" Margin="12,0,0,0" Click="TestRules_Click" AutomationProperties.Name="测试原始标题季度提取" Grid.Column="1" />
+          <Grid Grid.Column="0">
+           <TextBox x:Name="SeasonInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="季度提取测试原始标题" />
+          </Grid>
+         </Grid>
+         <ItemsControl x:Name="SeasonResults" ItemsSource="{x:Bind SeasonResultLines}" ItemTemplate="{StaticResource FilmSettings.RuleResultLine}" Margin="0,10,0,0" IsTabStop="False" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="原始标题季度提取测试结果" />
+        </StackPanel>
+       </Border>
       </StackPanel>
      </ContentControl>
      <ContentControl x:Name="SiteCleanHost" />

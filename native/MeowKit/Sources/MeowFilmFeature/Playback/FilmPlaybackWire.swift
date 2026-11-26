@@ -2,32 +2,54 @@ import Foundation
 import MeowDebug
 import MeowRuntime
 
-public enum FilmPlaybackKind: String, Sendable { case movie, tv, source, group }
-public enum FilmMetadataProvider: String, Sendable {
+public enum FilmPlaybackKind: String, Codable, Sendable { case movie, tv }
+
+public enum FilmMetadataProvider: String, Codable, Sendable {
     case tmdb, douban
     public var title: String { self == .tmdb ? "TMDB" : "豆瓣" }
 }
 
 /// Provider identifiers preserve their wire prototype, including numeric zero.
-/// Display text must not be round-tripped back into a playback/browse identity.
-public enum FilmPlaybackIdentifier: Hashable, Sendable {
+public enum FilmPlaybackIdentifier: Hashable, Codable, Sendable {
     case string(String)
     case number(Int64)
-    init(_ value: RuntimeValue) throws {
+
+    public init(_ value: RuntimeValue) throws {
         switch value {
-        case .string(let text): self = .string(text)
+        case .string(let text) where !text.isEmpty:
+            self = .string(text)
         case .number(let number) where number.isFinite &&
             abs(number) <= 9_007_199_254_740_991 && number.rounded(.towardZero) == number:
             self = .number(Int64(number))
-        default: throw FilmPlaybackError.invalidResponse
+        default:
+            throw FilmPlaybackError.invalidResponse
         }
     }
-    var value: RuntimeValue {
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let text = try? container.decode(String.self) {
+            self = .string(text)
+        } else {
+            self = .number(try container.decode(Int64.self))
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let text): try container.encode(text)
+        case .number(let num): try container.encode(num)
+        }
+    }
+
+    public var value: RuntimeValue {
         switch self {
         case .string(let text): .string(text)
         case .number(let number): .number(Double(number))
         }
     }
+
     public var display: String {
         switch self {
         case .string(let text): text
@@ -36,178 +58,200 @@ public enum FilmPlaybackIdentifier: Hashable, Sendable {
     }
 }
 
-/// Carries the selected identity, not a title-only request or a reconstructed search.
-public struct FilmPlaybackTarget: Equatable, Codable, Sendable {
-    public let value: RuntimeObject
-    public var id: String { value["id"]!.filmText! }
-    public var title: String { value["title"]!.filmText! }
-    public var kind: FilmPlaybackKind { FilmPlaybackKind(rawValue: value["kind"]!.filmText!)! }
-    public var metadataProvider: FilmMetadataProvider? {
-        value["metadataProvider"]?.filmText.flatMap(FilmMetadataProvider.init(rawValue:))
-    }
-    public var position: FilmEpisodePosition {
-        .init(season: value["season"]?.filmInteger, episode: value["episode"]?.filmInteger,
-              globalEpisode: value["globalEpisode"]?.filmInteger)
-    }
+public struct FilmTmdbRef: Hashable, Codable, Sendable {
+    public let kind: String
+    public let id: Int
+    public init(kind: String, id: Int) { self.kind = kind; self.id = id }
+}
 
-    public init(id: String, kind: FilmPlaybackKind, title: String, year: Int? = nil,
-                metadataProvider: FilmMetadataProvider? = nil, metadataID: String? = nil,
-                position: FilmEpisodePosition = .init(), source: RuntimeObject? = nil,
-                members: [RuntimeValue]? = nil) {
-        var value: RuntimeObject = ["id": .string(id), "kind": .string(kind.rawValue), "title": .string(title)]
-        value["year"] = year.map { .number(Double($0)) }
-        value["metadataProvider"] = metadataProvider.map { .string($0.rawValue) }
-        value["metadataId"] = metadataID.map(RuntimeValue.string)
-        for (key, field) in position.value { value[key] = field }
-        value["source"] = source.map(RuntimeValue.object)
-        value["members"] = members.map(RuntimeValue.array)
-        self.value = value
-    }
+public struct FilmDoubanRef: Hashable, Codable, Sendable {
+    public let kind: String
+    public let id: String
+    public init(kind: String, id: String) { self.kind = kind; self.id = id }
+}
 
-    public init(from decoder: any Decoder) throws {
-        let bytes = try decoder.singleValueContainer().decode(Data.self)
-        try self.init(RuntimeJSON.decode(bytes))
-    }
+public struct FilmSiteEntryRef: Hashable, Codable, Sendable {
+    public let sourceKey: String
+    public let installationId: String?
+    public let siteKey: String?
+    public let detailId: FilmPlaybackIdentifier
+    public let rawTitle: String
+    public let remark: String
+    public let poster: String
 
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(RuntimeJSON.encode(.object(value)))
-    }
-
-    public init(_ value: RuntimeValue) throws {
-        let object = try value.filmRequiredObject()
-        _ = try object.filmString("id"); _ = try object.filmString("title")
-        guard FilmPlaybackKind(rawValue: try object.filmString("kind")) != nil else {
-            throw FilmPlaybackError.invalidResponse
-        }
-        self.value = object
+    public init(sourceKey: String, installationId: String? = nil, siteKey: String? = nil,
+                detailId: FilmPlaybackIdentifier, rawTitle: String = "", remark: String = "", poster: String = "") {
+        self.sourceKey = sourceKey
+        self.installationId = installationId
+        self.siteKey = siteKey
+        self.detailId = detailId
+        self.rawTitle = rawTitle
+        self.remark = remark
+        self.poster = poster
     }
 }
 
-public struct FilmEpisodePosition: Hashable, Sendable {
+/// Unified lightweight card entry shared across Home, Category, Search, Favorites, and History.
+public struct FilmEntry: Hashable, Codable, Sendable {
+    public let targetId: String
+    public let keyword: String
+    public let title: String
+    public let subtitle: String
+    public let poster: String
+    public let backdrop: String
+    public let score: String
+    public let textBadge: String
+    public let siteLabel: String
+    public let kind: FilmItemKind?
+    public let year: Int?
     public let season: Int?
     public let episode: Int?
-    public let globalEpisode: Int?
-    public init(season: Int? = nil, episode: Int? = nil, globalEpisode: Int? = nil) {
-        self.season = season; self.episode = episode; self.globalEpisode = globalEpisode
-    }
-    public var value: RuntimeObject {
-        var fields = RuntimeObject()
-        fields["season"] = season.map { .number(Double($0)) }
-        fields["episode"] = episode.map { .number(Double($0)) }
-        fields["globalEpisode"] = globalEpisode.map { .number(Double($0)) }
-        return fields
-    }
-}
+    public let seasonHint: Int?
+    public let tmdb: FilmTmdbRef?
+    public let douban: FilmDoubanRef?
+    public let siteEntry: FilmSiteEntryRef?
 
-public struct FilmPlaybackSource: Equatable, Sendable {
-    public let value: RuntimeObject
-    public var key: String? { value["key"]?.filmText }
-    public var name: String { value["name"]?.filmText ?? "" }
-    public var detailID: RuntimeValue? { value["detailId"] }
-
-    public init(key: String? = nil, engine: String, installationID: String, siteID: String,
-                revision: Int64? = nil, generation: Int64, name: String,
-                enabled: Bool = true, searchable: Bool = true) {
-        var value: RuntimeObject = [
-            "engine": .string(engine), "installationId": .string(installationID),
-            "siteId": .string(siteID), "generation": .number(Double(generation)), "name": .string(name),
-            "enabled": .bool(enabled), "searchable": .bool(searchable),
-        ]
-        value["key"] = key.map(RuntimeValue.string)
-        value["revision"] = revision.map { .number(Double($0)) }
-        self.value = value
+    public init(targetId: String, keyword: String, title: String, subtitle: String = "",
+                poster: String = "", backdrop: String = "", score: String = "",
+                textBadge: String = "", siteLabel: String = "", kind: FilmItemKind? = nil,
+                year: Int? = nil, season: Int? = nil, episode: Int? = nil, seasonHint: Int? = nil,
+                tmdb: FilmTmdbRef? = nil, douban: FilmDoubanRef? = nil, siteEntry: FilmSiteEntryRef? = nil) {
+        self.targetId = targetId
+        self.keyword = keyword
+        self.title = title
+        self.subtitle = subtitle
+        self.poster = poster
+        self.backdrop = backdrop
+        self.score = score
+        self.textBadge = textBadge
+        self.siteLabel = siteLabel
+        self.kind = kind
+        self.year = year
+        self.season = season
+        self.episode = episode
+        self.seasonHint = seasonHint
+        self.tmdb = tmdb
+        self.douban = douban
+        self.siteEntry = siteEntry
     }
 
-    init(_ value: RuntimeValue) throws {
-        let object = try value.filmRequiredObject()
-        _ = try object.filmString("key")
-        _ = try object.filmString("name")
-        let engine = try object.filmString("engine")
-        if engine == "cat" || engine == "source" {
-            _ = try object.filmString("installationId")
-            _ = try object.filmString("siteId")
-        } else if engine != "pan" {
-            throw FilmPlaybackError.invalidResponse
+    public init(value: RuntimeValue) throws {
+        let fields = try value.filmRequiredObject()
+        let titleText = fields["title"]?.filmRuleDisplayText ?? ""
+        let keywordText = fields["keyword"]?.filmRuleDisplayText ?? titleText
+        let targetText = fields["targetId"]?.filmRuleDisplayText ?? ""
+        guard !titleText.isEmpty, !targetText.isEmpty else { throw FilmPlaybackError.invalidResponse }
+
+        let parsedKind = fields["kind"]?.filmText.flatMap(FilmItemKind.init(rawValue:))
+
+        var parsedTmdb: FilmTmdbRef?
+        if let tmdbObj = fields["tmdb"]?.filmObject,
+           let tk = tmdbObj["kind"]?.filmText, (tk == "movie" || tk == "tv"),
+           let tid = tmdbObj["id"]?.filmInteger, tid > 0 {
+            parsedTmdb = FilmTmdbRef(kind: tk, id: tid)
         }
-        if let detailID = object["detailId"] { _ = try FilmPlaybackIdentifier(detailID) }
-        // A manual share is a pan resource, not an installed script. Its
-        // provider is candidate.provider; a display name is never a pan alias.
-        self.value = object
+
+        var parsedDouban: FilmDoubanRef?
+        if let doubanObj = fields["douban"]?.filmObject,
+           let dk = doubanObj["kind"]?.filmText, (dk == "movie" || dk == "tv"),
+           let did = doubanObj["id"]?.filmScalar, !did.isEmpty {
+            parsedDouban = FilmDoubanRef(kind: dk, id: did)
+        }
+
+        var parsedSite: FilmSiteEntryRef?
+        if let siteObj = fields["siteEntry"]?.filmObject,
+           let sourceKey = siteObj["sourceKey"]?.filmText, !sourceKey.isEmpty,
+           let detailRaw = siteObj["detailId"], let detailId = try? FilmPlaybackIdentifier(detailRaw) {
+            parsedSite = FilmSiteEntryRef(
+                sourceKey: sourceKey,
+                installationId: siteObj["installationId"]?.filmText.flatMap { $0.isEmpty ? nil : $0 },
+                siteKey: siteObj["siteKey"]?.filmText.flatMap { $0.isEmpty ? nil : $0 },
+                detailId: detailId,
+                rawTitle: siteObj["rawTitle"]?.filmRuleDisplayText ?? "",
+                remark: siteObj["remark"]?.filmRuleDisplayText ?? "",
+                poster: siteObj["poster"]?.filmRuleDisplayText ?? ""
+            )
+        }
+
+        self.init(
+            targetId: targetText,
+            keyword: keywordText.isEmpty ? titleText : keywordText,
+            title: titleText,
+            subtitle: fields["subtitle"]?.filmRuleDisplayText ?? "",
+            poster: fields["poster"]?.filmRuleDisplayText ?? "",
+            backdrop: fields["backdrop"]?.filmRuleDisplayText ?? "",
+            score: fields["score"]?.filmRuleDisplayText ?? "",
+            textBadge: fields["textBadge"]?.filmRuleDisplayText ?? "",
+            siteLabel: fields["siteLabel"]?.filmRuleDisplayText ?? "",
+            kind: parsedKind,
+            year: fields["year"]?.filmInteger,
+            season: fields["season"]?.filmInteger,
+            episode: fields["episode"]?.filmInteger,
+            seasonHint: fields["seasonHint"]?.filmInteger,
+            tmdb: parsedTmdb,
+            douban: parsedDouban,
+            siteEntry: parsedSite
+        )
+    }
+
+    public var wireValue: RuntimeValue {
+        var fields: RuntimeObject = [
+            "targetId": .string(targetId),
+            "keyword": .string(keyword),
+            "title": .string(title),
+            "subtitle": .string(subtitle),
+            "poster": .string(poster),
+            "backdrop": .string(backdrop),
+            "score": .string(score),
+            "textBadge": .string(textBadge),
+            "siteLabel": .string(siteLabel),
+        ]
+        if let kind { fields["kind"] = .string(kind.rawValue) }
+        if let year { fields["year"] = .number(Double(year)) }
+        if let season { fields["season"] = .number(Double(season)) }
+        if let episode { fields["episode"] = .number(Double(episode)) }
+        if let seasonHint { fields["seasonHint"] = .number(Double(seasonHint)) }
+        if let tmdb {
+            fields["tmdb"] = .object(["kind": .string(tmdb.kind), "id": .number(Double(tmdb.id))])
+        }
+        if let douban {
+            fields["douban"] = .object(["kind": .string(douban.kind), "id": .string(douban.id)])
+        }
+        if let siteEntry {
+            var siteObj: RuntimeObject = [
+                "sourceKey": .string(siteEntry.sourceKey),
+                "detailId": siteEntry.detailId.value,
+                "rawTitle": .string(siteEntry.rawTitle),
+                "remark": .string(siteEntry.remark),
+                "poster": .string(siteEntry.poster),
+            ]
+            if let inst = siteEntry.installationId { siteObj["installationId"] = .string(inst) }
+            if let sk = siteEntry.siteKey { siteObj["siteKey"] = .string(sk) }
+            fields["siteEntry"] = .object(siteObj)
+        }
+        return .object(fields)
     }
 }
 
 public struct FilmPlaybackRequest: Sendable {
-    public let target: FilmPlaybackTarget
-    public let sources: [FilmPlaybackSource]
-    public let query: String?
-    public let metadata: RuntimeValue?
+    public let entry: FilmEntry
     public let searchReference: RuntimeValue?
-    public let entrySurface: String?
-    public var restoreOnly = false
-    public var browsing: RuntimeObject?
-    public private(set) var resumeTarget: FilmPlaybackTarget?
+    public var restoreOnly: Bool
 
-    public init(target: FilmPlaybackTarget, sources: [FilmPlaybackSource], query: String? = nil,
-                metadata: RuntimeValue? = nil, searchReference: RuntimeValue? = nil,
-                entrySurface: String? = nil) {
-        self.target = target; self.sources = sources; self.query = query
-        self.metadata = metadata; self.searchReference = searchReference
-        self.entrySurface = entrySurface
-        resumeTarget = nil
+    public init(entry: FilmEntry, searchReference: RuntimeValue? = nil, restoreOnly: Bool = false) {
+        self.entry = entry
+        self.searchReference = searchReference
+        self.restoreOnly = restoreOnly
     }
 
     var value: RuntimeValue {
         var fields: RuntimeObject = [
-            "platform": .string("ios"), "target": .object(target.value),
-            "sources": .array(sources.map { .object($0.value) }),
+            "platform": .string("ios"),
+            "entry": entry.wireValue,
         ]
-        fields["query"] = query.map(RuntimeValue.string)
-        fields["metadata"] = metadata
-        fields["searchReference"] = searchReference
-        fields["resumeTarget"] = resumeTarget.map { .object($0.value) }
-        fields["entrySurface"] = entrySurface.map(RuntimeValue.string)
-        if restoreOnly {
-            fields["restoreOnly"] = .bool(true)
-            fields["browsing"] = browsing.map(RuntimeValue.object)
-        }
+        if let searchReference { fields["searchReference"] = searchReference }
+        if restoreOnly { fields["restoreOnly"] = .bool(true) }
         return .object(fields)
-    }
-
-    mutating func restoreBrowsing(_ snapshot: FilmPlaybackSnapshot) {
-        restoreOnly = true
-        var fields: RuntimeObject = [
-            "sourceId": snapshot.browsing.sourceID.map(RuntimeValue.string) ?? .null,
-            "metadataSourceId": snapshot.metadataSourceID.map(RuntimeValue.string) ?? .null,
-        ]
-        fields["lineId"] = snapshot.browsing.lineID?.value
-        fields["season"] = snapshot.browsing.season.map { .number(Double($0)) }
-        if let selected = snapshot.sources.first(where: { $0.id == snapshot.browsing.sourceID }) {
-            fields["source"] = .object(selected.source.value)
-        }
-        browsing = fields
-    }
-
-    func retargeted(_ target: FilmPlaybackTarget, errorCode: String? = nil) -> Self {
-        if self.target.metadataProvider != nil, searchReference == nil {
-            // Keep the metadata entry and its seed separate from the current
-            // coordinate or exact source selected by the user.
-            var request = self
-            let waitingGroup = self.target.metadataProvider == .douban && errorCode != "SOURCE_NOT_FOUND" &&
-                resumeTarget == nil && target.kind == .group && target.value["source"] == nil &&
-                target.value["members"] == .array([])
-            // Only Node may create the empty waiting group from the seed.
-            request.resumeTarget = target == self.target || waitingGroup ? nil : target
-            return request
-        }
-        let sameMetadata = target.kind == self.target.kind && target.metadataProvider == self.target.metadataProvider &&
-            target.value["metadataId"] == self.target.value["metadataId"]
-        var request = Self(target: target, sources: sources, query: query,
-                     metadata: sameMetadata ? metadata : nil,
-                     searchReference: searchReference, entrySurface: entrySurface)
-        if searchReference != nil { request.resumeTarget = target }
-        request.restoreOnly = restoreOnly; request.browsing = browsing
-        return request
     }
 }
 
@@ -225,9 +269,10 @@ public enum FilmPanProvider: String, CaseIterable, Sendable {
 }
 
 public enum FilmResourceQuality: String, CaseIterable, Sendable {
-    case hdr = "4k_hdr", highFrameRate = "4k_fps", uhd = "4k", fullHD = "1080p", hd = "720p"
+    case uhd8K = "8k", hdr = "4k_hdr", highFrameRate = "4k_fps", uhd = "4k", fullHD = "1080p", hd = "720p"
     public var title: String {
         switch self {
+        case .uhd8K: "8K"
         case .hdr: "4K HDR"
         case .highFrameRate: "4K 60帧"
         case .uhd: "4K"
@@ -307,442 +352,413 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
     }
 }
 
-public struct FilmPlaybackCandidate: Equatable, Sendable {
-    public let businessID: String
-    public let playbackTarget: FilmPlaybackTarget
+public struct FilmSelectionOption: Equatable, Sendable {
     public let id: String
-    public let source: FilmPlaybackSource
-    public let lineID: FilmPlaybackIdentifier
-    public let lineLabel: String
-    /// Unknown labels stay labels. Only this explicit field classifies a pan family.
+    public let label: String
+    public let kind: String
+    public let subtitle: String
+    public let season: Int?
     public let provider: String?
-    public let name: String
-    public let path: String?
-    public let position: FilmEpisodePosition
-    public let quality: String?
-    public let resolution: String?
-    public let fps: Double?
-    public let codec: String?
-
-    init(_ value: RuntimeValue) throws {
-        let fields = try value.filmRequiredObject()
-        businessID = try fields.filmString("businessId")
-        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
-        id = try fields.filmString("id")
-        source = try FilmPlaybackSource(fields.filmValue("source"))
-        lineID = try FilmPlaybackIdentifier(fields.filmValue("lineId"))
-        lineLabel = try fields.filmString("lineLabel")
-        provider = fields["provider"]?.filmText
-        name = try fields.filmString("name"); path = fields["path"]?.filmText
-        quality = fields["quality"]?.filmText
-        resolution = fields["resolution"]?.filmText
-        fps = fields["fps"]?.filmNumber
-        codec = fields["codec"]?.filmText
-        position = .init(season: fields["season"]?.filmInteger, episode: fields["episode"]?.filmInteger,
-                         globalEpisode: fields["globalEpisode"]?.filmInteger)
-    }
-}
-
-public struct FilmPlaybackSourceRow: Equatable, Sendable {
-    public let businessID: String
-    public let playbackTarget: FilmPlaybackTarget
-    public let id: String
-    public let title: String
-    public let source: FilmPlaybackSource
-    public let state: String
+    public let state: String?
     public let error: String?
-    init(_ value: RuntimeValue) throws {
-        let fields = try value.filmRequiredObject()
-        businessID = try fields.filmString("businessId")
-        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
-        id = try fields.filmString("id"); title = try fields.filmString("title")
-        source = try FilmPlaybackSource(fields.filmValue("source"))
-        state = try fields.filmString("state"); error = fields["error"]?.filmText
+
+    public var displayTitle: String {
+        subtitle.isEmpty ? label : "\(label) · \(subtitle)"
     }
 }
 
-public struct FilmPlaybackMetadataSource: Equatable, Sendable {
-    public let businessID: String
-    public let playbackTarget: FilmPlaybackTarget
-    public let id: String
-    public let provider: FilmMetadataProvider
-    public let metadataID: FilmPlaybackIdentifier
+public struct FilmWorkSnapshot: Equatable, Sendable {
+    public let targetID: String
+    public let keyword: String
     public let kind: FilmPlaybackKind
     public let title: String
-    public let seasons: [RuntimeValue]?
+    public let subtitle: String
+    public let poster: String
+    public let backdrop: String
+    public let logo: String
+    public let year: String
+    public let countries: String
+    public let duration: String
+    public let seasonCount: Int?
+    public let episodeCount: Int?
+    public let genres: [String]
+    public let score: String
+    public let scoreProvider: String
+    public let directors: String
+    public let cast: [FilmCastMember]
+    public let summary: String
+    public let tmdb: FilmTmdbRef?
+    public let douban: FilmDoubanRef?
+    public let relatedItems: [FilmItem]
 
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
-        businessID = try fields.filmString("businessId")
-        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
-        id = try fields.filmString("id")
-        guard let provider = FilmMetadataProvider(rawValue: try fields.filmString("provider")),
-              let kind = FilmPlaybackKind(rawValue: try fields.filmString("kind")) else {
-            throw FilmPlaybackError.invalidResponse
-        }
-        self.provider = provider; self.kind = kind
-        metadataID = try FilmPlaybackIdentifier(fields.filmValue("metadataId"))
-        title = try fields.filmString("title")
-        seasons = fields["seasons"]?.filmArray
-    }
-}
+        targetID = fields["targetId"]?.filmText ?? ""
+        keyword = fields["keyword"]?.filmText ?? ""
+        kind = fields["kind"]?.filmText == "movie" ? .movie : .tv
+        title = fields["title"]?.filmText ?? ""
+        subtitle = fields["subtitle"]?.filmText ?? ""
+        poster = fields["poster"]?.filmText ?? ""
+        backdrop = fields["backdrop"]?.filmText ?? ""
+        logo = fields["logo"]?.filmText ?? ""
+        year = fields["year"]?.filmText ?? ""
+        countries = fields["countries"]?.filmText ?? ""
+        duration = fields["duration"]?.filmText ?? ""
+        seasonCount = fields["seasonCount"]?.filmInteger
+        episodeCount = fields["episodeCount"]?.filmInteger
+        genres = (fields["genres"]?.filmArray ?? []).compactMap { $0.filmText }.filter { !$0.isEmpty }
+        score = fields["score"]?.filmText ?? ""
+        scoreProvider = fields["scoreProvider"]?.filmText ?? ""
+        directors = fields["directors"]?.filmText ?? ""
+        summary = fields["summary"]?.filmText ?? ""
 
-public struct FilmPlaybackLine: Equatable, Sendable {
-    public let businessID: String
-    public let playbackTarget: FilmPlaybackTarget
-    public let id: FilmPlaybackIdentifier
-    public let label: String
-    public let provider: String?
-    init(_ value: RuntimeValue) throws {
-        let fields = try value.filmRequiredObject()
-        businessID = try fields.filmString("businessId")
-        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
-        id = try FilmPlaybackIdentifier(fields.filmValue("id")); label = try fields.filmString("label")
-        provider = fields["provider"]?.filmText
-    }
-}
-
-public struct FilmPlaybackFile: Equatable, Sendable {
-    public let businessID: String
-    public let playbackTarget: FilmPlaybackTarget
-    public let id: String
-    public let candidateID: String?
-    public let name: String
-    public let path: String?
-    public let position: FilmEpisodePosition
-    public let quality: String?
-    public let resolution: String?
-    public let fps: Double?
-    public let codec: String?
-    init(_ value: RuntimeValue) throws {
-        let fields = try value.filmRequiredObject()
-        businessID = try fields.filmString("businessId")
-        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
-        id = try fields.filmString("id"); name = try fields.filmString("name")
-        candidateID = fields["candidateId"]?.filmText; path = fields["path"]?.filmText
-        quality = fields["quality"]?.filmText; resolution = fields["resolution"]?.filmText
-        fps = fields["fps"]?.filmNumber; codec = fields["codec"]?.filmText
-        position = .init(season: fields["season"]?.filmInteger, episode: fields["episode"]?.filmInteger,
-                         globalEpisode: fields["globalEpisode"]?.filmInteger)
-    }
-}
-
-public struct FilmPlaybackBrowsing: Equatable, Sendable {
-    public let sourceID: String?
-    public let lineID: FilmPlaybackIdentifier?
-    public let season: Int?
-    public let loading: Bool
-    public let refreshing: Bool
-    public let error: String?
-    public let lines: [FilmPlaybackLine]
-    public let files: [FilmPlaybackFile]
-    public let originalFiles: [FilmPlaybackFile]
-    init(sourceID: String?, lineID: FilmPlaybackIdentifier?, season: Int?,
-         lines: [FilmPlaybackLine], loading: Bool = true, refreshing: Bool = false,
-         error: String? = nil, files: [FilmPlaybackFile] = [], originalFiles: [FilmPlaybackFile] = []) {
-        self.sourceID = sourceID; self.lineID = lineID; self.season = season
-        self.lines = lines; self.loading = loading; self.error = error
-        self.refreshing = refreshing; self.files = files; self.originalFiles = originalFiles
-    }
-    init(_ value: RuntimeValue) throws {
-        let fields = try value.filmRequiredObject()
-        sourceID = fields["sourceId"]?.filmText
-        lineID = try fields.filmOptional("lineId").map(FilmPlaybackIdentifier.init)
-        season = fields["season"]?.filmInteger
-        loading = try fields.filmBool("loading"); error = fields["error"]?.filmText
-        if fields["refreshing"] != nil { refreshing = try fields.filmBool("refreshing") }
-        else { refreshing = false }
-        lines = try fields.filmArray("lines").map(FilmPlaybackLine.init)
-        // A failed current list must never expose a previous list's playable rows.
-        if error != nil {
-            files = []; originalFiles = []
+        if let tmdbObj = fields["tmdb"]?.filmObject,
+           let tk = tmdbObj["kind"]?.filmText, (tk == "movie" || tk == "tv"),
+           let tid = tmdbObj["id"]?.filmInteger, tid > 0 {
+            tmdb = FilmTmdbRef(kind: tk, id: tid)
         } else {
-            files = try fields.filmArray("episodes").map(FilmPlaybackFile.init)
-            originalFiles = try fields["originalEpisodes"].map { value in
-                guard let values = value.filmArray else { throw FilmPlaybackError.invalidResponse }
-                return try values.map(FilmPlaybackFile.init)
-            } ?? []
+            tmdb = nil
+        }
+
+        if let doubanObj = fields["douban"]?.filmObject,
+           let dk = doubanObj["kind"]?.filmText, (dk == "movie" || dk == "tv"),
+           let did = doubanObj["id"]?.filmScalar, !did.isEmpty {
+            douban = FilmDoubanRef(kind: dk, id: did)
+        } else {
+            douban = nil
+        }
+
+        cast = (fields["cast"]?.filmArray ?? []).compactMap { raw -> FilmCastMember? in
+            guard let row = raw.filmObject, let name = row["name"]?.filmText, !name.isEmpty else { return nil }
+            let id = row["id"]?.filmScalar ?? name
+            let role = row["role"]?.filmText ?? ""
+            let avatarURL = FilmPlaybackPresentation.artwork(row["avatar"])
+            return FilmCastMember(id: id, name: name, role: role, portraitURL: avatarURL)
+        }
+
+        relatedItems = (fields["relatedCards"]?.filmArray ?? []).compactMap { raw -> FilmItem? in
+            guard let row = raw.filmObject,
+                  let id = row["id"]?.filmText, !id.isEmpty,
+                  let entry = try? FilmEntry(value: raw) else { return nil }
+            return FilmItem(
+                sourceID: entry.tmdb != nil ? "tmdb" : entry.douban != nil ? "douban" : "related",
+                id: entry.tmdb.map { String($0.id) } ?? entry.douban?.id ?? id,
+                title: entry.title,
+                kind: entry.kind,
+                posterURL: FilmPlaybackPresentation.artwork(.string(entry.poster)),
+                score: entry.score,
+                subtitle: entry.subtitle,
+                entry: entry
+            )
         }
     }
 }
 
-public struct FilmPlaybackEpisode: Equatable, Sendable {
-    public let raw: RuntimeObject
-    public let position: FilmEpisodePosition
-    public let name: String?
-    public let businessID: String
-    public let playbackTarget: FilmPlaybackTarget
-    public var displayID: String { businessID }
-    init(_ value: RuntimeValue) throws {
-        raw = try value.filmRequiredObject()
-        businessID = try raw.filmString("businessId")
-        playbackTarget = try FilmPlaybackTarget(raw.filmValue("playbackTarget"))
-        guard let season = raw["season"]?.filmInteger, let episode = raw["episode"]?.filmInteger else {
-            throw FilmPlaybackError.invalidResponse
-        }
-        position = .init(season: season, episode: episode, globalEpisode: raw["globalEpisode"]?.filmInteger)
-        name = raw["name"]?.filmText
-    }
-}
-
-public struct FilmPlaybackAttempt: Equatable, Sendable {
+public struct FilmDirectoryItem: Equatable, Sendable {
     public let id: String
-    public let candidate: FilmPlaybackCandidate
-    public let prepareOnly: Bool
-    public let position: Double
-    public let paused: Bool
+    public let index: Int
+    public let season: Int?
+    public let episode: Int?
+    public let numberLabel: String
+    public let title: String
+    public let fileName: String
+    public let path: String
+    public let sourceLabel: String
+    public let summary: String
+    public let still: String
+    public let duration: String
+    public let airDate: String
+    public let quality: String
+    public let active: Bool
+
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
-        id = try fields.filmString("id"); candidate = try FilmPlaybackCandidate(fields.filmValue("candidate"))
-        prepareOnly = try fields.filmBool("prepareOnly")
-        position = try fields.filmNumber("position"); paused = try fields.filmBool("paused")
+        id = try fields.filmString("id")
+        index = fields["index"]?.filmInteger ?? 0
+        season = fields["season"]?.filmInteger
+        episode = fields["episode"]?.filmInteger
+        numberLabel = fields["numberLabel"]?.filmText ?? ""
+        title = fields["title"]?.filmRuleDisplayText ?? ""
+        fileName = fields["fileName"]?.filmRuleDisplayText ?? ""
+        path = fields["path"]?.filmRuleDisplayText ?? ""
+        sourceLabel = fields["sourceLabel"]?.filmText ?? ""
+        summary = fields["summary"]?.filmText ?? ""
+        still = fields["still"]?.filmText ?? ""
+        duration = fields["duration"]?.filmText ?? ""
+        airDate = fields["airDate"]?.filmText ?? ""
+        quality = fields["quality"]?.filmText ?? ""
+        active = fields["active"] == .bool(true)
     }
+
+    public var isPlayable: Bool { !id.hasPrefix("raw:") }
 }
 
-public struct FilmPlaybackCurrent: Equatable, Sendable {
-    public let attemptID: String
-    public let candidate: FilmPlaybackCandidate
+public struct FilmPlayerOption: Equatable, Sendable {
+    public let key: String
+    public let label: String
+    public let active: Bool
+}
+
+public struct FilmAttemptInfo: Equatable, Sendable {
+    public let id: String
+    public let candidateID: String
+    public let prepareOnly: Bool
     public let position: Double
     public let duration: Double
     public let paused: Bool
-    init(_ value: RuntimeValue) throws {
-        let fields = try value.filmRequiredObject()
-        attemptID = try fields.filmString("attemptId")
-        candidate = try FilmPlaybackCandidate(fields.filmValue("candidate"))
-        position = try fields.filmNumber("position"); duration = try fields.filmNumber("duration")
-        paused = try fields.filmBool("paused")
-    }
-}
-
-public struct FilmPlaybackMetadataSupplement: Equatable, Sendable {
-    public let provider: FilmMetadataProvider
-    public let metadataID: FilmPlaybackIdentifier
-    public let kind: FilmPlaybackKind
-    public let metadata: RuntimeValue
-
-    init(_ value: RuntimeValue) throws {
-        let fields = try value.filmRequiredObject()
-        guard try fields.filmString("provider") == "tmdb",
-              let kind = FilmPlaybackKind(rawValue: try fields.filmString("kind")),
-              kind == .movie || kind == .tv else { throw FilmPlaybackError.invalidResponse }
-        provider = .tmdb
-        metadataID = try FilmPlaybackIdentifier(fields.filmValue("metadataId"))
-        self.kind = kind
-        metadata = try fields.filmValue("metadata")
-    }
-}
-
-public struct FilmPlaybackWorkInfo: Equatable, Sendable {
-    public let provider: FilmMetadataProvider
-    public let metadataID: FilmPlaybackIdentifier
-    public let kind: FilmPlaybackKind
     public let title: String
-    public let summary: String
-    public let seasonCount: Int?
-    public let episodeCount: Int?
-    public let metadata: RuntimeObject
+    public let season: Int?
+    public let episode: Int?
+    public let globalEpisode: Int?
+    public let episodeLabel: String
+    public let sourceLabel: String
+    public let quality: String
+    public let provider: String?
 
-    init(_ value: RuntimeValue) throws {
+    init?(_ value: RuntimeValue?, isCurrent: Bool) throws {
+        guard let value, value != .null else { return nil }
         let fields = try value.filmRequiredObject()
-        guard let provider = FilmMetadataProvider(rawValue: try fields.filmString("provider")),
-              let kind = FilmPlaybackKind(rawValue: try fields.filmString("kind")),
-              kind == .movie || kind == .tv else { throw FilmPlaybackError.invalidResponse }
-        self.provider = provider; self.kind = kind
-        metadataID = try FilmPlaybackIdentifier(fields.filmValue("metadataId"))
-        title = try fields.filmString("title"); summary = try fields.filmString("summary")
-        func count(_ key: String) throws -> Int? {
-            guard let value = try fields.filmOptional(key) else { return nil }
-            guard let count = value.filmInteger else { throw FilmPlaybackError.invalidResponse }
-            return count
-        }
-        seasonCount = try count("seasonCount"); episodeCount = try count("episodeCount")
-        metadata = try fields.filmValue("metadata").filmRequiredObject()
+        id = try fields.filmString(isCurrent ? "attemptId" : "id")
+        candidateID = fields["candidateId"]?.filmText ?? ""
+        prepareOnly = !isCurrent && (fields["prepareOnly"] == .bool(true))
+        position = fields["position"]?.filmNumber ?? 0
+        duration = isCurrent ? (fields["duration"]?.filmNumber ?? 0) : 0
+        paused = fields["paused"] == .bool(true)
+        title = fields["title"]?.filmText ?? ""
+        season = fields["season"]?.filmInteger
+        episode = fields["episode"]?.filmInteger
+        globalEpisode = fields["globalEpisode"]?.filmInteger
+        episodeLabel = fields["episodeLabel"]?.filmText ?? ""
+        sourceLabel = fields["sourceLabel"]?.filmText ?? ""
+        quality = fields["quality"]?.filmText ?? ""
+        provider = fields["provider"]?.filmText.flatMap { $0.isEmpty ? nil : $0 }
     }
 }
 
 public struct FilmPlaybackSnapshot: Equatable, Sendable {
     public let sessionID: UUID
     public let sequence: Int64
-    public let target: FilmPlaybackTarget
-    public let entryTarget: FilmPlaybackTarget?
-    public let entrySurface: String?
-    public private(set) var entryResolution: String?
+    public let targetID: String
+    public let keyword: String
     public let stage: String
     public let error: String?
-    public let initializationError: String?
-    public let retryMediaAttemptID: String?
-    public private(set) var workInfo: FilmPlaybackWorkInfo?
-    public private(set) var metadata: RuntimeValue
-    public private(set) var metadataCache: FilmMetadataCache?
-    public private(set) var metadataSupplement: FilmPlaybackMetadataSupplement?
-    public private(set) var metadataSources: [FilmPlaybackMetadataSource]
-    public private(set) var metadataSourceID: String?
-    public let metadataError: String?
-    public private(set) var sources: [FilmPlaybackSourceRow]
-    public private(set) var browsing: FilmPlaybackBrowsing
-    public private(set) var episodes: [FilmPlaybackEpisode]
-    public private(set) var candidates: [FilmPlaybackCandidate]
-    public let attempt: FilmPlaybackAttempt?
-    public let current: FilmPlaybackCurrent?
-    public let searchComplete: Bool
-    public let shortVideo: Bool
-    public let previewEpisodes: Bool
+    public let errorStage: String?
     public let reportError: String?
-    public let prefetch: RuntimeValue?
+    public let noSources: Bool
+    public let retryMediaAttemptID: String?
+    public private(set) var work: FilmWorkSnapshot
+
+    public private(set) var sourceSelectedID: String?
+    public private(set) var sourcePlaceholder: String
+    public private(set) var sourceDisabled: Bool
+    public private(set) var sourceCanLoadMore: Bool
+    public private(set) var sourceLoadingMore: Bool
+    public private(set) var sourceOptions: [FilmSelectionOption]
+
+    public private(set) var lineVisible: Bool
+    public private(set) var lineSelectedID: String?
+    public private(set) var lineOptions: [FilmSelectionOption]
+
+    public private(set) var directoryMode: String
+    public private(set) var directoryLoading: Bool
+    public private(set) var directoryRefreshing: Bool
+    public private(set) var directoryError: String?
+    public private(set) var directorySelectedSeason: Int?
+    public private(set) var directoryCanLoadMore: Bool
+    public private(set) var directoryLoadingMore: Bool
+    public private(set) var previewEpisodes: Bool
+    public private(set) var canTogglePreview: Bool
+    public private(set) var directorySeasons: [FilmSelectionOption]
+    public private(set) var directoryItems: [FilmDirectoryItem]
+    public private(set) var directoryRawItems: [FilmDirectoryItem]
+
+    public let shortVideo: Bool
+    public let canPrevious: Bool
+    public let canNext: Bool
+    public let canSwitchSource: Bool
+    public let canBlockSource: Bool
+    public let activeSourceLabel: String
+    public let activeEpisodeLabel: String
+    public let activeQuality: String
+    public let activePan: String
+    public let availableQualities: [FilmPlayerOption]
+    public let availablePans: [FilmPlayerOption]
+    public let attempt: FilmAttemptInfo?
+    public let current: FilmAttemptInfo?
 
     public init(value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
         guard let id = UUID(uuidString: try fields.filmString("sessionId")),
-              let sequence = fields["sequence"]?.filmInteger else { throw FilmPlaybackError.invalidResponse }
-        sessionID = id; self.sequence = Int64(sequence)
-        target = try FilmPlaybackTarget(fields.filmValue("target"))
-        entryTarget = try fields["entryTarget"].flatMap { $0 == .null ? nil : $0 }.map(FilmPlaybackTarget.init)
-        entrySurface = fields["entrySurface"]?.filmText
-        entryResolution = fields["entryResolution"]?.filmText
-        stage = try fields.filmString("stage"); error = fields["error"]?.filmText
-        initializationError = fields["initializationError"]?.filmText
-        retryMediaAttemptID = fields["retryMediaAttemptId"]?.filmText
-        workInfo = try fields.filmOptional("workInfo").map(FilmPlaybackWorkInfo.init)
-        metadata = try fields.filmValue("metadata")
-        if let cache = fields["metadataCache"], cache != .null {
-            metadataCache = FilmMetadataCache(value: cache)
-        } else {
-            metadataCache = nil
-        }
-        if let supplement = fields["metadataSupplement"], supplement != .null {
-            do {
-                metadataSupplement = try FilmPlaybackMetadataSupplement(supplement)
-            } catch {
-                DebugRuntime.logError(.filmPlayback, sub: "wire", event: "decode.metadataSupplement.skipped", error: error)
-                metadataSupplement = nil
-            }
-        } else {
-            metadataSupplement = nil
-        }
-        let metadataSources: [FilmPlaybackMetadataSource] = try fields["metadataSources"].map { value in
-            guard let values = value.filmArray else { throw FilmPlaybackError.invalidResponse }
-            return values.compactMap { entry in
-                do {
-                    return try FilmPlaybackMetadataSource(entry)
-                } catch {
-                    DebugRuntime.logError(.filmPlayback, sub: "wire", event: "decode.metadataSource.skipped", error: error)
-                    return nil
-                }
-            }
-        } ?? []
-        let metadataSourceID = try fields["metadataSourceId"].flatMap { $0 == .null ? nil : $0 }.map { value in
-            guard let id = value.filmText, !id.isEmpty else { throw FilmPlaybackError.invalidResponse }
-            return id
-        }
-        if let metadataSourceID, !metadataSources.contains(where: { $0.id == metadataSourceID }) {
+              let sequence = fields["sequence"]?.filmInteger else {
             throw FilmPlaybackError.invalidResponse
         }
-        self.metadataSources = metadataSources
-        self.metadataSourceID = metadataSourceID
-        metadataError = fields["metadataError"]?.filmText
-        sources = try fields.filmArray("sources").map(FilmPlaybackSourceRow.init)
-        browsing = try FilmPlaybackBrowsing(fields.filmValue("browsing"))
-        episodes = try fields.filmArray("episodes").map(FilmPlaybackEpisode.init)
-        candidates = try fields.filmArray("candidates").map(FilmPlaybackCandidate.init)
-        attempt = try fields.filmOptional("attempt").map(FilmPlaybackAttempt.init)
-        current = try fields.filmOptional("current").map(FilmPlaybackCurrent.init)
-        searchComplete = try fields.filmBool("searchComplete")
-        shortVideo = try fields.filmBool("shortVideo"); previewEpisodes = try fields.filmBool("previewEpisodes")
-        reportError = fields["reportError"]?.filmText; prefetch = fields["prefetch"]
+        sessionID = id
+        self.sequence = Int64(sequence)
+        targetID = try fields.filmString("targetId")
+        keyword = fields["keyword"]?.filmText ?? ""
+        stage = try fields.filmString("stage")
+        error = fields["error"]?.filmText.flatMap { $0.isEmpty ? nil : $0 }
+        errorStage = fields["errorStage"]?.filmText.flatMap { $0.isEmpty ? nil : $0 }
+        reportError = fields["reportError"]?.filmText.flatMap { $0.isEmpty ? nil : $0 }
+        noSources = fields["noSources"] == .bool(true)
+        retryMediaAttemptID = fields["retryMediaAttemptId"]?.filmText.flatMap { $0.isEmpty ? nil : $0 }
+        work = try FilmWorkSnapshot(fields.filmValue("work"))
+
+        let sm = try fields.filmValue("sourceMenu").filmRequiredObject()
+        sourceSelectedID = sm["selectedId"]?.filmText.flatMap { $0.isEmpty ? nil : $0 }
+        sourcePlaceholder = sm["placeholder"]?.filmText.flatMap { $0.isEmpty ? nil : $0 } ?? "选择站点源"
+        sourceDisabled = sm["disabled"] == .bool(true)
+        sourceCanLoadMore = sm["canLoadMore"] == .bool(true)
+        sourceLoadingMore = sm["loadingMore"] == .bool(true)
+        sourceOptions = try sm.filmArray("options").map { raw in
+            let opt = try raw.filmRequiredObject()
+            return FilmSelectionOption(
+                id: try opt.filmString("id"),
+                label: opt["label"]?.filmText ?? "",
+                kind: opt["kind"]?.filmText ?? "",
+                subtitle: opt["subtitle"]?.filmText ?? "",
+                season: nil,
+                provider: nil,
+                state: opt["state"]?.filmText,
+                error: opt["error"]?.filmText.flatMap { $0.isEmpty ? nil : $0 }
+            )
+        }
+
+        let lm = try fields.filmValue("lineMenu").filmRequiredObject()
+        lineVisible = lm["visible"] == .bool(true)
+        lineSelectedID = lm["selectedId"]?.filmScalar.flatMap { $0.isEmpty ? nil : $0 }
+        lineOptions = try lm.filmArray("options").map { raw in
+            let opt = try raw.filmRequiredObject()
+            return FilmSelectionOption(
+                id: try opt.filmString("id"),
+                label: opt["label"]?.filmText ?? "",
+                kind: "line",
+                subtitle: "",
+                season: nil,
+                provider: opt["provider"]?.filmText.flatMap { $0.isEmpty ? nil : $0 },
+                state: nil,
+                error: nil
+            )
+        }
+
+        let dir = try fields.filmValue("directory").filmRequiredObject()
+        directoryMode = dir["mode"]?.filmText.flatMap { $0.isEmpty ? nil : $0 } ?? "empty"
+        directoryLoading = dir["loading"] == .bool(true)
+        directoryRefreshing = dir["refreshing"] == .bool(true)
+        directoryError = dir["error"]?.filmText.flatMap { $0.isEmpty ? nil : $0 }
+        directorySelectedSeason = dir["selectedSeason"]?.filmInteger
+        directoryCanLoadMore = dir["canLoadMore"] == .bool(true)
+        directoryLoadingMore = dir["loadingMore"] == .bool(true)
+        previewEpisodes = dir["previewEpisodes"] == .bool(true)
+        canTogglePreview = dir["canTogglePreview"] == .bool(true)
+        directorySeasons = try dir.filmArray("seasons").map { raw in
+            let s = try raw.filmRequiredObject()
+            let num = s["season"]?.filmInteger ?? 1
+            return FilmSelectionOption(
+                id: "season:\(num)",
+                label: s["label"]?.filmText.flatMap { $0.isEmpty ? nil : $0 } ?? "第\(num)季",
+                kind: "season",
+                subtitle: "",
+                season: num,
+                provider: nil,
+                state: nil,
+                error: nil
+            )
+        }
+        directoryItems = try dir.filmArray("items").map(FilmDirectoryItem.init)
+        directoryRawItems = try (dir["rawItems"]?.filmArray ?? []).map(FilmDirectoryItem.init)
+
+        let pl = try fields.filmValue("player").filmRequiredObject()
+        shortVideo = pl["shortVideo"] == .bool(true)
+        canPrevious = pl["canPrevious"] == .bool(true)
+        canNext = pl["canNext"] == .bool(true)
+        canSwitchSource = pl["canSwitchSource"] == .bool(true)
+        canBlockSource = pl["canBlockSource"] == .bool(true)
+        activeSourceLabel = pl["activeSourceLabel"]?.filmText ?? ""
+        activeEpisodeLabel = pl["activeEpisodeLabel"]?.filmText ?? ""
+        activeQuality = pl["activeQuality"]?.filmText ?? ""
+        activePan = pl["activePan"]?.filmText ?? ""
+        availableQualities = try (pl["availableQualities"]?.filmArray ?? []).map { raw in
+            let q = try raw.filmRequiredObject()
+            return FilmPlayerOption(
+                key: try q.filmString("key"),
+                label: q["label"]?.filmText ?? "",
+                active: q["active"] == .bool(true)
+            )
+        }
+        availablePans = try (pl["availablePans"]?.filmArray ?? []).map { raw in
+            let p = try raw.filmRequiredObject()
+            return FilmPlayerOption(
+                key: try p.filmString("provider"),
+                label: p["label"]?.filmText ?? "",
+                active: p["active"] == .bool(true)
+            )
+        }
+        attempt = try FilmAttemptInfo(pl["attempt"], isCurrent: false)
+        current = try FilmAttemptInfo(pl["current"], isCurrent: true)
     }
 
-    /// Native display state may outlive its executor. Never feed this projection
-    /// back to the execution owner as authorization or cache freshness.
     func retainingLoadedPresentation(_ previous: Self?) -> Self {
         guard let previous else { return self }
         var result = self
-        if metadata == .null, metadataSourceID == previous.metadataSourceID || sessionID != previous.sessionID {
-            result.metadata = previous.metadata
-            result.metadataCache = previous.metadataCache
-            result.metadataSupplement = previous.metadataSupplement
-            result.metadataSources = previous.metadataSources
-            result.metadataSourceID = previous.metadataSourceID
+        if directoryLoading && directoryItems.isEmpty &&
+           sourceSelectedID == previous.sourceSelectedID &&
+           lineSelectedID == previous.lineSelectedID &&
+           directorySelectedSeason == previous.directorySelectedSeason {
+            result.directoryItems = previous.directoryItems
+            result.directoryRawItems = previous.directoryRawItems
+            result.directorySeasons = previous.directorySeasons
         }
-        if workInfo == nil, stage == "loading" || stage == "error" ||
-            browsing.loading || browsing.error != nil || metadataError != nil {
-            result.workInfo = previous.workInfo
-        }
-        if sources.isEmpty, stage == "loading" || error != nil { result.sources = previous.sources }
-        if browsing.loading || browsing.error != nil,
-           browsing.sourceID == previous.browsing.sourceID,
-           browsing.lineID == previous.browsing.lineID,
-           browsing.season == previous.browsing.season,
-           metadataSourceID == previous.metadataSourceID {
-            result.browsing = previous.browsing
-            result.episodes = previous.episodes
-            result.candidates = previous.candidates
-        }
-        return result
-    }
-
-    func displaying(_ directory: FilmPlaybackDirectorySlice) -> Self {
-        var result = self
-        result.browsing = directory.browsing
-        result.metadata = directory.metadata
-        result.metadataCache = directory.metadataCache
-        result.metadataSupplement = directory.metadataSupplement
-        result.metadataSourceID = directory.key.metadata
-        result.episodes = directory.episodes
-        result.candidates = directory.candidates
-        return result
-    }
-
-    func refreshingDirectory(_ directory: FilmPlaybackDirectorySlice) -> Self {
-        var result = displaying(directory)
-        let browsing = directory.browsing
-        result.browsing = .init(sourceID: browsing.sourceID, lineID: browsing.lineID, season: browsing.season,
-            lines: browsing.lines, loading: false, refreshing: true,
-            files: browsing.files, originalFiles: browsing.originalFiles)
-        return result
-    }
-
-    func loadingDirectory(_ key: FilmPlaybackDirectoryKey, error: String? = nil) -> Self {
-        var result = self
-        result.browsing = .init(sourceID: key.source, lineID: key.line, season: key.season,
-            lines: key.source == browsing.sourceID ? browsing.lines : [], loading: error == nil, error: error)
-        if key.metadata != metadataSourceID {
-            result.metadata = .null; result.metadataCache = nil; result.metadataSupplement = nil
-        }
-        result.metadataSourceID = key.metadata
-        result.episodes = []; result.candidates = []
         return result
     }
 
     /// True when only high-frequency playback telemetry (`sequence` or `current` position/duration/paused) changed.
     func hasSamePresentation(as other: Self) -> Bool {
         sessionID == other.sessionID &&
-        target == other.target &&
-        entryTarget == other.entryTarget &&
-        entrySurface == other.entrySurface &&
-        entryResolution == other.entryResolution &&
+        targetID == other.targetID &&
+        keyword == other.keyword &&
         stage == other.stage &&
         error == other.error &&
-        initializationError == other.initializationError &&
-        retryMediaAttemptID == other.retryMediaAttemptID &&
-        workInfo == other.workInfo &&
-        metadata == other.metadata &&
-        metadataCache == other.metadataCache &&
-        metadataSupplement == other.metadataSupplement &&
-        metadataSources == other.metadataSources &&
-        metadataSourceID == other.metadataSourceID &&
-        metadataError == other.metadataError &&
-        sources == other.sources &&
-        browsing == other.browsing &&
-        episodes == other.episodes &&
-        candidates == other.candidates &&
-        attempt == other.attempt &&
-        current?.attemptID == other.current?.attemptID &&
-        current?.candidate == other.current?.candidate &&
-        searchComplete == other.searchComplete &&
-        shortVideo == other.shortVideo &&
-        previewEpisodes == other.previewEpisodes &&
+        errorStage == other.errorStage &&
         reportError == other.reportError &&
-        prefetch == other.prefetch
+        noSources == other.noSources &&
+        retryMediaAttemptID == other.retryMediaAttemptID &&
+        work == other.work &&
+        sourceSelectedID == other.sourceSelectedID &&
+        sourcePlaceholder == other.sourcePlaceholder &&
+        sourceDisabled == other.sourceDisabled &&
+        sourceCanLoadMore == other.sourceCanLoadMore &&
+        sourceLoadingMore == other.sourceLoadingMore &&
+        sourceOptions == other.sourceOptions &&
+        lineVisible == other.lineVisible &&
+        lineSelectedID == other.lineSelectedID &&
+        lineOptions == other.lineOptions &&
+        directoryMode == other.directoryMode &&
+        directoryLoading == other.directoryLoading &&
+        directoryRefreshing == other.directoryRefreshing &&
+        directoryError == other.directoryError &&
+        directorySelectedSeason == other.directorySelectedSeason &&
+        directoryCanLoadMore == other.directoryCanLoadMore &&
+        directoryLoadingMore == other.directoryLoadingMore &&
+        previewEpisodes == other.previewEpisodes &&
+        canTogglePreview == other.canTogglePreview &&
+        directorySeasons == other.directorySeasons &&
+        directoryItems == other.directoryItems &&
+        directoryRawItems == other.directoryRawItems &&
+        shortVideo == other.shortVideo &&
+        canPrevious == other.canPrevious &&
+        canNext == other.canNext &&
+        canSwitchSource == other.canSwitchSource &&
+        canBlockSource == other.canBlockSource &&
+        activeSourceLabel == other.activeSourceLabel &&
+        activeEpisodeLabel == other.activeEpisodeLabel &&
+        activeQuality == other.activeQuality &&
+        activePan == other.activePan &&
+        availableQualities == other.availableQualities &&
+        availablePans == other.availablePans &&
+        attempt == other.attempt &&
+        current?.id == other.current?.id &&
+        current?.candidateID == other.current?.candidateID
     }
 }
 
@@ -783,7 +799,9 @@ public struct FilmPlaybackError: Error, Equatable, Sendable, LocalizedError {
     static let closed = Self(code: "CLOSED")
     public var errorDescription: String? {
         switch code {
+        case "NO_VIDEO_SOURCES": "暂无可用视频源"
         case "NO_MATCH", "MEDIA_UNAVAILABLE": "暂无可用片源"
+        case "NO_EPISODE_MAPPING": "未找到对应集数"
         case "TIMEOUT": "请求超时"
         case "CLOSED", "HOST_CLOSED": "本地运行器已关闭"
         case "OBSERVATION_CLOSED": "播放状态连接已断开"
@@ -833,6 +851,14 @@ extension RuntimeValue {
     var filmArray: [RuntimeValue]? { if case .array(let values) = self { values } else { nil } }
     var filmObject: RuntimeObject? { if case .object(let fields) = self { fields } else { nil } }
     var filmScalar: String? { filmText ?? filmNumber.map { String(format: "%.0f", $0) } }
+    var filmRuleDisplayText: String? {
+        if self == .null { return nil }
+        if let text = filmText { return text }
+        guard case .array = self else { return nil }
+        guard let data = try? RuntimeJSON.encode(self),
+              let decoded = try? JSONDecoder().decode(FilmRuleText.self, from: data) else { return nil }
+        return decoded.displayString
+    }
     func filmRequiredObject() throws -> RuntimeObject {
         guard let fields = filmObject else { throw FilmPlaybackError.invalidResponse }
         return fields

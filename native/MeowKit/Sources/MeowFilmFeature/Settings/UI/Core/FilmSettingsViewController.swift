@@ -188,6 +188,7 @@ final class FilmSmartMatchingViewController: SettingsListViewController {
             (.episodeClean, "剧集列表净化规则"),
             (.episode, "集数匹配规则"),
             (.movie, "电影匹配规则"),
+            (.season, "原始标题季度提取"),
         ]
         var rows = groups.map { group, title in
             SettingsListRow(

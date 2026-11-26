@@ -3,7 +3,7 @@ import { openDatabase } from '@meowfilm/storage';
 import { upsert } from '@meowfilm/storage/statements';
 import { defaultPreferences } from './policy.js';
 import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
-import { identity, checkTarget, fields, freeze, isIdentifier, object, requireValue, text, fail } from './identity.js';
+import { identity, fields, freeze, isIdentifier, normalizeWorkKey, object, requireValue, text, fail, workTargetId } from './identity.js';
 
 const OWNER = 'film.library';
 const optional = value => value ?? null;
@@ -21,88 +21,124 @@ const failure = error => fail(error?.code === 'STORAGE_CONFLICT' ? 'STORAGE_CHAN
         'STORAGE_ERROR', 'STORAGE_RESULT_LIMIT'].includes(error?.code) ? 'STORAGE_ERROR' :
         ['INVALID_REQUEST', 'STORAGE_CHANGED'].includes(error?.code)
           ? error.code : 'LIBRARY_UPDATE_FAILED');
+
 const preferenceLists = ['ruleOrder', 'panOrder', 'keywords', 'siteCleanKeywords'];
-const historyColumns = ['target_id', 'title', 'source_key', 'detail_id_kind', 'detail_id_text',
-  'line_id_kind', 'line_id_text', 'candidate_id', 'season', 'episode', 'global_episode', 'has_episode',
-  'position_sec', 'duration_sec', 'paused', 'ended', 'played_at_ms', 'updated_at_ms', 'target_kind', 'target_title',
-  'target_year_kind', 'target_year_text', 'target_metadata_provider', 'target_metadata_id_kind', 'target_metadata_id_text',
-  'target_season', 'target_episode', 'target_global_episode', 'target_has_members', 'target_source_key', 'target_source_engine',
-  'target_source_installation_id', 'target_source_site_kind', 'target_source_site_text', 'target_source_detail_kind',
-  'target_source_detail_text', 'target_source_line_kind', 'target_source_line_text', 'target_source_candidate_id', 'row_revision'];
+const historyColumns = [
+  'target_id', 'keyword', 'title', 'poster', 'content_kind', 'year',
+  'tmdb_kind', 'tmdb_id', 'douban_kind', 'douban_id',
+  'source_key', 'detail_id_kind', 'detail_id_text', 'line_id_kind', 'line_id_text', 'line_label',
+  'share_provider', 'share_url', 'share_password',
+  'candidate_id', 'file_name',
+  'season', 'episode', 'global_episode', 'has_episode',
+  'position_sec', 'duration_sec', 'paused', 'ended', 'played_at_ms', 'updated_at_ms', 'row_revision',
+];
 
 function historyInput(value) {
-  const result = fields(value, ['targetId', 'title', 'sourceKey', 'detailId', 'lineId', 'candidateId', 'episode', 'position', 'duration',
-    'paused', 'ended', 'playedAt', 'updatedAt', 'playbackTarget']);
-  result.playbackTarget = fields(result.playbackTarget,
-    ['id', 'kind', 'title', 'year', 'metadataProvider', 'metadataId', 'season', 'episode', 'globalEpisode', 'source', 'members']);
-  if (result.episode !== undefined) result.episode = fields(result.episode, ['season', 'episode', 'globalEpisode']);
-  if (result.playbackTarget.source !== undefined) result.playbackTarget.source = fields(result.playbackTarget.source,
-    ['key', 'engine', 'installationId', 'siteId', 'detailId', 'lineId', 'candidateId']);
-  if (result.playbackTarget.members !== undefined) {
-    requireValue(Array.isArray(result.playbackTarget.members));
-    result.playbackTarget.members = result.playbackTarget.members.map(row => fields(row, ['sourceKey', 'detailId']));
-  }
+  requireValue(object(value));
+  const keyword = text(value.keyword) || text(value.title);
+  const targetId = text(value.targetId) || workTargetId(keyword);
+  const result = {
+    targetId,
+    keyword,
+    title: text(value.title) || keyword,
+    poster: typeof value.poster === 'string' ? value.poster.trim() : '',
+    ...(value.kind === 'movie' || value.kind === 'tv' ? { kind: value.kind } : {}),
+    ...(Number.isSafeInteger(value.year) && value.year > 0 ? { year: value.year } : {}),
+    ...(object(value.tmdb) && ['movie', 'tv'].includes(value.tmdb.kind) && Number.isSafeInteger(value.tmdb.id) && value.tmdb.id > 0
+      ? { tmdb: { kind: value.tmdb.kind, id: value.tmdb.id } } : {}),
+    ...(object(value.douban) && ['movie', 'tv'].includes(value.douban.kind) && text(value.douban.id)
+      ? { douban: { kind: value.douban.kind, id: text(value.douban.id) } } : {}),
+    sourceKey: text(value.sourceKey),
+    detailId: value.detailId,
+    lineId: value.lineId,
+    lineLabel: typeof value.lineLabel === 'string' ? value.lineLabel.trim() : '',
+    ...(object(value.share) && text(value.share.provider) && text(value.share.url)
+      ? { share: { provider: text(value.share.provider), url: text(value.share.url),
+        ...(typeof value.share.password === 'string' && value.share.password ? { password: value.share.password } : {}) } } : {}),
+    candidateId: text(value.candidateId),
+    fileName: typeof value.fileName === 'string' ? value.fileName.trim() : '',
+    ...(object(value.episode) ? { episode: fields(value.episode, ['season', 'episode', 'globalEpisode']) } : {}),
+    position: value.position,
+    duration: value.duration,
+    paused: value.paused,
+    ended: value.ended,
+    ...(value.playedAt === undefined ? {} : { playedAt: value.playedAt }),
+    updatedAt: value.updatedAt,
+  };
   return result;
 }
+
 function validateHistory(value) {
-  checkTarget(value.playbackTarget);
-  requireValue(value.targetId === value.playbackTarget.id && text(value.title) && text(value.sourceKey) &&
-    isIdentifier(value.detailId) && isIdentifier(value.lineId) && text(value.candidateId) &&
-    Number.isFinite(value.position) && value.position >= 0 && Number.isFinite(value.duration) && value.duration >= 0 &&
-    typeof value.paused === 'boolean' && typeof value.ended === 'boolean' && Number.isSafeInteger(value.updatedAt) &&
+  requireValue(text(value.targetId) && text(value.keyword) && text(value.title) &&
+    text(value.sourceKey) && isIdentifier(value.detailId) && isIdentifier(value.lineId) &&
+    text(value.candidateId) && Number.isFinite(value.position) && value.position >= 0 &&
+    Number.isFinite(value.duration) && value.duration >= 0 &&
+    typeof value.paused === 'boolean' && typeof value.ended === 'boolean' &&
+    Number.isSafeInteger(value.updatedAt) &&
     (value.playedAt === undefined || Number.isSafeInteger(value.playedAt)));
-  if (value.episode !== undefined) requireValue(object(value.episode) && ['season', 'episode', 'globalEpisode'].every(key =>
-    value.episode[key] === undefined || Number.isSafeInteger(value.episode[key]) && value.episode[key] >= 0));
-  const target = value.playbackTarget;
-  for (const key of ['metadataId', 'year']) if (target[key] !== undefined) requireValue(isIdentifier(target[key]));
-  if (target.source !== undefined) {
-    requireValue(text(target.source.key) && isIdentifier(target.source.detailId));
-    for (const key of ['siteId', 'lineId']) if (target.source[key] !== undefined) requireValue(isIdentifier(target.source[key]));
+  if (value.episode !== undefined) {
+    requireValue(object(value.episode) && ['season', 'episode', 'globalEpisode'].every(key =>
+      value.episode[key] === undefined || Number.isSafeInteger(value.episode[key]) && value.episode[key] >= 0));
   }
 }
+
 function historyValues(value, revision) {
-  const target = value.playbackTarget, source = target.source ?? {}, episode = value.episode ?? {};
-  return [value.targetId, value.title, value.sourceKey, detailKind(value.detailId), detailText(value.detailId),
-    detailKind(value.lineId), detailText(value.lineId), value.candidateId, optional(episode.season), optional(episode.episode),
-    optional(episode.globalEpisode), Number(value.episode !== undefined),
-    value.position, value.duration, Number(value.paused), Number(value.ended), optional(value.playedAt), value.updatedAt,
-    target.kind, target.title, detailKind(target.year), detailText(target.year), optional(target.metadataProvider),
-    detailKind(target.metadataId), detailText(target.metadataId), optional(target.season),
-    optional(target.episode), optional(target.globalEpisode), Number(target.members !== undefined), optional(source.key), optional(source.engine),
-    optional(source.installationId), detailKind(source.siteId), detailText(source.siteId), detailKind(source.detailId),
-    detailText(source.detailId), detailKind(source.lineId), detailText(source.lineId), optional(source.candidateId), revision];
+  const episode = value.episode ?? {};
+  return [
+    value.targetId, value.keyword, value.title, value.poster ?? '',
+    optional(value.kind), optional(value.year),
+    optional(value.tmdb?.kind), optional(value.tmdb?.id),
+    optional(value.douban?.kind), optional(value.douban?.id),
+    value.sourceKey, detailKind(value.detailId), detailText(value.detailId),
+    detailKind(value.lineId), detailText(value.lineId), value.lineLabel ?? '',
+    optional(value.share?.provider), optional(value.share?.url), optional(value.share?.password),
+    value.candidateId, value.fileName ?? '',
+    optional(episode.season), optional(episode.episode), optional(episode.globalEpisode),
+    Number(value.episode !== undefined && Object.keys(episode).length > 0),
+    value.position, value.duration, Number(value.paused), Number(value.ended),
+    optional(value.playedAt), value.updatedAt, revision,
+  ];
 }
-function historyProjection(row, members) {
-  const target = { id: row.target_id, kind: row.target_kind, title: row.target_title };
-  for (const [field, column] of [['metadataProvider', 'target_metadata_provider'],
-    ['season', 'target_season'], ['episode', 'target_episode'], ['globalEpisode', 'target_global_episode']])
-    if (row[column] !== null) target[field] = row[column];
-  for (const [field, prefix] of [['metadataId', 'target_metadata_id'], ['year', 'target_year']])
-    if (row[prefix + '_kind'] !== null) target[field] = detailValue(row[prefix + '_kind'], row[prefix + '_text']);
-  if (row.target_source_key !== null) {
-    target.source = { key: row.target_source_key };
-    for (const [field, column] of [['engine', 'target_source_engine'], ['installationId', 'target_source_installation_id'],
-      ['candidateId', 'target_source_candidate_id']])
-      if (row[column] !== null) target.source[field] = row[column];
-    for (const [field, prefix] of [['siteId', 'target_source_site'], ['lineId', 'target_source_line'], ['detailId', 'target_source_detail']])
-      if (row[prefix + '_kind'] !== null) target.source[field] = detailValue(row[prefix + '_kind'], row[prefix + '_text']);
-  }
-  if (row.target_has_members) target.members = members.map(item => ({
-    sourceKey: item.source_key,
-    detailId: detailValue(item.detail_id_kind, item.detail_id_text),
-  }));
+
+function historyProjection(row) {
   const episode = {};
-  for (const [field, column] of [['season', 'season'], ['episode', 'episode'], ['globalEpisode', 'global_episode']])
+  for (const [field, column] of [['season', 'season'], ['episode', 'episode'], ['globalEpisode', 'global_episode']]) {
     if (row[column] !== null) episode[field] = row[column];
+  }
   const result = {
-    targetId: row.target_id, title: row.title, playbackTarget: target, sourceKey: row.source_key,
-    detailId: detailValue(row.detail_id_kind, row.detail_id_text), lineId: detailValue(row.line_id_kind, row.line_id_text), candidateId: row.candidate_id,
-    ...(row.has_episode ? { episode } : {}), position: row.position_sec, duration: row.duration_sec, paused: !!row.paused, ended: !!row.ended,
-    ...(row.played_at_ms === null ? {} : { playedAt: row.played_at_ms }), updatedAt: row.updated_at_ms,
+    targetId: row.target_id,
+    keyword: row.keyword,
+    title: row.title,
+    poster: row.poster ?? '',
+    ...(row.content_kind === null ? {} : { kind: row.content_kind }),
+    ...(row.year === null ? {} : { year: row.year }),
+    ...(row.tmdb_kind !== null && row.tmdb_id !== null ? { tmdb: { kind: row.tmdb_kind, id: row.tmdb_id } } : {}),
+    ...(row.douban_kind !== null && row.douban_id !== null ? { douban: { kind: row.douban_kind, id: row.douban_id } } : {}),
+    sourceKey: row.source_key,
+    detailId: detailValue(row.detail_id_kind, row.detail_id_text),
+    lineId: detailValue(row.line_id_kind, row.line_id_text),
+    lineLabel: row.line_label ?? '',
+    ...(row.share_provider !== null && row.share_url !== null ? {
+      share: {
+        provider: row.share_provider,
+        url: row.share_url,
+        ...(row.share_password === null ? {} : { password: row.share_password }),
+      },
+    } : {}),
+    candidateId: row.candidate_id,
+    fileName: row.file_name ?? '',
+    ...(row.has_episode ? { episode } : {}),
+    position: row.position_sec,
+    duration: row.duration_sec,
+    paused: !!row.paused,
+    ended: !!row.ended,
+    ...(row.played_at_ms === null ? {} : { playedAt: row.played_at_ms }),
+    updatedAt: row.updated_at_ms,
   };
   try { validateHistory(result); } catch { throw fail('CORRUPT_STORAGE'); }
   return result;
 }
+
 const manualColumns = ['match_id', 'position_order', 'target_id', 'match_kind', 'title', 'name', 'source_key',
   'detail_id_kind', 'detail_id_text', 'provider', 'share_url', 'share_password', 'season_hint', 'enabled',
   'auto_disable', 'failure_count'];
@@ -115,7 +151,7 @@ const manualRowValues = (row, position) => [
 ];
 const blockColumns = ['block_id', 'position_order', 'target_id', 'source_key', 'detail_id_kind', 'detail_id_text', 'line_id_kind', 'line_id_text'];
 const blockRowValues = (row, position) => [
-  identity(row), position, row.targetId, row.sourceKey,
+  identity(fields(row, ['targetId', 'sourceKey', 'detailId', 'lineId'])), position, row.targetId, row.sourceKey,
   detailKind(row.detailId), detailText(row.detailId), detailKind(row.lineId), detailText(row.lineId),
 ];
 const manualFields = ['id', 'targetId', 'kind', 'title', 'name', 'sourceKey', 'detailId', 'provider', 'share',
@@ -135,22 +171,19 @@ export function validateManual(row, code = 'INVALID_REQUEST') {
   for (const key of ['enabled', 'autoDisable']) requireValue(row[key] === undefined || typeof row[key] === 'boolean', code);
   requireValue(row.seasonHint === undefined || Number.isSafeInteger(row.seasonHint) && row.seasonHint >= 0, code);
 }
+
 export function validateBlock(row, code = 'INVALID_REQUEST') {
   requireValue(object(row) && !row.errorCode && text(row.targetId) && text(row.sourceKey) &&
-    isIdentifier(row.detailId) && isIdentifier(row.lineId), code);
+    isIdentifier(row.detailId) && (row.lineId === undefined || row.lineId === null || isIdentifier(row.lineId)), code);
 }
+
 function controlInput(value, previous, native) {
-  requireValue(object(value) && value.version === 1 && ['history', 'manual', 'blocks', 'previewTargets', 'groups'].every(key =>
+  requireValue(object(value) && value.version === 1 && ['history', 'manual', 'blocks', 'previewTargets'].every(key =>
     Array.isArray(value[key])) && !value.history.length && (!native || value.preferences === undefined));
-  const projectRows = (name, project, validate) => value[name].map(row => {
-    const item = project(row);
-    const old = previous[name].find(before => isDeepStrictEqual(project(before), item));
-    if (old) return old;
-    validate(item); return item;
-  });
   const unique = (values, key) => requireValue(new Set(values.map(key)).size === values.length);
   const result = {
-    version: 1, history: [],
+    version: 1,
+    history: [],
     manual: value.manual.map(row => {
       requireValue(object(row));
       if (row.errorCode && row.id !== undefined) {
@@ -176,6 +209,7 @@ function controlInput(value, previous, native) {
         if (old) return old;
       }
       const item = fields(row, ['targetId', 'sourceKey', 'detailId', 'lineId']);
+      if (item.lineId === null) delete item.lineId;
       const old = previous.blocks.find(before => !before.errorCode &&
         isDeepStrictEqual(fields(before, ['targetId', 'sourceKey', 'detailId', 'lineId']), item));
       if (old) return old;
@@ -183,13 +217,9 @@ function controlInput(value, previous, native) {
       return item;
     }),
     previewTargets: value.previewTargets,
-    groups: projectRows('groups', row => fields(row, ['id', 'keys', 'members']), row => {
-      requireValue(/^group:[a-f0-9]{64}$/.test(row.id) && Array.isArray(row.keys) && Array.isArray(row.members) &&
-        [...row.keys, ...row.members].every(text));
-      unique(row.keys, key => key); unique(row.members, key => key);
-    }),
   };
-  unique(result.manual, row => row.id); unique(result.blocks, row => row.id ?? identity(row)); unique(result.groups, row => row.id);
+  unique(result.manual, row => row.id);
+  unique(result.blocks, row => row.id ?? identity(fields(row, ['targetId', 'sourceKey', 'detailId', 'lineId'])));
   for (const id of result.previewTargets) if (!previous.previewTargets.includes(id)) requireValue(text(id));
   unique(result.previewTargets, row => row);
   if (!native) {
@@ -223,7 +253,7 @@ function buildMutations(previous, next) {
   }
 
   if (!isDeepStrictEqual(previous.blocks, next.blocks)) {
-    const keyOf = row => row.id ?? identity(row);
+    const keyOf = row => row.id ?? identity(fields(row, ['targetId', 'sourceKey', 'detailId', 'lineId']));
     const oldMap = new Map(previous.blocks.map((row, idx) => [keyOf(row), { row, idx }]));
     const nextIds = new Set(next.blocks.map(keyOf));
     for (const id of oldMap.keys()) {
@@ -255,39 +285,6 @@ function buildMutations(previous, next) {
     }
   }
 
-  if (!isDeepStrictEqual(previous.groups, next.groups)) {
-    const oldMap = new Map(previous.groups.map((row, idx) => [row.id, { row, idx }]));
-    const nextIds = new Set(next.groups.map(row => row.id));
-    for (const id of oldMap.keys()) {
-      if (!nextIds.has(id)) changes.push({ sql: 'DELETE FROM film_groups WHERE group_id=?', params: [id] });
-    }
-    for (let i = 0; i < next.groups.length; i++) {
-      const group = next.groups[i];
-      const old = oldMap.get(group.id);
-      if (!old || old.idx !== i) {
-        changes.push(upsert('film_groups', ['group_id', 'position_order'], [group.id, i], ['group_id']));
-      }
-      if (!old || !isDeepStrictEqual(old.row.keys, group.keys)) {
-        if (old) changes.push({ sql: 'DELETE FROM film_group_keys WHERE group_id=?', params: [group.id] });
-        for (let k = 0; k < group.keys.length; k++) {
-          changes.push({
-            sql: 'INSERT INTO film_group_keys(group_id,position,aggregation_key) VALUES(?,?,?)',
-            params: [group.id, k, group.keys[k]],
-          });
-        }
-      }
-      if (!old || !isDeepStrictEqual(old.row.members, group.members)) {
-        if (old) changes.push({ sql: 'DELETE FROM film_group_members WHERE group_id=?', params: [group.id] });
-        for (let m = 0; m < group.members.length; m++) {
-          changes.push({
-            sql: 'INSERT INTO film_group_members(group_id,position,member_identity) VALUES(?,?,?)',
-            params: [group.id, m, group.members[m]],
-          });
-        }
-      }
-    }
-  }
-
   if (next.preferences && !isDeepStrictEqual(previous.preferences, next.preferences)) {
     changes.push(upsert(
       'film_preferences',
@@ -312,40 +309,25 @@ function buildMutations(previous, next) {
   return changes;
 }
 
-/** Control state is small; history is queried by target or bounded window, never cloned on progress. */
+/** Control state is small; history is queried by unified keyword targetId or bounded window. */
 export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
   const database = openDatabase(dataRoot);
   let closed = false, editing = false, disposal, tail = Promise.resolve(), revision = 0;
   let committed = freeze({
-    version: 1, history: [], manual: [], blocks: [], previewTargets: [], groups: [],
+    version: 1, history: [], manual: [], blocks: [], previewTargets: [],
     ...(nativePreferences ? {} : { preferences: defaultPreferences() }),
   });
 
   const ready = (async () => {
-    const [state, manual, blocks, preview, groups, keys, members, prefs, items] = await database.snapshot([
+    const [state, manual, blocks, preview, prefs, items] = await database.snapshot([
       { sql: 'SELECT revision FROM owner_revisions WHERE owner=?', params: [OWNER], rows: true },
       { sql: `SELECT ${manualColumns.join(',')} FROM film_manual_matches ORDER BY position_order`, rows: true },
       { sql: `SELECT ${blockColumns.join(',')} FROM film_blocked_sources ORDER BY position_order`, rows: true },
       { sql: 'SELECT position_order,target_id FROM film_preview_targets ORDER BY position_order', rows: true },
-      { sql: 'SELECT group_id,position_order FROM film_groups ORDER BY position_order', rows: true },
-      { sql: 'SELECT group_id,position,aggregation_key FROM film_group_keys ORDER BY group_id,position', rows: true },
-      { sql: 'SELECT group_id,position,member_identity FROM film_group_members ORDER BY group_id,position', rows: true },
       { sql: 'SELECT ios_auto_prepare,metadata_view_provider FROM film_preferences WHERE singleton=1', rows: true },
       { sql: 'SELECT list_kind,position,item_value FROM film_preference_items ORDER BY list_kind,position', rows: true },
     ]);
     revision = state[0]?.revision ?? 0;
-    const keysByGroup = new Map();
-    for (const row of keys) {
-      let list = keysByGroup.get(row.group_id);
-      if (!list) keysByGroup.set(row.group_id, list = []);
-      list.push(row.aggregation_key);
-    }
-    const membersByGroup = new Map();
-    for (const row of members) {
-      let list = membersByGroup.get(row.group_id);
-      if (!list) membersByGroup.set(row.group_id, list = []);
-      list.push(row.member_identity);
-    }
     const value = {
       version: 1,
       history: [],
@@ -363,17 +345,17 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
         return item;
       }),
       blocks: blocks.map(row => {
-        const item = { targetId: row.target_id, sourceKey: row.source_key };
-        try { item.detailId = detailValue(row.detail_id_kind, row.detail_id_text); item.lineId = detailValue(row.line_id_kind, row.line_id_text); }
-        catch { item.id = row.block_id; item.errorCode = 'CORRUPT_STORAGE'; }
+        const item = { id: row.block_id, targetId: row.target_id, sourceKey: row.source_key };
+        try {
+          item.detailId = detailValue(row.detail_id_kind, row.detail_id_text);
+          const lineId = detailValue(row.line_id_kind, row.line_id_text);
+          if (lineId !== null) item.lineId = lineId;
+        } catch {
+          item.errorCode = 'CORRUPT_STORAGE';
+        }
         return item;
       }),
       previewTargets: preview.map(row => row.target_id),
-      groups: groups.map(row => ({
-        id: row.group_id,
-        keys: keysByGroup.get(row.group_id) ?? [],
-        members: membersByGroup.get(row.group_id) ?? [],
-      })),
     };
     if (!nativePreferences) {
       value.preferences = defaultPreferences();
@@ -403,18 +385,23 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
     return freeze({ ...committed, preferences: cloneJSONValue(preferences) });
   }
   function read() { open(); return snapshot(); }
-  function history(targetId) {
+  function history(targetIdOrKeyword) {
+    const id = text(targetIdOrKeyword).startsWith('work:')
+      ? text(targetIdOrKeyword)
+      : workTargetId(targetIdOrKeyword);
     return serialize(async () => {
-      const [[row], members] = await database.snapshot([
-        { sql: `SELECT ${historyColumns.join(',')} FROM film_history WHERE target_id=?`, params: [targetId], rows: true },
-        { sql: 'SELECT source_key,detail_id_kind,detail_id_text FROM film_history_target_members WHERE target_id=? ORDER BY position', params: [targetId], rows: true },
-      ]);
-      return row ? historyProjection(row, members) : undefined;
+      const [row] = await database.query(`SELECT ${historyColumns.join(',')} FROM film_history WHERE target_id=?`, [id]);
+      return row ? historyProjection(row) : undefined;
     });
   }
 
   return {
     ready, read, history, configurationOwner: nativePreferences ? 'native' : 'runtime',
+    normalizeTargetId(targetIdOrKeyword) {
+      const raw = text(targetIdOrKeyword);
+      requireValue(raw.length > 0);
+      return raw.startsWith('work:') ? `work:${normalizeWorkKey(raw.slice(5))}` : workTargetId(raw);
+    },
     update(mutator) {
       if (editing || typeof mutator !== 'function' || mutator.constructor?.name === 'AsyncFunction')
         throw Object.assign(new Error('INVALID_REQUEST'), { code: 'INVALID_REQUEST' });
@@ -460,15 +447,7 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
             params: values,
             expectChanges: 1,
           };
-        const members = value.playbackTarget.members ?? [];
-        await database.transaction([
-          statement,
-          { sql: 'DELETE FROM film_history_target_members WHERE target_id=?', params: [value.targetId] },
-          ...members.map((row, index) => ({
-            sql: 'INSERT INTO film_history_target_members(target_id,position,source_key,detail_id_kind,detail_id_text) VALUES(?,?,?,?,?)',
-            params: [value.targetId, index, row.sourceKey, detailKind(row.detailId), detailText(row.detailId)],
-          })),
-        ]);
+        await database.transaction([statement]);
       });
     },
     removeHistory(targetId) {
@@ -483,28 +462,14 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
         const window = (historyAfter ? ' WHERE (updated_at_ms,target_id)<(?,?)' : '') +
           ' ORDER BY updated_at_ms DESC,target_id DESC LIMIT ?';
         const params = historyAfter ? [historyAfter.updatedAt, historyAfter.targetId] : [];
-        const [rows, members] = await database.snapshot([
-          { sql: `SELECT ${historyColumns.join(',')} FROM film_history` + window, params: [...params, limit + 1], rows: true },
-          {
-            sql: 'SELECT m.target_id,m.source_key,m.detail_id_kind,m.detail_id_text FROM film_history_target_members m JOIN (SELECT target_id FROM film_history' +
-              window + ') f USING(target_id) ORDER BY m.target_id,m.position',
-            params: [...params, limit],
-            rows: true,
-          },
-        ]);
+        const rows = await database.query(`SELECT ${historyColumns.join(',')} FROM film_history` + window, [...params, limit + 1]);
         const selected = rows.slice(0, limit);
         const last = selected.at(-1);
-        const membersByTarget = new Map();
-        for (const item of members) {
-          let list = membersByTarget.get(item.target_id);
-          if (!list) membersByTarget.set(item.target_id, list = []);
-          list.push(item);
-        }
         return {
           ...snapshot(),
           history: selected.map(row => {
             try {
-              return historyProjection(row, membersByTarget.get(row.target_id) ?? []);
+              return historyProjection(row);
             } catch (error) {
               if (error?.code !== 'CORRUPT_STORAGE') throw error;
               return { id: row.target_id, targetId: row.target_id, errorCode: 'CORRUPT_STORAGE' };

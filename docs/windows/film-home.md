@@ -15,7 +15,7 @@ Windows 将影视浏览作为独立的 `FilmCapability` 装配在音乐能力之
 
 首页每栏经公共运行器 `film.data.metadata.entry` 读取豆瓣 `recent_hot` 的 `start=0&limit=12`。进入栏目数据页时复用这 12 条种子，并以 `start=12&limit=12` 补齐首批 24 条；“加载更多”之后按 `limit=24` 继续推进偏移。适配器只传递 `kind` 对应路径及 `start/limit/category/type`，普通读取由运行器检查缓存，显式刷新传递 `refresh:true`；不以本地菜单、栏目 key 或展示标题建立业务许可表，不增加偏移上限或截断返回结果。网络、代理和凭据由[公共元数据 owner](../runtime/metadata-data.md)管理，原生不另建 HTTPS 客户端。
 
-响应消费影片 `id`、非空 `title`、评分 `rating.value`、海报候选及 Node 的 `businessId/playbackTarget`。`DoubanFilmHomeSource` 用业务 ID 建立 `FilmCardItem`，原样保留目标，不按栏目／影片字符串拼目标；共同语义见[稳定业务身份](../common/film/search.md#稳定业务身份)。海报优先级为 `pic.normal`、`pic.large`、`cover.url`、`cover_url`、`poster`、`image`；零分不显示。图片保留运行器返回的 `/v1/douban/images/...` 相对引用，通过既有 `ArtworkService` 和受信图片通道获取、解码、缓存、取消与释放，不在通用图片 HTTP 层加入豆瓣分派。辅助 cache/components 或未消费字段的形状不阻断有效影片列表，未知缓存状态原样投影而不当作 fresh，真实刷新错误仍由通知报告。运行器未能投影业务身份的原始条目、缺失或非法的 `businessId/playbackTarget` 只隔离该条，不补造展示或播放身份；缺少有效列表、非空列表全部不可消费等真实格式错误不伪装成成功空列表。
+响应消费影片 `id`、非空 `title`、评分 `rating.value`、海报候选及 Node 投影的轻量 `entry`（`targetId = "work:<sessionKey>"`、`keyword`、`douban: {kind, id}` 等）。`DoubanFilmHomeSource` 据此建立 `FilmCardItem` 并保留 `Entry`，不按栏目／影片字符串拼底层目标；共同语义见[稳定作品身份](../common/film/search.md#稳定作品身份与轻量卡片引用)。海报优先级为 `pic.normal`、`pic.large`、`cover.url`、`cover_url`、`poster`、`image`；零分不显示。图片保留运行器返回的 `/v1/douban/images/...` 相对引用，通过既有 `ArtworkService` 和受信图片通道获取、解码、缓存、取消与释放，不在通用图片 HTTP 层加入豆瓣分派。辅助 cache/components 或未消费字段的形状不阻断有效影片列表，未知缓存状态原样投影而不当作 fresh，真实刷新错误仍由通知报告。运行器未能投影有效 `entry` 的原始条目只隔离该条，不补造展示或播放身份；缺少有效列表、非空列表全部不可消费等真实格式错误不伪装成成功空列表。
 
 ## 状态与生命周期
 
