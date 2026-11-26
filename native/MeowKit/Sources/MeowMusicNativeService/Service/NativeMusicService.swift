@@ -255,8 +255,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var queueFeedbackOrigins: [String: MusicNativeQueueFeedbackOrigin] = [:]
     var similarMode = MusicNativeSimilarRuntime()
     var fmPlayback: MusicNativeFMSession?
-    var fmPreviews: [MusicHomeAction: MusicNativeFMPreviewEntry] = [:]
-    var fmPreviewOrder: [MusicHomeAction] = []
     var fmQueues: [UUID: (MusicHomeAction, MusicQueueAuthorization, MusicNativeFMRead)] = [:]
 
     nonisolated func now() -> Date { Date() }
@@ -336,7 +334,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         }
         publicQueueSources.removeAll()
         clearFMPlayback()
-        clearFMPreviews()
         for (id, value) in fmQueues {
             access.remove(id); value.1.revoke()
             retainSimilarDrain(Task { await value.2.close() })

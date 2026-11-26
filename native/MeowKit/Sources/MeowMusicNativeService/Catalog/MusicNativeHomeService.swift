@@ -75,6 +75,9 @@ extension NativeMusicService: MusicHomeBrowsing {
     }
     /// Retires request caches and cursors. The single display snapshot retains
     /// its own source identity. Never call inside access/authorization perform.
+    public func clearCachedHome() {
+        homeCache = nil
+    }
     private func retireHomeSource() {
         homeSourceRevision = UUID()
         homeCache = nil; homeLoad = nil

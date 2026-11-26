@@ -72,7 +72,7 @@ public sealed partial class MusicCatalogController : MusicController
 
     private string? lastChannelRoute;
     private string channelEntryError = "";
-    private bool catalogSourceReload;
+    private bool catalogSourceReload, channelRefreshRequired, catalogViewVisible;
     private CatalogPageState? publishedHomeState;
     private CatalogLoadFlight? catalogLoadFlight;
 
@@ -175,7 +175,11 @@ public sealed partial class MusicCatalogController : MusicController
 
     // VIP page
     public MusicVipPage VipPage => vipPage;
-    internal Task UpdateVipPageAsync(bool viewVisible) => vipPage.SetSurfaceAsync(viewVisible, IsVipChannel);
+    internal Task UpdateVipPageAsync(bool viewVisible)
+    {
+        catalogViewVisible = viewVisible;
+        return vipPage.SetSurfaceAsync(viewVisible, IsVipChannel);
+    }
     public Task SignVipPageAsync() => RunAsync(async () =>
     {
         try { await vipPage.SignAsync(); }

@@ -202,11 +202,7 @@ public sealed partial class MusicRecommendationCoordinator
         snapshot.Entries.Select(e => NativeId(e.Song)).Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
     private static MusicRecommendationRequest Request(Session s, QueueSnapshot snapshot, bool initial)
     {
-        if (s.Config.Kind == "fm") return new(s.Config.Fm! with
-        {
-            Continuation = !initial,
-            UnplaySongIds = initial ? [] : QueueNativeIds(snapshot)
-        });
+        if (s.Config.Kind == "fm") return new(s.Config.Fm! with { UnplaySongIds = initial ? [] : QueueNativeIds(snapshot) });
         if (s.Config.Kind == "similar") return new(new MusicSimilarRequest(s.Config.Platform, s.Config.SourceIds,
             s.Config.SourceType, initial ? [] : QueueNativeIds(snapshot)));
         if (s.Config.Kind == "heartbeat")

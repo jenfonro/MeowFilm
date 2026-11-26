@@ -53,6 +53,7 @@ import MeowUI
         return favorites
     }
     let accountEvents = PassthroughSubject<MusicAccountPlatform, Never>()
+    let cacheClearEvents = PassthroughSubject<Void, Never>()
     nonisolated(unsafe) var accountObservation: Task<Void, Never>?
     private var activeAccountLoginTransitions: Set<UUID> = []
     var isAccountLoginInProgress: Bool { !activeAccountLoginTransitions.isEmpty }
@@ -456,6 +457,7 @@ import MeowUI
     public func debugClearMemoryCaches() async {
         playbackMetadata.clearMemoryLyricCache()
         await searchResultsCache.invalidate()
+        cacheClearEvents.send()
     }
 
     private func completeClose(attemptID: String?) async {

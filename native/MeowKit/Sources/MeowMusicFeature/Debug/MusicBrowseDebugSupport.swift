@@ -54,7 +54,7 @@ extension MusicBrowseViewController: DebugPageInspectable, DebugPageActionable, 
                     title: item.title,
                     subtitle: item.subtitle.isEmpty ? nil : item.subtitle,
                     badge: item.coverLabel.isEmpty ? (item.label.isEmpty ? nil : item.label) : item.coverLabel,
-                    coverUrl: item.artwork?.absoluteString,
+                    coverUrl: artworkURL(for: item)?.absoluteString,
                     actions: actions,
                     meta: meta
                 )

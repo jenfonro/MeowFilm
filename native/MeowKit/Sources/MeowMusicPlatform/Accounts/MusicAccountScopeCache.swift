@@ -553,7 +553,7 @@ extension NativeMusicAccountService: MusicNativeFMProviding {
         return "wy-fm:" + musicSHA256Hex(uid)
     }
 
-    public func nativeFM(_ action: MusicHomeAction, preview: Bool, continuation: Bool = false,
+    public func nativeFM(_ action: MusicHomeAction, preview: Bool, unplaySongIds: [String] = [],
                          binding value: MusicNativeHomeBinding) async throws -> MusicNativeFMResponse {
         do {
             guard action.isPersonalFM,
@@ -571,11 +571,11 @@ extension NativeMusicAccountService: MusicNativeFMProviding {
                 let lease = try await nativeHomeCredential(value)
                 defer { lease.revoke() }
                 result = try await authenticated(.netease, token: token, own: binding.epoch, revision: binding.revision) {
-                    try await provider.fm(action, preview: preview, continuation: continuation, authorize: authorize)
+                    try await provider.fm(action, preview: preview, unplaySongIds: unplaySongIds, authorize: authorize)
                 }
             } else {
                 result = try await run(.netease) {
-                    try await provider.fm(action, preview: preview, continuation: continuation, authorize: authorize)
+                    try await provider.fm(action, preview: preview, unplaySongIds: unplaySongIds, authorize: authorize)
                 }
             }
             try await checkNativeHomeBinding(value)

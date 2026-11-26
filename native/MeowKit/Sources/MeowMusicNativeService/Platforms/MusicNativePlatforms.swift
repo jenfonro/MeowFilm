@@ -152,8 +152,8 @@ actor MusicNativePlatforms {
         try MusicPlatformDTO.tracks(await client.request(platform: "wy", operation: "songs",
             parameters: ["ids": .array(ids.map(RuntimeValue.string))]))
     }
-    func homeAction(_ action: MusicHomeAction, preview: Bool = false, continuation: Bool = false) async throws -> MusicNativeFMResponse {
-        let (operation, parameters) = MusicPlatformDTO.action(action, preview: preview, continuation: continuation)
+    func homeAction(_ action: MusicHomeAction, preview: Bool = false, unplaySongIds: [String] = []) async throws -> MusicNativeFMResponse {
+        let (operation, parameters) = MusicPlatformDTO.action(action, preview: preview, unplaySongIds: unplaySongIds)
         let value = try await client.request(platform: "wy", operation: operation, parameters: parameters)
         return .init(tracks: value[music: "items"] == .null ? [] : try MusicPlatformDTO.tracks(value),
                      artwork: MusicArtworkURL.normalized(value[music: "cover"].musicText))

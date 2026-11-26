@@ -2,30 +2,16 @@
 import Foundation
 import MeowMusicFeature
 
-private let fmPreviewCacheTTL: TimeInterval = 3600
-
-struct MusicNativeFMPreviewEntry {
-    let id: UUID
-    let binding: MusicNativeHomeBinding
-    let authorization: MusicQueueAuthorization
-    let task: Task<MusicNativeFMResponse?, Never>
-    let createdAt = Date()
-    var observer: Task<Void, Never>?
-    var completed = false
-    var value: MusicNativeFMResponse?
-}
-
-/// The source caches its first page; only its existing nextFMBatch call asks
-/// this reader again, which marks subsequent reads as live continuations.
+/// The source caches its first page; only its existing nextFMReferences call
+/// asks this reader again, which marks subsequent reads as live continuations.
 actor MusicNativeFMRead {
-    var preview: Task<MusicNativeFMResponse?, Never>?
     let load: @Sendable (Bool) async throws -> MusicNativeFMResponse
     var initialConsumed = false
     var closed = false
     var loading: Task<MusicNativeFMResponse, Error>?
     var closing: Task<Void, Never>?
-    init(preview: Task<MusicNativeFMResponse?, Never>?, load: @escaping @Sendable (Bool) async throws -> MusicNativeFMResponse) {
-        self.preview = preview; self.load = load
+    init(load: @escaping @Sendable (Bool) async throws -> MusicNativeFMResponse) {
+        self.load = load
     }
     func page(_ cursor: String?) async throws -> MusicNativeTrackPage {
         try musicRequire(cursor == nil, .invalidRequest)
@@ -33,17 +19,8 @@ actor MusicNativeFMRead {
         try musicRequire(loading == nil, .busy)
         let isContinuation = initialConsumed
         initialConsumed = true
-        let preview = self.preview, load = self.load
-        self.preview = nil
-        let task = Task {
-            if let preview {
-                let result = await withTaskCancellationHandler { await preview.value } onCancel: { preview.cancel() }
-                try Task.checkCancellation()
-                guard let result else { throw MusicServiceError.upstreamFailed }
-                return result
-            }
-            return try await load(isContinuation)
-        }
+        let load = self.load
+        let task = Task { try await load(isContinuation) }
         loading = task
         defer { loading = nil }
         let value = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
@@ -53,10 +30,9 @@ actor MusicNativeFMRead {
     func close() async {
         if closing == nil {
             closed = true
-            let preview = self.preview, loading = self.loading
-            self.preview = nil
-            preview?.cancel(); loading?.cancel()
-            closing = Task { _ = await preview?.value; _ = await loading?.result }
+            let loading = self.loading
+            loading?.cancel()
+            closing = Task { _ = await loading?.result }
         }
         await closing?.value
     }
@@ -68,66 +44,31 @@ extension NativeMusicService: MusicFMPreviewServing {
         guard let key = action.fmConfiguration else { throw MusicServiceError.invalidRequest }
         let own = epoch, binding = try await currentHomeBinding()
         try check(own)
-        // Includes failed and in-flight entries. Account changes cannot leak a
-        // previous cover or make a previous first batch playable.
-        let currentNow = now()
-        for (candidate, value) in fmPreviews where value.binding != binding || !value.authorization.isActive ||
-            currentNow.timeIntervalSince(value.createdAt) >= fmPreviewCacheTTL {
-            discardFMPreview(candidate)
-        }
-        if fmPreviews[key] == nil {
-            guard !fmQueues.values.contains(where: { $0.0 == key && $0.1.isActive }) else { return nil }
-            if fmPreviewOrder.count >= 6, let oldest = fmPreviewOrder.first { discardFMPreview(oldest) }
-            let id = UUID(), authorization = MusicQueueAuthorization(parent: binding.authorization)
-            let task = Task { [weak self] () -> MusicNativeFMResponse? in
-                guard let self, !Task.isCancelled, binding.authorization.isActive else { return nil }
-                return await self.readFMPreview(key, id: id, binding: binding, epoch: own)
-            }
-            let events = binding.authorization.revocations()
-            let observer = Task { [weak self] in
-                for await _ in events {
-                    guard !Task.isCancelled else { return }
-                    await self?.discardFMPreview(key, id: id); return
-                }
-            }
-            access.register(id) { authorization.revoke(); task.cancel() }
-            fmPreviews[key] = .init(id: id, binding: binding, authorization: authorization,
-                task: task, observer: observer)
-            fmPreviewOrder.append(key)
-        }
-        guard let entry = fmPreviews[key] else { return nil }
-        let value = await entry.task.value
-        try await checkHomeBinding(binding, epoch: own)
-        guard fmPreviews[key]?.id == entry.id, entry.authorization.isActive else { return nil }
-        return .init(artwork: value?.artwork, authorization: entry.authorization)
-    }
-    private func readFMPreview(_ key: MusicHomeAction, id: UUID, binding: MusicNativeHomeBinding,
-                               epoch own: UUID) async -> MusicNativeFMResponse? {
         let value: MusicNativeFMResponse?
         do { value = try await loadFM(key, preview: true, binding: binding, epoch: own) }
+        catch is CancellationError { throw CancellationError() }
         catch { value = nil } // Optional preview never becomes a page/playback error.
-        if fmPreviews[key]?.id == id {
-            fmPreviews[key]?.completed = true; fmPreviews[key]?.value = value
+        try Task.checkCancellation()
+        try await checkHomeBinding(binding, epoch: own)
+        let authorization = MusicQueueAuthorization(parent: binding.authorization)
+        guard authorization.isActive else { return nil }
+        return .init(artwork: value?.artwork, authorization: authorization)
+    }
+    private func fmKnownSongIDs() throws -> [String] {
+        let d = try read()
+        var seen = Set<String>(), result: [String] = []
+        for entry in d.queue.entries {
+            if let id = MusicNativeSimilarData.nativeID(try entrySong(entry, d)), seen.insert(id).inserted { result.append(id) }
         }
-        return value
+        return result
     }
-    func discardFMPreview(_ key: MusicHomeAction, id: UUID? = nil) {
-        guard let entry = fmPreviews[key], id == nil || entry.id == id else { return }
-        fmPreviews.removeValue(forKey: key); fmPreviewOrder.removeAll { $0 == key }
-        access.remove(entry.id); entry.observer?.cancel()
-        entry.authorization.revoke(); entry.task.cancel()
-        retainSimilarDrain(Task { _ = await entry.task.value })
-    }
-    func clearFMPreviews() {
-        for key in Array(fmPreviews.keys) { discardFMPreview(key) }
-    }
-    private func loadFM(_ action: MusicHomeAction, preview: Bool, continuation: Bool = false,
+    private func loadFM(_ action: MusicHomeAction, preview: Bool, unplaySongIds: [String] = [],
                         binding: MusicNativeHomeBinding, epoch own: UUID) async throws -> MusicNativeFMResponse {
         try await checkHomeBinding(binding, epoch: own)
         let owner = accounts as? any MusicNativeFMProviding, port = publicPlatforms
         let value = try await work(label: "musicFM", draining: true) {
-            if let owner { return try await owner.nativeFM(action, preview: preview, continuation: continuation, binding: binding) }
-            return try await port.homeAction(action, preview: preview, continuation: continuation)
+            if let owner { return try await owner.nativeFM(action, preview: preview, unplaySongIds: unplaySongIds, binding: binding) }
+            return try await port.homeAction(action, preview: preview, unplaySongIds: unplaySongIds)
         }
         try await checkHomeBinding(binding, epoch: own)
         return value
@@ -140,20 +81,10 @@ extension NativeMusicService: MusicFMPreviewServing {
         try await checkHomeBinding(binding, epoch: own)
         for (id, value) in fmQueues where !value.1.isActive { releaseFMQueue(id) }
         let id = UUID(), authorization = MusicQueueAuthorization(parent: binding.authorization)
-        var preview: Task<MusicNativeFMResponse?, Never>?
-        if let entry = fmPreviews[key] {
-            if case .fm = action, entry.binding == binding, entry.authorization.isActive,
-               now().timeIntervalSince(entry.createdAt) < fmPreviewCacheTTL,
-               !entry.completed || entry.value?.tracks.isEmpty == false {
-                preview = entry.task
-                // Transfer the pending first batch, not its display fence.
-                fmPreviews.removeValue(forKey: key); fmPreviewOrder.removeAll { $0 == key }
-                access.remove(entry.id); entry.observer?.cancel(); entry.authorization.revoke()
-            } else { discardFMPreview(key) }
-        }
-        let reader = MusicNativeFMRead(preview: preview) { [weak self] continuation in
+        let reader = MusicNativeFMRead { [weak self] isContinuation in
             guard let self else { throw MusicServiceError.closed }
-            return try await self.loadFM(action, preview: false, continuation: continuation, binding: binding, epoch: own)
+            let unplay = isContinuation ? try await self.fmKnownSongIDs() : []
+            return try await self.loadFM(action, preview: false, unplaySongIds: unplay, binding: binding, epoch: own)
         }
         access.register(id) { authorization.revoke(); Task { await reader.close() } }
         fmQueues[id] = (key, authorization, reader)

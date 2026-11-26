@@ -90,6 +90,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
 
     let service: any MusicPublicBrowsing
     @Published public internal(set) var request: MusicPublicBrowseRequest
+    @Published var previewResetRevision = 0
     var pageEpoch = UUID(), actionEpoch = UUID(), loadEpoch = UUID()
     var homeNeedsRefresh = true
     var playlistNeedsRefresh = true
@@ -241,8 +242,15 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         invalidate(clear: true)
     }
 
+    func invalidateCachedDiscovery() {
+        retireArtwork()
+        if isHome { homeNeedsRefresh = true }
+        if loaded { contentLoadedAt = .distantPast }
+    }
+
     func invalidate(clear: Bool) {
         retireArtwork()
+        previewResetRevision &+= 1
         pageEpoch = UUID(); actionEpoch = UUID(); loadEpoch = UUID()
         issuedIntent = nil
         homeTask?.work.cancel(); homeTask = nil
@@ -274,6 +282,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// navigation/source/access change retires their page identity.
     func invalidateHomeRead() {
         retireArtwork()
+        previewResetRevision &+= 1
         loadEpoch = UUID()
         homeTask?.work.cancel(); homeTask = nil
         task?.cancel(); task = nil

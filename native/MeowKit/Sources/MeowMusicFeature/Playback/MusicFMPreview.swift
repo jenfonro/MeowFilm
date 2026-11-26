@@ -12,14 +12,8 @@ public struct MusicNativeFMResponse: Sendable {
 }
 public protocol MusicNativeFMProviding: MusicNativeHomeProviding {
     func nativeFMPreferenceScope(_ binding: MusicNativeHomeBinding) async throws -> String
-    func nativeFM(_ action: MusicHomeAction, preview: Bool, continuation: Bool,
+    func nativeFM(_ action: MusicHomeAction, preview: Bool, unplaySongIds: [String],
                   binding: MusicNativeHomeBinding) async throws -> MusicNativeFMResponse
-}
-public extension MusicNativeFMProviding {
-    func nativeFM(_ action: MusicHomeAction, preview: Bool,
-                  binding: MusicNativeHomeBinding) async throws -> MusicNativeFMResponse {
-        try await nativeFM(action, preview: preview, continuation: false, binding: binding)
-    }
 }
 public struct MusicFMPreview: Sendable {
     public let artwork: URL?

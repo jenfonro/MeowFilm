@@ -77,7 +77,7 @@ public sealed record MusicDailyRequest(string Platform = "wy",
     MusicDailyBranch Branch = MusicDailyBranch.Default, bool Refresh = false);
 public sealed record MusicFmRequest(string Platform = "wy", MusicFmMode Mode = MusicFmMode.Default,
     string Submode = "", bool Preview = false, string? RuleId = null, string? TabTagId = null,
-    IReadOnlyList<string>? UnplaySongIds = null, bool Continuation = false);
+    IReadOnlyList<string>? UnplaySongIds = null);
 public sealed record MusicSimilarRequest(string Platform, IReadOnlyList<string> SourceIds,
     string SourceType = "song", IReadOnlyList<string>? UnplaySongIds = null);
 public sealed record MusicHeartbeatContinuation(string PlaylistId, string StartMusicId, string AccountId, long Count);

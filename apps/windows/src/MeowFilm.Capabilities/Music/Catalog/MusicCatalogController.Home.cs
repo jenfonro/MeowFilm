@@ -10,6 +10,36 @@ public sealed partial class MusicCatalogController
         await homeSnapshotStore.ClearAsync(token).ConfigureAwait(false);
     }
 
+    internal Task InvalidateBrowseCachesAsync() =>
+        ctx.Dispatcher.IsClosing ? Task.CompletedTask : ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (stopping || disposed) return;
+            optionalReads.Retire();
+            foreach (var key in catalogLocations.Keys.ToArray())
+                RetireCatalogLocation(key);
+            catalogPages.Clear();
+            catalogCursors.Clear();
+            catalogCursors.Add(null);
+            catalogContinuation = null;
+            catalogMore = false;
+            catalogPage = 1;
+            homeSections.Clear();
+            homeDisplaySections.Clear();
+            homeProjection.Clear();
+            publishedHomeState = null;
+            homePage = 1;
+            homeCursors = [null];
+            homeRefreshRequired = true;
+            channelRefreshRequired = IsChannelLanding && ctx.CurrentRoute.StartsWith("catalog-channel/", StringComparison.Ordinal);
+            if (!catalogViewVisible || settings.IsSettingsRequested) return;
+            if (IsCatalogHome) StartHomeRefresh();
+            else if (channelRefreshRequired && ctx.LoadCancellation is null)
+            {
+                channelRefreshRequired = false;
+                _ = RefreshCatalogAsync();
+            }
+        });
+
     internal Task<(bool HasSnapshot, int PageCount, int SectionCount, int CardCount)> GetHomeSnapshotStatsAsync(CancellationToken token = default) =>
         homeSnapshotStore.GetStatsAsync(token);
 

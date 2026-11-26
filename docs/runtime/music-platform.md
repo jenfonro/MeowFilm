@@ -19,7 +19,7 @@
 
 `operation:"playlists", params:{ids:[...]}` 是客户端显式请求的网易集合摘要，内部按上游每批 100 个 ID 执行，返回规范 Collection 列表。首页／频道提取不主动调用该配方补图或标题；适配器记录的结构统计仅以可选 `diagnostics` 返回，不阻断内容。
 
-FM 封面需求使用既有 `operation:"fm", params:{preview:true,...}`：规则 FM 的 `ruleId/tabTagId` 选择封面配方，普通 FM 选择已有单曲预览配方。运行器不在首页／频道中触发它；客户端仅消费返回的 `cover`，按需与生命周期见[共同展示资源](../common/music/presentation-resources.md#缺少图片引用的按需读取)。规则 FM（`/api/tag/tab/fm/recommends`）与稀疏 radio/similar 返回仅含歌曲定位 ID 时，运行器统一按详情配方补齐歌曲资料，保留外层 `alg/source/sourceId`，未返回详情的无效 ID 不伪造为空歌曲。FM 首次进入与预览（`continuation:false` 且无 `unplaySongIds`）及首页、频道目录、频道页、榜单在当前会话作用域下缓存 1 小时（`3600000` ms，降级错误页不缓存）；FM 续播批次（`continuation:true` 或带 `unplaySongIds`）绕过缓存实时获取随机歌曲。
+FM 封面需求使用既有 `operation:"fm", params:{preview:true,...}`：网易频道／Cube 模块显式声明 `mode/subMode` 时统一产出模式漫游动作（仅缺显式模式时回退 `ruleId/tabTagId` 规则漫游），与首页漫游场景入口保持同一协议键；未登录场景漫游存在对应频道 `ruleId` 时走 `/api/tag/tab/fm/recommends` 取得真实曲风歌曲，已登录场景漫游走 `/api/v1/radio/get`。运行器不在首页／频道中触发它；客户端仅消费返回的 `cover`，按需与生命周期见[共同展示资源](../common/music/presentation-resources.md#缺少图片引用的按需读取)。规则 FM（`/api/tag/tab/fm/recommends`）与稀疏 radio/similar 返回仅含歌曲定位 ID 时，运行器统一按详情配方补齐歌曲资料，保留外层 `alg/source/sourceId`，未返回详情的无效 ID 不伪造为空歌曲。FM 首次进入与预览（无 `unplaySongIds`）按同一配置键共享 1 小时首批歌曲缓存（`3600000` ms）并以批次首曲封面作为 `cover`；首页、频道目录、频道页、榜单同样在当前会话作用域下缓存 1 小时（降级错误页不缓存）；FM 续播批次（带 `unplaySongIds`）绕过缓存实时获取随机歌曲。
 
 `operation:"lyrics"` 保持 `{text,translation,romanization}`；QQ／咪咕附属轨失败时额外返回 `errors`，以 `translation`／`romanization` 为键、有限错误码为值。失败轨为空字符串，健康主轨及兄弟轨继续返回；没有任何可用轨的解析失败仍抛错。取消、超时、会话失效及资源超限不降级为轨道错误。原生可继续消费原三个字段，不能把 `errors` 中的附属失败解释成主轨失败。
 

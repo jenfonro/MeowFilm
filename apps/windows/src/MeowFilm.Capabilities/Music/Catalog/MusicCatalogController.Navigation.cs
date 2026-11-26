@@ -110,10 +110,14 @@ public sealed partial class MusicCatalogController
                 })) return;
             return;
         }
+        bool refresh = playlist;
         if (route.StartsWith("catalog-channel/", StringComparison.Ordinal))
+        {
             RetireCatalogLocation(route + "/" + platform);
+            if (channelRefreshRequired) { channelRefreshRequired = false; refresh = true; }
+        }
         catalogPageCode = catalogChannelCodes.GetValueOrDefault(route) ?? "";
-        await LoadCatalogAsync(route, "", 1, null, token, refresh: playlist);
+        await LoadCatalogAsync(route, "", 1, null, token, refresh: refresh);
     }
 
     public void CancelCatalog()
@@ -175,6 +179,11 @@ public sealed partial class MusicCatalogController
         if (stopping || !settings.CatalogSourceLoaded || ctx.LoadCancellation is not null) return Task.CompletedTask;
         if (IsCatalogHome && homeRefreshRequired)
             return NavigateHomeAsync(lifetime.Token);
+        if (channelRefreshRequired && ctx.CurrentRoute.StartsWith("catalog-channel/", StringComparison.Ordinal))
+        {
+            channelRefreshRequired = false;
+            return RefreshCatalogAsync();
+        }
         if (!catalogSourceReload) return Task.CompletedTask;
         catalogSourceReload = false;
         if (!IsCatalogLanding || catalogLoadedPlatform == settings.CatalogSourcePlatform)

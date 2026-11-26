@@ -104,8 +104,9 @@ extension NativeMusicService: MusicFMPlaybackServing {
         try session.source.authorization.check()
         session.attempted.insert(event); session.error = nil; session.errorID = nil
         if !session.buffered.isEmpty {
-            try appendFMBatch(session, tracks: session.buffered)
+            let appended = try appendFMBatch(session, tracks: session.buffered)
             session.buffered = []
+            session.exhausted = !appended
             emitSimilar()
             return
         }
@@ -120,34 +121,46 @@ extension NativeMusicService: MusicFMPlaybackServing {
             try await source.validate()
             try check(own); try source.authorization.check()
             guard fmPlayback === session, !Task.isCancelled else { return }
-            session.exhausted = batch.isEmpty
-            if session.continueEnabled { try appendFMBatch(session, tracks: batch) }
-            else { session.buffered = batch }
+            if session.continueEnabled {
+                let appended = try appendFMBatch(session, tracks: batch)
+                session.exhausted = !appended
+            } else {
+                session.exhausted = batch.isEmpty
+                session.buffered = batch
+            }
         } catch {
             guard fmPlayback === session, epoch == own, source.authorization.isActive else { return }
             let failure = MusicServiceError.sanitized(error)
             if failure != .cancelled { session.error = failure; session.errorID = UUID() }
         }
     }
-    func appendFMBatch(_ session: MusicNativeFMSession, tracks: [MusicQueueTrackReference]) throws {
-        guard !tracks.isEmpty else { return }
+    @discardableResult
+    func appendFMBatch(_ session: MusicNativeFMSession, tracks: [MusicQueueTrackReference]) throws -> Bool {
+        guard !tracks.isEmpty else { return false }
         let context = try remoteContext(session.source)
         var live: [String: MusicRecommendationMetadata] = [:]
-        try session.source.authorization.perform {
-            try similarQueueTransaction([.queue]) { d in
+        let appended = try session.source.authorization.perform {
+            try similarQueueTransaction([.queue]) { d -> Bool in
                 try musicRequire(d.queue.source?.remoteSession == session.source.id.uuidString.lowercased(), .targetChanged)
-                let songs = try repositorySongs(tracks.map(\.songID), d)
+                var seen = Set(d.queue.entries.map(\.songID))
+                let unique = tracks.filter { seen.insert($0.songID).inserted }
+                guard !unique.isEmpty else { return false }
+                let songs = try repositorySongs(unique.map(\.songID), d)
                 let rows = try makeEntries(songs, state: &d, context: context)
                 for i in rows.indices {
-                    if let value = tracks[i].recommendation {
+                    if let value = unique[i].recommendation {
                         live[rows[i].id] = try MusicWireCodec.parseRecommendation(from: value)
                     }
                 }
                 d.queue.entries += rows
                 d.queue.revision += 1
+                return true
             }
         }
-        retainQueueFeedbackOrigins(live, authorization: session.source.authorization, action: session.action)
+        if appended {
+            retainQueueFeedbackOrigins(live, authorization: session.source.authorization, action: session.action)
+        }
+        return appended
     }
     public func advanceFM(_ source: MusicRemoteQueueSource, direction: MusicDirection, reason: MusicAdvanceReason,
                           expectedRevision: Int, intent: MusicQueueAuthorization) async throws -> MusicAdvanceResult {

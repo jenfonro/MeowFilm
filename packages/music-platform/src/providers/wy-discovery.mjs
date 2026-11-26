@@ -160,9 +160,10 @@ function resource(r, { banner = false } = {}) {
   }
   if (kind === 'fm' || declared?.type === 'fm') {
     const coverLabel = text(r.fmLogoTextContent);
-    const fmAction = scalar(r.ruleId) || scalar(r.tabTagId)
+    const explicitMode = text(r.mode) || declared?.mode, explicitSubmode = text(first(r.subMode, r.submode)) || declared?.submode || '';
+    const fmAction = !explicitMode && !explicitSubmode && (scalar(r.ruleId) || scalar(r.tabTagId))
       ? { type: 'fm', provider: 'rule', ruleId: scalar(r.ruleId), tabTagId: scalar(r.tabTagId), sourceName: coverLabel || base.title }
-      : { type: 'fm', mode: fmMode(text(r.mode) || declared?.mode), submode: text(first(r.subMode, r.submode)) || declared?.submode || '' };
+      : { type: 'fm', mode: fmMode(explicitMode), submode: explicitSubmode };
     return wrap(browseCard('wy', { ...base, kind: 'fm', coverLabel, action: fmAction }));
   }
   if (['playlist', 'play_list', 'song_list', 'list', 'scroll_playlist', 'toplist'].includes(kind) || declared?.type === 'playlist') {
