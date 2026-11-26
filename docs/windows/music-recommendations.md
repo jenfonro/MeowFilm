@@ -65,7 +65,7 @@ sourceType heartbeatPlaylistId mode submode ruleId tabTagId
 - `MaybeBeginLocked` 按共同契约决定何时取歌；同一 `Flight`／generation 防止并发读取，`Attempted` 避免同尾项／游标失败后忙重试。没有计时冷却、队列长度阈值或随机轮次限制。
 - `TryAdvanceAsync` 只在已有候选需要并入时等待本地 CAS，不等待 provider HTTP；随后由唯一队列 owner 执行实际循环与插队优先级。普通续批不带 selectIndex，不抢当前媒体。
 - 搜索候选仅追加时 `started` 仍为 false，队列 source 保持搜索；普通方式不会自动追加候选。唯一队列 writer 真正选择活会话推荐 occurrence 时，在该次选择 CAS 中切换 source，成功回执同步激活推荐，再允许后续普通追加保留会话。显式 choose／主动 enter 同样以实际提交的选择为准，不从持久条目 context 重建活会话。
-- FM 首次进入与显式换频道均以新会话独立 enter 替换队列并选择新批真实首项；同一未退出的活跃 FM 会话重复点击恢复播放，正常后续队尾取歌传递 `continuation=true` 与 `unplaySongIds` 并按已有录音去重。
+- FM 首次进入与显式换频道均以新会话独立 enter 替换队列并选择新批真实首项；同一未退出的活跃 FM 会话重复点击恢复播放，正常后续队尾取歌传递 `unplaySongIds` 并按已有录音去重。
 - 关闭 continue 保留候选及 seed；在途读取可完成为候选，但不自动并入。已准入 CAS 等待实际结算，不回滚已提交内容。最后候选消费后才按 hasMore 结束；空批／全部重复同样停止自动链。
 - 心动与主动推荐共用 retainCurrent restore；相似、FM 和搜索候选没有返回 checkpoint。完整心动结果及缺失详情由平台 owner 解析；续批调用同一心动接口并保持原进入上下文。
 

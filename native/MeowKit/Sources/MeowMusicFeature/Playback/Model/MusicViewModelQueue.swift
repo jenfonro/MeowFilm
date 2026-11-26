@@ -4,11 +4,6 @@ import MeowContracts
 import MeowPlayback
 import MeowStorage
 
-struct MusicFMArtwork: Equatable {
-    let configuration: MusicHomeAction
-    let url: URL?
-}
-
 @MainActor
 extension MusicViewModel {
     public func play(_ track: MusicRemoteTrack) async { await queueAction(.replace([track.ref], index: 0), startPlayback: true) }
@@ -133,28 +128,6 @@ extension MusicViewModel {
         try check(epoch)
         guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
         if recommendations.fmSource?.id == source.id, source.authorization.isActive { playbackState.activeHomeFM = action }
-    }
-    /// Only the current occurrence of this exact live radio session can supply
-    /// an entrance cover; an inserted/selected song is not implicitly an FM song.
-    func currentFMArtwork(_ action: MusicHomeAction) -> URL? {
-        guard let artwork = fmArtwork(configuration: activeHomeFM?.fmConfiguration, current: current,
-            metadataURL: metadataArtworkURL, metadataOccurrence: metadataOccurrenceID,
-            ready: isFMActive && !isPreparingRemoteQueue && phase != .failed),
-              action.isPersonalFM, artwork.configuration == action.fmConfiguration else { return nil }
-        return artwork.url
-    }
-    func fmArtwork(configuration: MusicHomeAction?, current: MusicQueueEntry?,
-                   metadataURL: URL?, metadataOccurrence: String?, ready: Bool) -> MusicFMArtwork? {
-        let sessionID: UUID?
-        if let fmSource = recommendations.fmSource {
-            sessionID = fmSource.authorization.isActive ? fmSource.id : nil
-        } else {
-            sessionID = playbackState.fmPlayback?.id
-        }
-        guard ready, let configuration, let current, let sessionID,
-              current.remoteSessionID == sessionID else { return nil }
-        return .init(configuration: configuration,
-            url: metadataOccurrence == current.id ? metadataURL : current.track.artwork)
     }
     public func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
         let epoch = try enter()
