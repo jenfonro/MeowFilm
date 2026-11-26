@@ -140,7 +140,7 @@ Buffer、typed arrays、KeyObject、X509Certificate、ECDH、Web 事件、Promis
 
 Cat `fetch` 仅对已支持的 Content-Encoding 执行解压；未知编码保留原字节、状态和响应头，不采用注入普通网络适配器的 `UNSUPPORTED_OPTION` 拒绝规则。
 
-iOS 的固定 NodeMobile 18 不通过内置 Web 值 getter 间接启动 Undici/WASM；构建只打包锁定的纯 Web 值模块，现有 managed HTTP、原生字节／流与取消资源归属不变，见 [iOS 运行底座](../ios/runtime-preflight.md)。其他平台继续使用其 Node 原生 Web 值。
+iOS 的固定 NodeMobile 18 不通过内置 Web 值 getter 间接启动 Undici/WASM；构建只打包锁定的纯 Web 值模块，现有 managed HTTP、原生字节／流与取消资源归属不变，见 [iOS 架构](../ios/architecture.md)。其他平台继续使用其 Node 原生 Web 值。
 
 启动优先采用明确导出的 `start` 或函数入口，其次识别已求值函数的明确服务启动信号及其包装器。已有可选入口或直接导出的 spider 时不扫描整份 bundle；只有无法从已求值作用域找到入口的闭包包装器，才由 Acorn 一次词法索引、定向解析目标函数和单调用包装链。静态发现不执行表达式、不解析整份 bundle AST，不把字符串／注释内的代码当作声明，也不使用脚本名或作者名白名单。
 
@@ -273,4 +273,4 @@ Cat status 还提供非敏感 `routing:{providers,mappings}`。五盘有效开�
 
 ## 构建与验证边界
 
-通用 payload 唯一 profile 为 `common-native`，独立入口 `app/entry.mjs`，使用同一 HTTP v1。原生引擎固定输入见 `scripts/script-host-native.json` 与 `scripts/quickjs/build-native.mjs`（LX/source 使用；Cat 不进入 QuickJS）。iOS 在同一闭包上增加平台受信启动与内置 framework；Windows 在公共产物上增加私密启动包装。通用构建、平台装配及真实第三方脚本须分别验证；适用环境及边界见[通用验证范围](script-runtime.md#构建发布与验证边界)、[iOS 运行底座](../ios/runtime-preflight.md)及[Windows 打包说明](../windows/runtime-packaging.md)。
+通用 payload 唯一 profile 为 `common-native`，独立入口 `app/entry.mjs`，使用同一 HTTP v1。原生引擎固定输入见 `scripts/script-host-native.json` 与 `scripts/quickjs/build-native.mjs`（LX/source 使用；Cat 不进入 QuickJS）。iOS 在同一闭包上增加平台受信启动与内置 framework；Windows 在公共产物上增加私密启动包装。通用构建、平台装配及真实第三方脚本须分别验证；适用环境及边界见[通用验证范围](script-runtime.md#构建发布与验证边界)、[iOS 架构](../ios/architecture.md)及[Windows 打包说明](../windows/runtime-packaging.md)。

@@ -140,10 +140,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
             }
             catch
             {
-                // A storage failure may follow an accepted CAS. Only the stored
-                // authority decides the value; never replay the stale draft.
-                try { await Read(); Status = Equal(Preferences, draft) ? "" : "快捷键设置未保存，请重试"; }
-                catch { loaded = false; SetRecording(false); Status = "快捷键设置保存失败，请重新读取"; }
+                Status = "快捷键设置保存失败";
             }
         }
         finally
@@ -196,30 +193,16 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
 
         var bindings = db.Query(
             "SELECT action,local_key,local_modifiers,global_key,global_modifiers FROM windows_app_media_bindings ORDER BY position,action",
-            row =>
-            {
-                var actionText = row.GetString(0);
-                if (!Enum.TryParse<MediaShortcutAction>(actionText, out var action) ||
-                    !Enum.IsDefined(action) || action.ToString() != actionText)
-                    throw new StorageException(StorageError.Corrupt);
-                return new MediaShortcutBinding(
-                    action,
-                    DecodeGesture(row.GetNullableString(1), row.GetNullableInt32(2)),
-                    DecodeGesture(row.GetNullableString(3), row.GetNullableInt32(4)));
-            });
+            row => new MediaShortcutBinding(
+                Enum.Parse<MediaShortcutAction>(row.GetString(0)),
+                DecodeGesture(row.GetNullableString(1), row.GetNullableInt32(2)),
+                DecodeGesture(row.GetNullableString(3), row.GetNullableInt32(4))));
 
-        var value = new MediaControlPreferences(head.Global, head.System, bindings);
-        if (MediaShortcutGestures.ValidationError(value) is not null)
-            throw new StorageException(StorageError.Corrupt);
-        return Snapshot(value);
+        return Snapshot(new MediaControlPreferences(head.Global, head.System, bindings));
 
-        static MediaShortcutGesture? DecodeGesture(string? keyText, int? modifiers)
-        {
-            if (keyText is null && modifiers is null) return null;
-            if (keyText is null || modifiers is null ||
-                !Enum.TryParse<Key>(keyText, out var key) || key.ToString() != keyText)
-                throw new StorageException(StorageError.Corrupt);
-            return new MediaShortcutGesture(key, (ModifierKeys)modifiers.Value);
-        }
+        static MediaShortcutGesture? DecodeGesture(string? keyText, int? modifiers) =>
+            keyText is not null && modifiers is not null && Enum.TryParse<Key>(keyText, out var key)
+                ? new MediaShortcutGesture(key, (ModifierKeys)modifiers.Value)
+                : null;
     }
 }

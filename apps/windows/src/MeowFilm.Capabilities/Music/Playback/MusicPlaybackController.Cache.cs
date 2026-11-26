@@ -108,7 +108,7 @@ public sealed partial class MusicPlaybackController
         try
         {
             var state = attempt.Origin;
-            var next = await application.PeekNextQueueAsync(attempt.Cancellation.Token);
+            var next = await application.Library.PeekNextQueueAsync(attempt.Cancellation.Token);
             if (!ReferenceEquals(musicPreload, attempt) || !CurrentRecovery(state)) return;
             attempt.QueueVersion = next.Version;
             attempt.QueueMode = next.Mode;
@@ -339,9 +339,9 @@ public sealed partial class MusicPlaybackController
         if (audioFileCache is not null && FileIdentity(media) is { } identity)
             await audioFileCache.EraseAsync(identity.Scope, state.Song.Id, identity.Signature, token);
         try { return await session.RefreshAsync(media.Target!, token); }
-        catch (MusicOperationException error) when (UnavailableSourceCandidate(error.Code))
+        catch (Exception error) when (ErrorCode(error) is { } code && UnavailableSourceCandidate(code))
         {
-            session.Reject(media, error.Code);
+            session.Reject(media, code);
             return null;
         }
     }

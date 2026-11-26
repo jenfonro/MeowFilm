@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { compareCandidates } from './policy.js';
 import { providerFamily } from './rules.js';
-import { validateManual } from './library.js';
 import { clone, codeOf, fail, fields, identity, isIdentifier, requireValue } from './identity.js';
 import { canDiscoverVariants, cancelled, manualIdentity, replaceLine, samePlayIntent, sameVariantFile } from './session-helpers.js';
 
@@ -226,7 +225,6 @@ export function createSessionSelection(ctx) {
     await library.update(document => {
       const entry = document.manual.find(item => item?.id === row.id);
       if (!entry || entry.enabled === false || manualIdentity(entry) !== manualIdentity(row)) return;
-      requireValue(Number.isSafeInteger(entry.failureCount) && entry.failureCount >= 0, 'CORRUPT_STORAGE');
       entry.failureCount = error ? entry.failureCount + 1 : 0;
       if (entry.autoDisable && entry.failureCount >= 3) entry.enabled = false;
     });
@@ -407,10 +405,8 @@ export function createSessionSelection(ctx) {
         session.stage = 'manual'; ctx.publish(session);
         for (const row of manualRows) {
           if (!ctx.valid(session, generation)) return;
-          try {
-            validateManual(row, 'CORRUPT_STORAGE');
-          } catch (error) {
-            session.selectionError = codeOf(error);
+          if (row.errorCode) {
+            session.selectionError = row.errorCode;
             continue;
           }
           if (row.share) {

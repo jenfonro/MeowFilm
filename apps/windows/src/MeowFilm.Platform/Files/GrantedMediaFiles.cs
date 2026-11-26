@@ -22,7 +22,7 @@ public sealed class GrantedMediaFiles
         var selected = selectedPaths?.ToArray() ?? throw new InvalidDataException("FILE_LIMIT");
         if (selected.Length == 0) throw new InvalidDataException("FILE_LIMIT");
         var files = await Task.Run(() => selected.Select(Grant).DistinctBy(file => file.Id).ToArray(), cancellationToken).ConfigureAwait(false);
-        try { await database.WriteAsync(db =>
+        await database.WriteAsync(db =>
         {
             long nextPosition = db.Scalar<long>("SELECT COALESCE(MAX(position) + 1, 0) FROM windows_file_grants");
             foreach (var file in files)
@@ -35,9 +35,7 @@ public sealed class GrantedMediaFiles
                     ("$id", file.Id), ("$position", nextPosition++), ("$path", file.Path), ("$title", file.Title));
             }
             return true;
-        }, cancellationToken, files.Sum(file => (file.Id.Length + file.Path.Length + file.Title.Length) * 2)).ConfigureAwait(false); }
-        catch (StorageException error) when (error.Error is StorageError.Storage or StorageError.Io)
-        { throw new InvalidDataException("COMMIT_UNKNOWN"); }
+        }, cancellationToken).ConfigureAwait(false);
         return files;
     }
     public async Task<Uri> ResolveAsync(string id, CancellationToken cancellationToken = default)

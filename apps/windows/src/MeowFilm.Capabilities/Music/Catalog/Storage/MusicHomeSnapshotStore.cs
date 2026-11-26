@@ -50,45 +50,41 @@ internal sealed record HomePreviewRecord(
 
 internal sealed record HomeCardRecord(
     bool HiddenOnly,
-    string? SongId,
-    string? RefSongId,
-    string? Id,
-    string? Key,
-    string? Name,
-    string? Title,
-    string? Label,
-    string? Subtitle,
-    string? ContextText,
-    string? Creator,
-    string? Cover,
-    string? CoverLabel,
-    string? Kind,
-    string? PageCode,
-    string? ChannelKind,
-    bool? Available,
-    string? ErrorCode,
-    bool? RequiresAccount,
-    bool? Display,
-    string? Placement,
-    bool? CanPlay,
-    string? RankText,
-    string? SalesText,
-    string? Relationship,
-    long? Count,
-    long? PlayCount,
-    string? Presentation,
-    long? DayOfMonth,
-    string? Decoration,
-    string? UpdateFrequency,
-    string? CoverRefKind,
-    string? CoverRefId,
-    HomeLocatorRecord? Locator,
-    HomeActionRecord? Action,
-    HomeActionRecord? PlaybackSource,
-    IReadOnlyList<HomePreviewRecord>? Previews);
+    string? RefSongId = null,
+    string? Id = null,
+    string? Key = null,
+    string? Title = null,
+    string? Label = null,
+    string? Subtitle = null,
+    string? ContextText = null,
+    string? Cover = null,
+    string? CoverLabel = null,
+    string? Kind = null,
+    string? PageCode = null,
+    string? ChannelKind = null,
+    bool? Available = null,
+    string? ErrorCode = null,
+    bool? RequiresAccount = null,
+    bool? Display = null,
+    string? Placement = null,
+    bool? CanPlay = null,
+    string? RankText = null,
+    string? SalesText = null,
+    string? Relationship = null,
+    long? Count = null,
+    long? PlayCount = null,
+    string? Presentation = null,
+    long? DayOfMonth = null,
+    string? Decoration = null,
+    string? UpdateFrequency = null,
+    string? CoverRefKind = null,
+    string? CoverRefId = null,
+    HomeLocatorRecord? Locator = null,
+    HomeActionRecord? Action = null,
+    HomeActionRecord? PlaybackSource = null,
+    IReadOnlyList<HomePreviewRecord>? Previews = null);
 
 internal sealed record HomeTabRecord(string? Id, string? Name, IReadOnlyList<HomeCardRecord>? Items);
-internal sealed record HomeTagRecord(string? Id, string? Name, string? Group, bool? Selected);
 
 internal sealed record HomeSectionRecord(
     bool HiddenOnly,
@@ -96,16 +92,12 @@ internal sealed record HomeSectionRecord(
     string? Title,
     string? Type,
     string? Layout,
-    bool? Available,
     string? ErrorCode,
     bool? RequiresAccount,
-    bool? Display,
     string? SelectedTab,
-    string? SelectedTag,
     HomeActionRecord? Action,
     IReadOnlyList<HomeCardRecord>? Items,
-    IReadOnlyList<HomeTabRecord> Tabs,
-    IReadOnlyList<HomeTagRecord> Tags);
+    IReadOnlyList<HomeTabRecord> Tabs);
 
 internal sealed record HomePageRecord(string Platform, IReadOnlyList<HomeSectionRecord> Sections);
 internal sealed record HomeSnapshotRecord(string Platform, IReadOnlyList<HomePageRecord> Pages);
@@ -174,20 +166,19 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
 
     internal async Task SaveRecordAsync(HomeSnapshotRecord record, CancellationToken token = default)
     {
-        if (!TryEnterOp()) return;
+        if (record.Platform is not ("wy" or "kg") || record.Pages.Count == 0 || !TryEnterOp()) return;
         try
         {
             await gate.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                Require(record.Platform is "wy" or "kg" && record.Pages.Count > 0);
                 token.ThrowIfCancellationRequested();
                 await database.WriteAsync(db =>
                 {
                     WriteCore(db, record, token);
                     db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                     return true;
-                }, token, 4096).ConfigureAwait(false);
+                }, token).ConfigureAwait(false);
             }
             catch (Exception error) when (IsStorageFailure(error)) { }
             finally { gate.Release(); }
@@ -209,7 +200,7 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
                     db.Execute("DELETE FROM windows_music_home_pages");
                     db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                     return true;
-                }, token, 256).ConfigureAwait(false);
+                }, token).ConfigureAwait(false);
             }
             finally { gate.Release(); }
         }
@@ -233,9 +224,8 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
     {
         token.ThrowIfCancellationRequested();
         if (!db.TryQuerySingle("SELECT platform FROM windows_music_home_state WHERE singleton=1",
-                row => row.GetString(0), out string platform))
+                row => row.GetString(0), out string platform) || platform is not ("wy" or "kg"))
             return null;
-        Require(platform is "wy" or "kg");
 
         var pageRows = db.Query("SELECT page_index,platform FROM windows_music_home_pages ORDER BY page_index",
             row => (Index: row.GetInt32(0), Platform: row.GetString(1)));
@@ -314,8 +304,8 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
         var cardsByTab = new Dictionary<string, List<HomeCardRecord>>(StringComparer.Ordinal);
         foreach (var entry in db.Query("""
             SELECT card_uid,section_uid,tab_uid,
-                   song_id,ref_song_id,card_id,card_key,name,title,label,subtitle,
-                   context_text,creator,cover,cover_label,kind,page_code,channel_kind,available,error_code,
+                   ref_song_id,card_id,card_key,title,label,subtitle,
+                   context_text,cover,cover_label,kind,page_code,channel_kind,available,error_code,
                    requires_account,display,placement,can_play,rank_text,sales_text,relationship,item_count,
                    play_count,presentation,day_of_month,decoration,update_frequency,
                    cover_ref_kind,cover_ref_id,locator_uid,action_uid,playback_action_uid
@@ -327,23 +317,23 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
                 string cardUid = r.GetString(0);
                 string sectionUid = r.GetString(1);
                 string? tabUid = r.GetNullableString(2);
-                bool? display = r.GetNullableBool(21);
-                bool hiddenOnly = display == false && r.IsDBNull(5) && r.IsDBNull(8) && r.IsDBNull(15);
-                HomeLocatorRecord? loc = r.GetNullableString(35) is { } luid && locators.TryGetValue(luid, out var lv) ? lv : null;
-                HomeActionRecord? act = r.GetNullableString(36) is { } auid && actions.TryGetValue(auid, out var av) ? av : null;
-                HomeActionRecord? pb = r.GetNullableString(37) is { } puid && actions.TryGetValue(puid, out var pv) ? pv : null;
+                bool? display = r.GetNullableBool(18);
+                bool hiddenOnly = display == false && r.IsDBNull(4) && r.IsDBNull(6) && r.IsDBNull(12);
+                HomeLocatorRecord? loc = r.GetNullableString(32) is { } luid && locators.TryGetValue(luid, out var lv) ? lv : null;
+                HomeActionRecord? act = r.GetNullableString(33) is { } auid && actions.TryGetValue(auid, out var av) ? av : null;
+                HomeActionRecord? pb = r.GetNullableString(34) is { } puid && actions.TryGetValue(puid, out var pv) ? pv : null;
                 previewsByCard.TryGetValue(cardUid, out var previews);
                 var card = new HomeCardRecord(
                     hiddenOnly,
-                    r.GetNullableString(3), r.GetNullableString(4), r.GetNullableString(5), r.GetNullableString(6),
-                    r.GetNullableString(7), r.GetNullableString(8), r.GetNullableString(9), r.GetNullableString(10),
-                    r.GetNullableString(11), r.GetNullableString(12), r.GetNullableString(13), r.GetNullableString(14),
-                    r.GetNullableString(15), r.GetNullableString(16), r.GetNullableString(17),
-                    r.GetNullableBool(18), r.GetNullableString(19), r.GetNullableBool(20), display,
-                    r.GetNullableString(22), r.GetNullableBool(23), r.GetNullableString(24), r.GetNullableString(25),
-                    r.GetNullableString(26), r.GetNullableInt64(27), r.GetNullableInt64(28), r.GetNullableString(29),
-                    r.GetNullableInt64(30), r.GetNullableString(31), r.GetNullableString(32),
-                    r.GetNullableString(33), r.GetNullableString(34),
+                    r.GetNullableString(3), r.GetNullableString(4), r.GetNullableString(5),
+                    r.GetNullableString(6), r.GetNullableString(7), r.GetNullableString(8),
+                    r.GetNullableString(9), r.GetNullableString(10), r.GetNullableString(11),
+                    r.GetNullableString(12), r.GetNullableString(13), r.GetNullableString(14),
+                    r.GetNullableBool(15), r.GetNullableString(16), r.GetNullableBool(17), display,
+                    r.GetNullableString(19), r.GetNullableBool(20), r.GetNullableString(21), r.GetNullableString(22),
+                    r.GetNullableString(23), r.GetNullableInt64(24), r.GetNullableInt64(25), r.GetNullableString(26),
+                    r.GetNullableInt64(27), r.GetNullableString(28), r.GetNullableString(29),
+                    r.GetNullableString(30), r.GetNullableString(31),
                     loc, act, pb, previews);
                 return (SectionUid: sectionUid, TabUid: tabUid, Card: card);
             }))
@@ -379,23 +369,10 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
             list.Add(t.Tab);
         }
 
-        var tagsBySection = new Dictionary<string, List<HomeTagRecord>>(StringComparer.Ordinal);
-        foreach (var tg in db.Query("""
-            SELECT section_uid,tag_id,name,group_name,selected
-            FROM windows_music_home_tags
-            ORDER BY section_uid, tag_index
-            """, r => (SectionUid: r.GetString(0), Tag: new HomeTagRecord(
-                r.GetNullableString(1), r.GetNullableString(2), r.GetNullableString(3), r.GetNullableBool(4)))))
-        {
-            if (!tagsBySection.TryGetValue(tg.SectionUid, out var list))
-                tagsBySection[tg.SectionUid] = list = [];
-            list.Add(tg.Tag);
-        }
-
         var sectionsByPage = new Dictionary<int, List<HomeSectionRecord>>();
         foreach (var sec in db.Query("""
-            SELECT section_uid,page_index,section_id,title,type,layout,available,error_code,
-                   requires_account,display,selected_tab,selected_tag,action_uid
+            SELECT section_uid,page_index,section_id,title,type,layout,error_code,
+                   requires_account,display,selected_tab,action_uid
             FROM windows_music_home_sections
             ORDER BY page_index, section_index
             """, r =>
@@ -403,18 +380,15 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
                 token.ThrowIfCancellationRequested();
                 string suid = r.GetString(0);
                 int pidx = r.GetInt32(1);
-                bool? display = r.GetNullableBool(9);
-                bool hiddenOnly = display == false && r.IsDBNull(2) && r.IsDBNull(3) && r.IsDBNull(5);
-                HomeActionRecord? act = r.GetNullableString(12) is { } auid && actions.TryGetValue(auid, out var av) ? av : null;
+                bool hiddenOnly = r.GetNullableBool(8) == false && r.IsDBNull(2) && r.IsDBNull(3) && r.IsDBNull(5);
+                HomeActionRecord? act = r.GetNullableString(10) is { } auid && actions.TryGetValue(auid, out var av) ? av : null;
                 directCardsBySection.TryGetValue(suid, out var cards);
                 var tabs = tabsBySection.TryGetValue(suid, out var tb) ? tb : (IReadOnlyList<HomeTabRecord>)[];
-                var tags = tagsBySection.TryGetValue(suid, out var tg) ? tg : (IReadOnlyList<HomeTagRecord>)[];
                 return (PageIndex: pidx, Section: new HomeSectionRecord(
                     hiddenOnly,
                     r.GetNullableString(2), r.GetNullableString(3), r.GetNullableString(4), r.GetNullableString(5),
-                    r.GetNullableBool(6), r.GetNullableString(7), r.GetNullableBool(8), display,
-                    r.GetNullableString(10), r.GetNullableString(11),
-                    act, cards, tabs, tags));
+                    r.GetNullableString(6), r.GetNullableBool(7), r.GetNullableString(9),
+                    act, cards, tabs));
             }))
         {
             if (!sectionsByPage.TryGetValue(sec.PageIndex, out var list))
@@ -512,22 +486,22 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
 
                 db.Execute("""
                     INSERT INTO windows_music_home_cards(
-                        card_uid,section_uid,tab_uid,card_index,song_id,ref_song_id,card_id,card_key,
-                        name,title,label,subtitle,context_text,creator,cover,cover_label,kind,page_code,channel_kind,
+                        card_uid,section_uid,tab_uid,card_index,ref_song_id,card_id,card_key,
+                        title,label,subtitle,context_text,cover,cover_label,kind,page_code,channel_kind,
                         available,error_code,requires_account,display,placement,can_play,rank_text,sales_text,relationship,
                         item_count,play_count,presentation,day_of_month,decoration,update_frequency,
                         cover_ref_kind,cover_ref_id,locator_uid,action_uid,playback_action_uid)
                     VALUES(
-                        $cuid,$suid,$tuid,$cidx,$sid,$rsid,$cid,$ckey,
-                        $name,$title,$label,$sub,$ctx,$creator,$cover,$clabel,$kind,$pcode,$ckind,
+                        $cuid,$suid,$tuid,$cidx,$rsid,$cid,$ckey,
+                        $title,$label,$sub,$ctx,$cover,$clabel,$kind,$pcode,$ckind,
                         $avail,$err,$req,$disp,$place,$canplay,$rankt,$salest,$rel,
                         $cnt,$pcnt,$pres,$dom,$dec,$ufreq,
                         $crkind,$crid,$luid,$auid,$puid)
                     """,
                     ("$cuid", cardUid), ("$suid", sectionUid), ("$tuid", tabUid), ("$cidx", cIdx),
-                    ("$sid", card.SongId), ("$rsid", card.RefSongId), ("$cid", card.Id), ("$ckey", card.Key),
-                    ("$name", card.Name), ("$title", card.Title), ("$label", card.Label), ("$sub", card.Subtitle),
-                    ("$ctx", card.ContextText), ("$creator", card.Creator), ("$cover", card.Cover), ("$clabel", card.CoverLabel),
+                    ("$rsid", card.RefSongId), ("$cid", card.Id), ("$ckey", card.Key),
+                    ("$title", card.Title), ("$label", card.Label), ("$sub", card.Subtitle),
+                    ("$ctx", card.ContextText), ("$cover", card.Cover), ("$clabel", card.CoverLabel),
                     ("$kind", card.Kind), ("$pcode", card.PageCode), ("$ckind", card.ChannelKind),
                     ("$avail", card.Available), ("$err", card.ErrorCode), ("$req", card.RequiresAccount),
                     ("$disp", card.Display), ("$place", card.Placement), ("$canplay", card.CanPlay),
@@ -569,14 +543,14 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
                 string? actUid = InsertAction(sec.Action);
                 db.Execute("""
                     INSERT INTO windows_music_home_sections(
-                        section_uid,page_index,section_index,section_id,title,type,layout,available,error_code,
-                        requires_account,display,selected_tab,selected_tag,action_uid)
-                    VALUES($uid,$pidx,$sidx,$sid,$title,$type,$layout,$avail,$err,$req,$disp,$stab,$stag,$auid)
+                        section_uid,page_index,section_index,section_id,title,type,layout,error_code,
+                        requires_account,selected_tab,action_uid)
+                    VALUES($uid,$pidx,$sidx,$sid,$title,$type,$layout,$err,$req,$stab,$auid)
                     """,
                     ("$uid", sectionUid), ("$pidx", pIdx), ("$sidx", sIdx),
                     ("$sid", sec.Id), ("$title", sec.Title), ("$type", sec.Type), ("$layout", sec.Layout),
-                    ("$avail", sec.Available), ("$err", sec.ErrorCode), ("$req", sec.RequiresAccount),
-                    ("$disp", sec.Display), ("$stab", sec.SelectedTab), ("$stag", sec.SelectedTag), ("$auid", actUid));
+                    ("$err", sec.ErrorCode), ("$req", sec.RequiresAccount),
+                    ("$stab", sec.SelectedTab), ("$auid", actUid));
 
                 if (sec.Items is { } items)
                     for (int cIdx = 0; cIdx < items.Count; cIdx++)
@@ -594,23 +568,8 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsync
                         for (int cIdx = 0; cIdx < tItems.Count; cIdx++)
                             InsertCard(sectionUid, tabUid, cIdx, tItems[cIdx]);
                 }
-
-                for (int gIdx = 0; gIdx < sec.Tags.Count; gIdx++)
-                {
-                    var tag = sec.Tags[gIdx];
-                    db.Execute("""
-                        INSERT INTO windows_music_home_tags(section_uid,tag_index,tag_id,name,group_name,selected)
-                        VALUES($suid,$gidx,$gid,$name,$grp,$sel)
-                        """, ("$suid", sectionUid), ("$gidx", gIdx), ("$gid", tag.Id),
-                        ("$name", tag.Name), ("$grp", tag.Group), ("$sel", tag.Selected));
-                }
             }
         }
-    }
-
-    private static void Require(bool condition)
-    {
-        if (!condition) throw new StorageException(StorageError.Corrupt);
     }
 
     private static bool IsStorageFailure(Exception error) =>

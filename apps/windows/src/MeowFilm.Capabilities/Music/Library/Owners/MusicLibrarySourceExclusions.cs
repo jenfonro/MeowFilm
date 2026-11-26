@@ -1,12 +1,5 @@
 namespace MeowFilm.Capabilities.Library;
 
-/// <summary>
-/// Unified 2-tier reversible source exclusions on MusicLibraryOwner, delegating rules to
-/// <see cref="MusicSourceExclusionsOwner"/>:
-///   Tier 1: provider (official or script UUID) × platform
-///   Tier 2: per-recording sourceKey ("recording:" + sourceKey)
-/// Only an explicit restore removes a record; expiry, cache clearing and script updates never do.
-/// </summary>
 public sealed partial class MusicLibraryOwner
 {
     internal const string OfficialProvider = MusicSourceExclusionsOwner.OfficialProvider;
@@ -15,33 +8,36 @@ public sealed partial class MusicLibraryOwner
         string? songId = null,
         MusicSourceExclusionTier? tier = null,
         CancellationToken cancellationToken = default) =>
-        RunLibraryReadAsync(
-            doc => MusicSourceExclusionsOwner.List(doc, songId, tier),
-            cancellationToken,
-            authoritativeFor: PendingOwner.SourceExclusions);
+        RunLibraryReadAsync(doc => MusicSourceExclusionsOwner.List(doc, songId, tier), cancellationToken);
 
-    public Task<MusicSourceExclusionChangeResult> AddSourceExclusionAsync(
+    public async Task<MusicSourceExclusionChangeResult> AddSourceExclusionAsync(
         string songId,
         string provider,
         string platform,
         string providerName,
         string title,
         string artist,
-        CancellationToken cancellationToken = default) =>
-        RunLibraryWriteAsync(
-            PendingOwner.SourceExclusions,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunLibraryWriteAsync(
             doc => MusicSourceExclusionsOwner.Mutate(doc, add: true, songId, provider, platform, providerName, title, artist),
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+        if (result.Changed) InvokeSafe(SourceExclusionsChanged);
+        return result;
+    }
 
-    public Task<MusicSourceExclusionChangeResult> RemoveSourceExclusionAsync(
+    public async Task<MusicSourceExclusionChangeResult> RemoveSourceExclusionAsync(
         string songId,
         string provider,
         string platform,
-        CancellationToken cancellationToken = default) =>
-        RunLibraryWriteAsync(
-            PendingOwner.SourceExclusions,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunLibraryWriteAsync(
             doc => MusicSourceExclusionsOwner.Mutate(doc, add: false, songId, provider, platform),
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+        if (result.Changed) InvokeSafe(SourceExclusionsChanged);
+        return result;
+    }
 
     public Task<MusicSourceExclusionChangeResult> AddRecordingExclusionAsync(
         string songId,
@@ -73,8 +69,5 @@ public sealed partial class MusicLibraryOwner
 
     internal Task<(HashSet<(string SongId, string Provider, string Platform)> ProviderPlatforms,
         HashSet<(string SongId, string SourceKey)> RecordingKeys)> ReadSyncExclusionSnapshotAsync(CancellationToken token) =>
-        RunLibraryReadAsync(
-            MusicSourceExclusionsOwner.ReadSyncSnapshot,
-            token,
-            authoritativeFor: PendingOwner.SourceExclusions);
+        RunLibraryReadAsync(MusicSourceExclusionsOwner.ReadSyncSnapshot, token);
 }

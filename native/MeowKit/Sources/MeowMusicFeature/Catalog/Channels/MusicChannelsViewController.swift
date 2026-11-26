@@ -8,7 +8,6 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     UIPageViewControllerDelegate, PrimaryPageHeaderConfiguring
 {
     let model: MusicViewModel
-    let browser: (any MusicPublicBrowsing)?
     weak var router: (any MusicUIRouting)?
     let selection: MusicChannelSelection
     let catalogue: MusicPublicBrowseViewModel?
@@ -31,11 +30,11 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     private let cataloguePlaceholder = UILabel()
     private let loadingSkeleton = MusicLoadingSkeletonView()
 
-    public init(model: MusicViewModel, browser: (any MusicPublicBrowsing)?,
+    public init(model: MusicViewModel,
                 appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
-        self.model = model; self.browser = browser; self.router = router
+        self.model = model; self.router = router
         selection = model.channelSelection
-        catalogue = browser.map { MusicPublicBrowseViewModel(service: $0, request: .discovery(.channels)) }
+        catalogue = model.service.map { MusicPublicBrowseViewModel(service: $0, request: .discovery(.channels)) }
         super.init(appearance: appearance)
     }
 
@@ -84,7 +83,6 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             observe(catalogueState.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.renderCatalogueState() }
         }
         observe(selection, whenVisible: true) { [weak self] in self?.renderSelection() }
-        observe(model.accessChanges) { [weak self] in self?.activateCatalogue() }
     }
 
     public func configurePrimaryHeader(
@@ -282,7 +280,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         if let existing = pages[channel.identity] { return existing }
         guard let router else { return nil }
         let page = MusicBrowseViewController(
-            title: channel.title, model: model, browser: browser,
+            title: channel.title, model: model,
             request: .discovery(.channel(channel, tag: "")), appearance: appearance,
             router: router, embedded: true
         )

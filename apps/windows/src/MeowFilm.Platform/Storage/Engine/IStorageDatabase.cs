@@ -11,8 +11,7 @@ public interface IStorageDatabase : IAsyncDisposable
     Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default);
     /// <summary>Multi-statement consistent read snapshot wrapped in BEGIN DEFERRED / COMMIT on the read-only lane.</summary>
     Task<T> ReadSnapshotAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default);
-    Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
-        int retainedBytes = 0, Action<Action>? commit = null);
+    Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default, Action<Action>? commit = null);
     T Read<T>(Func<DatabaseSession, T> read);
     T ReadSnapshot<T>(Func<DatabaseSession, T> read);
     Task DrainAsync();

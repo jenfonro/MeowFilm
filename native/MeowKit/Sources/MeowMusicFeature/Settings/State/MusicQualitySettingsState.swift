@@ -17,19 +17,13 @@ struct MusicQualitySettingsSnapshot: Equatable {
     }
 }
 
-private struct MusicQualityOrderPreview {
-    let spatial: Bool
-    let values: [String]
-}
-
 @MainActor
 final class MusicQualitySettingsState: ObservableObject {
     @Published private(set) var value: MusicQualitySettingsSnapshot
     @Published private(set) var busy = false
-    @Published private var movingOrder: MusicQualityOrderPreview?
+    @Published private var movingOrder: (spatial: Bool, values: [String])?
     private let model: MusicViewModel
     private var active = false
-    private var epoch = UUID()
     private var work: Task<Void, Never>?
 
     var isActive: Bool { active && !model.isClosed }
@@ -39,19 +33,7 @@ final class MusicQualitySettingsState: ObservableObject {
         value = MusicQualitySettingsSnapshot(model.state)
     }
 
-    func start() {
-        epoch = UUID()
-        active = true
-        reconcileSettings()
-    }
-
-    func reconcileAccess() {
-        guard active, model.isClosed else { return }
-        epoch = UUID()
-        work?.cancel()
-        if movingOrder != nil { movingOrder = nil }
-        reconcileSettings()
-    }
+    func start() { active = true; reconcileSettings() }
 
     func reconcileSettings() {
         let next = MusicQualitySettingsSnapshot(model.state)
@@ -76,8 +58,7 @@ final class MusicQualitySettingsState: ObservableObject {
     func setEnabled(_ id: String, _ enabled: Bool, spatial: Bool) {
         guard enabled != self.enabled(id, spatial: spatial), enabled || !locked(id, spatial: spatial) else { return }
         var values = spatial ? value.spatialEnabled : value.qualityEnabled
-        if enabled { values.append(id) }
-        else { values.removeAll { $0 == id } }
+        if enabled { values.append(id) } else { values.removeAll { $0 == id } }
         save(spatial ? .init(ifRevision: value.revision, spatialEnabled: values)
                      : .init(ifRevision: value.revision, qualityEnabled: values))
     }
@@ -92,33 +73,24 @@ final class MusicQualitySettingsState: ObservableObject {
         guard values != order, values.count == order.count, Set(values) == Set(order) else { return }
         save(spatial ? .init(ifRevision: value.revision, spatialOrder: values)
                      : .init(ifRevision: value.revision, qualityOrder: values),
-             movingOrder: .init(spatial: spatial, values: values))
+             movingOrder: (spatial, values))
     }
 
     func close() {
-        epoch = UUID()
-        active = false
-        busy = false
-        movingOrder = nil
-        work?.cancel()
+        active = false; busy = false; movingOrder = nil; work?.cancel()
     }
 
-    private func save(_ change: MusicSettingsChange, movingOrder: MusicQualityOrderPreview? = nil) {
+    private func save(_ change: MusicSettingsChange, movingOrder: (spatial: Bool, values: [String])? = nil) {
         guard isActive, work == nil else { return }
-        let own = epoch
         if let movingOrder { self.movingOrder = movingOrder }
         busy = true
         work = Task { [weak self] in
             guard let self else { return }
             defer {
                 work = nil
-                if isActive {
-                    reconcileSettings()
-                    self.movingOrder = nil
-                    busy = false
-                }
+                if isActive { reconcileSettings(); self.movingOrder = nil; busy = false }
             }
-            guard !Task.isCancelled, isActive, epoch == own else { return }
+            guard !Task.isCancelled, isActive else { return }
             await model.updateSettings(change)
         }
     }

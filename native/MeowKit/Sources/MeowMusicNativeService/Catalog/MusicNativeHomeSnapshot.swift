@@ -1,6 +1,6 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 import MeowStorage
 
 /// Disposable page display state. Songs are permanent repository references;

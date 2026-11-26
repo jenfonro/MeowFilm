@@ -7,6 +7,7 @@ import { createNodeDebug } from './debug.mjs';
 const invalid = () => { throw new BridgeError('INVALID_REQUEST'); };
 const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_DENIED',
   'CLOSED', 'CANCELLED', 'TIMEOUT', 'INVALID_RESPONSE']);
+const validCode = code => typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code);
 const success = value => ({ ok: true, contract: HTTP_PROTOCOL, value });
 const failureCode = id => ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE',
   cat: 'SCRIPT_EXCEPTION', pan: 'PAN_FAILURE', tmdb: 'UPSTREAM_FORMAT', douban: 'UPSTREAM_FORMAT',
@@ -72,18 +73,11 @@ export function createAppRuntime({ sessionId,
     if (!Array.isArray(modules) || !modules.length) invalid();
     for (const module of modules) {
       const contract = contracts[module?.id];
-      if (!contract || owners.has(module.id) || module.version !== contract.version ||
-          module.contract !== contract.contract || typeof module.close !== 'function' ||
-          contract.upload && typeof module.upload !== 'function' ||
-          module.upload !== undefined && typeof module.upload !== 'function' ||
-          module.image !== undefined && typeof module.image !== 'function' ||
-          module.events !== undefined && typeof module.events !== 'function' ||
+      if (!contract || owners.has(module.id) || typeof module.close !== 'function' ||
           !module.methods || typeof module.methods !== 'object') invalid();
       const entries = Object.entries(module.methods);
       for (const [name, handler] of entries) {
-        if (!name.startsWith(contract.prefix) ||
-            !/^[a-z]+(?:\.[a-z][a-zA-Z]*)*$(?![\s\S])/.test(name.slice(contract.prefix.length)) ||
-            typeof handler !== 'function' || methods.has(name)) invalid();
+        if (!name.startsWith(contract.prefix) || typeof handler !== 'function' || methods.has(name)) invalid();
         methods.set(name, handler);
       }
       owners.set(module.id, module);
@@ -384,7 +378,7 @@ export function createAppRuntime({ sessionId,
                 event: 'module.events.error', data: { path: url.pathname, query: url.search }, error });
             }
             return { ok: false, contract: module.contract,
-              code: contract.codes.has(error?.code) ? error.code : failureCode(module.id) };
+              code: validCode(error?.code) ? error.code : failureCode(module.id) };
           }
         } }, { httpMethod: method, path: url.pathname, search: url.search, moduleId: module.id, sub: `${module.id}.events` });
     }
@@ -399,7 +393,7 @@ export function createAppRuntime({ sessionId,
                 event: 'module.image.error', data: { path: url.pathname }, error });
             }
             return { ok: false, contract: module.contract,
-              code: contract.codes.has(error?.code) ? error.code : failureCode(module.id) };
+              code: validCode(error?.code) ? error.code : failureCode(module.id) };
           }
         } }, { httpMethod: method, path: url.pathname, moduleId: module.id, sub: `${module.id}.image` });
     }
@@ -436,7 +430,7 @@ export function createAppRuntime({ sessionId,
         if (disposed) throw new BridgeError('CLOSED');
         try {
           const reply = await handler(input, context);
-          if (reply?.ok === false && reply.contract === contract.contract && !contract.codes.has(reply.code)) {
+          if (reply?.ok === false && reply.contract === contract.contract && !validCode(reply.code)) {
             if (debug) {
               debug.emit({ level: 'error', cat: 'runtime-node', sub: rpcMethod,
                 event: 'module.reply.unmapped_code', data: { moduleId: module.id, rpcMethod, rawCode: reply.code } });
@@ -452,7 +446,7 @@ export function createAppRuntime({ sessionId,
           return {
             ok: false,
             contract: contract.contract,
-            code: contract.codes.has(error?.code) ? error.code : failureCode(module.id),
+            code: validCode(error?.code) ? error.code : failureCode(module.id),
             ...(Number.isSafeInteger(error?.retryAfterSeconds) && error.retryAfterSeconds > 0
               ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
           };

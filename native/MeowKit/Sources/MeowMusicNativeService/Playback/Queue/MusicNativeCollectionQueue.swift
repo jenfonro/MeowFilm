@@ -2,12 +2,12 @@
 // Same native transaction/occurrence/history semantics as MusicNativeQueue's
 // .collection branch, with an explicitly validated filtered membership list.
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
-extension NativeMusicService: MusicCollectionQueueServing {
+extension NativeMusicService {
     public func changeCollectionQueue(collection requested: MusicCollection, refs: [MusicReference],
                                       index: Int, expectedRevision: Int) async throws -> MusicPlaybackState {
-        let result = try similarQueueTransaction([.queue, .playback, .history]) { d in
+        let result = try transaction([.queue, .playback, .history]) { d in
             try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
             let source = try collection(requested.id, d)
             try musicRequire(source.revision == requested.revision, .staleRevision)

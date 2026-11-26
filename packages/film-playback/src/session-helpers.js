@@ -15,11 +15,7 @@ export const sameVariantFile = (a, b) => !!a?.variant && !!b?.variant && a.paren
 export const cancelled = error =>
   ['CLOSED', 'CANCELLED', 'STALE_ACCOUNT', 'STALE_SOURCE', 'STALE_SESSION', 'STALE_METADATA'].includes(error?.code);
 
-export function historyPosition(row) {
-  if (!row || row.ended) return 0;
-  requireValue(Number.isFinite(row.position) && row.position >= 0, 'CORRUPT_STORAGE');
-  return row.position;
-}
+export const historyPosition = row => (!row || row.ended) ? 0 : row.position;
 
 export const manualIdentity = row => identity(fields(row, ['targetId', 'kind', 'sourceKey', 'detailId',
   'provider', 'share', 'seasonHint']));

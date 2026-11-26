@@ -1,5 +1,5 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 extension NativeMusicService {
     func sourceDiscoveryQuery(_ song: MusicSongRecord) -> String { song.title + " " + song.artist }
@@ -63,7 +63,7 @@ extension NativeMusicService {
     }
     func adoptSearchSongs(_ rows: [MusicSongRecord], observation: MusicSearchObservation,
                           checks: [String: [String: MusicSourceDiscoveryEntry]]) throws -> [MusicSongRecord] {
-        let songs = try transaction([.library], reportingCancellationAfterCommit: false) { state in
+        let songs = try transaction([.library]) { state in
             let ids = try registerSongs(rows, library: &state.library, authoritative: true, playback: state.playback,
                 acceptObservation: { id in
                     // Apply ordering to the same indexed match used by adoption;
@@ -97,7 +97,7 @@ extension NativeMusicService {
     }
 }
 
-extension NativeMusicService: MusicSearchObserving {
+extension NativeMusicService {
     public func observeSearchPages(_ pages: [MusicSearchPage], references: [MusicReference]) async throws {
         let own = epoch, state = try read()
         let songs = try references.map { try song($0, state) }

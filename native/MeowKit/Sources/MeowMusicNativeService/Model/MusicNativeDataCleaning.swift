@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Current native locator and durable metadata cleaning.
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 import MeowStorage
 
 extension MusicModel {
@@ -96,7 +96,7 @@ extension MusicModel {
         }
         if (s.range(of: "http://", options: [.anchored, .caseInsensitive]) != nil ||
             s.range(of: "https://", options: [.anchored, .caseInsensitive]) != nil || s.hasPrefix("/")) &&
-            MusicDurablePattern.matches(MusicDurablePattern.secretQuery, s) {
+            matches(MusicDurablePattern.secretQuery, s) {
             return ""
         }
         return s
@@ -111,7 +111,8 @@ extension MusicModel {
         case .object(let fields):
             return .object(fields.filter {
                 !MusicDurablePattern.transient.contains($0.name.lowercased()) &&
-                !MusicDurablePattern.isSecretField($0.name)
+                $0.name.lowercased() != "headers" &&
+                !matches(secretField, $0.name)
             }.map { SQLiteTreeField($0.name, durableTree($0.value)) })
         default:
             return value
@@ -129,13 +130,4 @@ private enum MusicDurablePattern {
         "qualityunrecognized", "lxscriptid", "lxscriptname", "lxscriptversion", "_recommendation",
         "recommendation", "fm", "fmmanual", "reportinstance", "reportscope"
     ])
-    static let secretFields = ["cookie", "token", "password", "secret", "credential", "authorization"]
-    static func isSecretField(_ field: String) -> Bool {
-        let lower = field.lowercased()
-        return secretFields.contains(where: lower.contains) || lower == "headers" ||
-            lower.contains("apikey") || lower.contains("api_key") || lower.contains("api-key")
-    }
-    static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
-        expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
-    }
 }

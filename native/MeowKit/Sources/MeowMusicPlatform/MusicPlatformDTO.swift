@@ -1,6 +1,5 @@
 import Foundation
 import MeowAccounts
-import MeowMusicFeature
 import MeowRuntime
 
 /// Converts the shared result at the field that actually consumes it. This
@@ -109,22 +108,5 @@ public enum MusicPlatformDTO {
         .init(rows: try rows(value), nextPage: value[music: "continuation"][music: "page"] == .null ? nil :
                 optionalCount(value[music: "continuation"][music: "page"]),
               expiresAt: date(value[music: "expiresAt"]))
-    }
-}
-
-/// The native secure store's only current representation. Platform protocol
-/// device material is owned by Node, not reconstructed from a saved context.
-enum MusicAccountCredential {
-    static func make(platform: MusicAccountPlatform, userID: String, cookie: String) throws -> AccountCredential {
-        guard !userID.isEmpty, !cookie.isEmpty else { throw MusicServiceError.invalidResponse }
-        return try AccountCredential(data: RuntimeJSON.encode(.object([
-            "platform": .string(platform.rawValue), "userId": .string(userID), "cookie": .string(cookie)
-        ])))
-    }
-    static func read(_ credential: AccountCredential) throws -> RuntimeValue {
-        let value = try RuntimeJSON.decode(credential.dataRepresentation())
-        _ = try value[music: "userId"].musicRequiredText()
-        _ = try value[music: "cookie"].musicRequiredText()
-        return value
     }
 }

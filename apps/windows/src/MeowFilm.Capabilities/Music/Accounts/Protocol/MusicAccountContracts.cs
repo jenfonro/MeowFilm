@@ -80,3 +80,44 @@ public sealed class MusicAccountException : Exception
     { Code = Message; RetryAfterSeconds = Math.Clamp(retryAfterSeconds, 0, 600); }
     public override string ToString() => $"{nameof(MusicAccountException)}: {Code}";
 }
+
+public sealed record MusicAccountSmsSent(string Platform, bool Sent, int RetryAfterSeconds);
+
+[DebuggerDisplay("MusicAccountSmsInput (redacted)")]
+public sealed class MusicAccountSmsInput(string platform, string phone, string countryCode = "86", string? captcha = null)
+{
+    [JsonIgnore] public string Platform { get; } = platform;
+    [JsonIgnore, DebuggerBrowsable(DebuggerBrowsableState.Never)] public string Phone { get; } = phone;
+    [JsonIgnore] public string CountryCode { get; } = countryCode;
+    [JsonIgnore, DebuggerBrowsable(DebuggerBrowsableState.Never)] public string? Captcha { get; } = captcha;
+    public override string ToString() => "MusicAccountSmsInput (redacted)";
+}
+
+public sealed record MusicAccountMembership(bool? Vip, string Tier, long? ExpiresAt);
+
+public enum MusicAccountDetailsFreshness { Missing, Fresh, Stale, Deferred }
+
+public sealed record MusicAccountDetails(
+    string Platform,
+    long Generation,
+    string State,
+    MusicAccountProfile? Profile,
+    long ProfileFetchedAt,
+    long ProfileExpiresAt,
+    MusicAccountMembership Membership,
+    long MembershipCheckedAt,
+    long MembershipRecheckAt,
+    IReadOnlyList<string> AudioLevels,
+    bool VerificationDeferred = false,
+    string? ErrorCode = null,
+    long RetryAt = 0,
+    MusicAccountDetailsFreshness ProfileFreshness = MusicAccountDetailsFreshness.Missing,
+    MusicAccountDetailsFreshness MembershipFreshness = MusicAccountDetailsFreshness.Missing);
+
+public sealed record MusicAccountEntitlements(
+    MusicAccountMembership Membership, long CheckedAt, long RecheckAt,
+    IReadOnlyList<string> AudioLevels, bool VerificationDeferred = false,
+    string? ErrorCode = null, long RetryAt = 0);
+
+public sealed record MusicAccountDetailsObservation(
+    MusicAccountProfile Profile, long ProfileFetchedAt, MusicAccountEntitlements Entitlements);

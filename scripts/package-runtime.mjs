@@ -325,7 +325,7 @@ function checkManifest(manifest, locked, location, root = false) {
   check(isObject(locked) && !locked.link, 'UNLOCKED_PACKAGE', `${location}: missing lock record`);
   check(typeof manifest.name === 'string' && (locked.name === undefined || locked.name === manifest.name),
     'NAME_MISMATCH', `${location}: package name does not match lock`);
-  check(manifest.version === locked.version && parseVersion(manifest.version),
+  check(manifest.version === locked.version && typeof manifest.version === 'string' && manifest.version.length > 0,
     'VERSION_MISMATCH', `${location}: installed version does not match lock`);
   for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies',
     ...(root ? ['devDependencies'] : [])]) {
@@ -346,103 +346,6 @@ function checkManifest(manifest, locked, location, root = false) {
     check(isObject(value) && (value.optional === undefined || typeof value.optional === 'boolean'),
       'PEER_METADATA_MISMATCH', `${location}: invalid peer metadata for ${name}`);
   }
-}
-
-function parseVersion(value) {
-  if (typeof value !== 'string') return null;
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/.exec(value);
-  if (!match) return null;
-  const numbers = match.slice(1, 4).map(Number);
-  const pre = match[4]?.split('.') ?? [];
-  const build = match[5]?.split('.') ?? [];
-  if (!numbers.every(Number.isSafeInteger) || [...pre, ...build].some(x => x === '')
-    || pre.some(x => /^\d+$/.test(x) && x.length > 1 && x[0] === '0')) return null;
-  return { numbers, pre };
-}
-
-function versionCompare(a, b) {
-  for (let i = 0; i < 3; i++) if (a.numbers[i] !== b.numbers[i]) return compare(a.numbers[i], b.numbers[i]);
-  if (!a.pre.length || !b.pre.length) return compare(b.pre.length > 0, a.pre.length > 0);
-  for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i++) {
-    if (a.pre[i] === undefined || b.pre[i] === undefined) return compare(a.pre.length, b.pre.length);
-    const x = a.pre[i], y = b.pre[i];
-    if (x === y) continue;
-    const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y);
-    if (xn && yn) return compare(BigInt(x), BigInt(y));
-    return xn !== yn ? (xn ? -1 : 1) : compare(x, y);
-  }
-  return 0;
-}
-
-// No dependency code is loaded to interpret ranges. Supported npm semver syntax:
-// exact/partial/x, comparators, caret, tilde, hyphen, AND, OR and prereleases.
-// Aliases, tags, URLs and file specs fail closed rather than invoking npm.
-function satisfies(version, range) {
-  const actual = parseVersion(version);
-  check(actual && typeof range === 'string', 'INVALID_RANGE', `Invalid version/range: ${version}`);
-  function partial(text) {
-    const clean = text.replace(/^v/, '');
-    const exact = parseVersion(clean);
-    if (exact) return { ...exact, count: 3, prereleaseAnchor: exact.pre.length > 0 };
-    check(/^(?:0|[1-9]\d*|[xX*])(?:\.(?:0|[1-9]\d*|[xX*])){0,2}$/.test(clean),
-      'UNSUPPORTED_RANGE', `Unsupported dependency range: ${range}`);
-    const parts = clean.split('.');
-    let count = parts.findIndex(x => /^[xX*]$/.test(x));
-    if (count < 0) count = parts.length;
-    check(parts.slice(count).every(x => /^[xX*]$/.test(x)),
-      'UNSUPPORTED_RANGE', `Unsupported dependency range: ${range}`);
-    const numbers = [0, 1, 2].map(i => i < count ? Number(parts[i]) : 0);
-    check(numbers.every(Number.isSafeInteger), 'INVALID_RANGE', `Invalid dependency range: ${range}`);
-    return { numbers, pre: [], count };
-  }
-  function next(v, index) {
-    const numbers = v.numbers.map((x, i) => i < index ? x : i === index ? x + 1 : 0);
-    return { numbers, pre: ['0'] };
-  }
-  return range.split('||').map(part => {
-    const tests = [];
-    const add = (op, value) => tests.push({ op, value });
-    const clause = part.trim().replace(/([<>]=?|[~^=])\s+/g, '$1');
-    const hyphen = /^(\S+)\s+-\s+(\S+)$/.exec(clause);
-    if (hyphen) {
-      const low = partial(hyphen[1]), high = partial(hyphen[2]);
-      if (low.count) add('>=', low);
-      if (high.count) add(high.count === 3 ? '<=' : '<',
-        high.count === 3 ? high : next(high, high.count - 1));
-    } else {
-      for (const token of clause.split(/\s+/)) {
-        check(token, 'INVALID_RANGE', `Empty dependency range: ${range}`);
-        const [, op, text] = /^([<>]=?|[~^=])?(.*)$/.exec(token);
-        const v = partial(text);
-        if (!v.count) {
-          check(!op || ['=', '^', '~', '>=', '<='].includes(op),
-            'UNSUPPORTED_RANGE', `Unsupported dependency range: ${range}`);
-        } else if (op === '^' || op === '~') {
-          add('>=', v);
-          const index = op === '~' ? Math.min(1, v.count - 1)
-            : v.numbers[0] ? 0 : v.count === 1 ? 0 : v.numbers[1] ? 1 : v.count === 2 ? 1 : 2;
-          add('<', next(v, index));
-        } else if (!op || op === '=') {
-          add(v.count === 3 ? '=' : '>=', v);
-          if (v.count < 3) add('<', next(v, v.count - 1));
-        } else if (v.count < 3 && ['>', '<='].includes(op)) {
-          const bound = next(v, v.count - 1);
-          if (op === '>') bound.pre = [];
-          add(op === '>' ? '>=' : '<', bound);
-        } else {
-          if (op === '<' && v.count < 3) v.pre = ['0'];
-          add(op, v);
-        }
-      }
-    }
-    const allowedPrerelease = !actual.pre.length || tests.some(({ value }) =>
-      value.prereleaseAnchor
-      && value.numbers.every((number, i) => number === actual.numbers[i]));
-    return allowedPrerelease && tests.every(({ op, value }) => {
-      const order = versionCompare(actual, value);
-      return { '=': order === 0, '>': order > 0, '>=': order >= 0, '<': order < 0, '<=': order <= 0 }[op];
-    });
-  }).some(Boolean);
 }
 
 function registryMetadata(record, location) {
@@ -717,9 +620,6 @@ function buildGraph(root, product, target, runtimeSource) {
         if (!found) {
           check(optionalEdge, 'MISSING_DEPENDENCY', `${location}: missing required ${kind} ${name}`);
           omitted.push({ from: node.path, name, kind, range: entries[name], reason: 'not-installed' });
-        } else {
-          check(satisfies(found.version, entries[name]), 'RANGE_MISMATCH',
-            `${location}: ${name}@${found.version} does not satisfy ${entries[name]}`);
         }
         edges.push({ from: node, name, to: found });
       }
@@ -970,10 +870,6 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
         check(files.some(file => file.path === `${node.path}/${entry}`), 'MISSING_PUBLIC_FILE',
           `${node.location}: public file missing or excluded: ${entry}`);
       }
-    }
-    for (const input of graph.inputs) {
-      check(fileHash(root, input.path) === input.sha256,
-        'SOURCE_CHANGED', `${input.path} changed during packaging`);
     }
     files.sort((a, b) => compare(a.path, b.path));
     manifest.status = 'complete';

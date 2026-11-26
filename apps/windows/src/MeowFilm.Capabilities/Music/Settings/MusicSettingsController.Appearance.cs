@@ -96,8 +96,7 @@ public sealed partial class MusicSettingsController
     internal async Task ReadAppearance(CancellationToken token)
     {
         long currentGeneration = appearanceGeneration;
-        var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.Appearance,
-            ct => application.GetAppearanceAsync(ct), token);
+        var settings = await application.Library.GetAppearanceAsync(token);
         token.ThrowIfCancellationRequested();
         if (AppearanceCurrent(currentGeneration)) AcceptAppearance(settings);
     }
@@ -155,23 +154,20 @@ public sealed partial class MusicSettingsController
         {
             try
             {
-                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.Appearance,
-                    ct => application.SaveAppearanceAsync(expectedRevision, playlistView, "starlight", colorMode, colorPalette, ct),
-                    lifetime.Token);
+                var saved = await application.Library.SaveAppearanceAsync(
+                    expectedRevision, playlistView, "starlight", colorMode, colorPalette, lifetime.Token);
                 if (AppearanceCurrent(currentGeneration)) AcceptAppearance(saved);
             }
-            catch (MusicOperationException error) when (error.Code is
-                "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
+            catch (Exception error) when (ErrorCode(error) is "STORAGE_CONFLICT" or "REVISION_CONFLICT")
             {
                 if (!AppearanceCurrent(currentGeneration)) return;
                 try
                 {
-                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.Appearance,
-                        ct => application.GetAppearanceAsync(ct), lifetime.Token);
+                    var current = await application.Library.GetAppearanceAsync(lifetime.Token);
                     if (!AppearanceCurrent(currentGeneration)) return;
                     AcceptAppearance(current);
                     if (!AppearanceMatches(playlistView, colorMode, colorPalette))
-                        appearanceStatus = error.Code == "REVISION_CONFLICT" ? "外观设置已更新" : "外观设置保存失败";
+                        appearanceStatus = ErrorCode(error) == "REVISION_CONFLICT" ? "外观设置已更新" : "外观设置保存失败";
                 }
                 catch
                 {

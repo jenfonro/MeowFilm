@@ -271,7 +271,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
                     ("$address", address), ("$file", written.Id), ("$bytes", owned.Length), ("$at", Now));
                 Trim(db, candidates);
                 return FilterUnreferenced(db, candidates);
-            }, token, owned.Length, commit: commit =>
+            }, token, commit: commit =>
             {
                 lock (gate)
                 {
@@ -326,7 +326,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
                 LyricsCacheStore.SaveRecord(db, songId, record);
                 Trim(db, candidates);
                 return FilterUnreferenced(db, candidates);
-            }, token, bytes, commit: commit =>
+            }, token, commit: commit =>
             {
                 lock (gate)
                 {
@@ -526,8 +526,11 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
     internal async Task TouchPlayedAsync(string songId, string image, CancellationToken token)
     {
         EnterWrite();
+        bool entered = false;
         try
         {
+            await writes.WaitAsync(token).ConfigureAwait(false);
+            entered = true;
             await database.WriteAsync(db =>
             {
                 lock (gate) if (closed) throw new StorageException(StorageError.Closed);
@@ -541,7 +544,11 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
                 return true;
             }, token).ConfigureAwait(false);
         }
-        finally { LeaveWrite(); }
+        finally
+        {
+            if (entered) writes.Release();
+            LeaveWrite();
+        }
     }
 
     internal async Task<MusicPresentationCacheStats> GetStatsAsync(CancellationToken token = default)

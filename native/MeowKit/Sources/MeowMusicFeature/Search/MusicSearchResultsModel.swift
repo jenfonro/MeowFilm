@@ -16,10 +16,6 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
 /// Owns the query's independent song/playlist rounds and cursors.
 /// Queue, account, library writes and playback remain with their existing owners.
 @MainActor public final class MusicSearchResultsModel: ObservableObject {
-    public typealias SongRead = @MainActor @Sendable (MusicPublicBrowsePlatform, String, Int, Int) async throws -> MusicSearchPage
-    public typealias PlaylistRead = @MainActor @Sendable (MusicPublicBrowsePlatform, String, Int, Int) async throws -> MusicPlaylistSearchPage
-    public typealias RecordingRead = @MainActor @Sendable (MusicSearchBatchRequest) async throws -> MusicRemoteTrack
-    public typealias ObservationWrite = @MainActor @Sendable ([MusicSearchPage], [MusicReference]) async throws -> Void
     @Published public private(set) var query = ""
     @Published public private(set) var requestID = UUID()
     @Published public private(set) var preferences = MusicSearchPreferences()
@@ -46,15 +42,10 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         var diagnosticID: String?
     }
     private typealias CacheKey = MusicSearchResultsCache.Key
-    private let readSongs: SongRead
-    private let readPlaylists: PlaylistRead
-    private let readRecording: RecordingRead
-    private let writeObservations: ObservationWrite
-    private let cacheProvider: @MainActor () -> MusicSearchResultsCache.Storage
+    private weak var owner: MusicViewModel?
     private var songStates: [MusicPublicBrowsePlatform: PlatformState<MusicRemoteTrack>] = [:]
     private var playlistStates: [MusicPublicBrowsePlatform: PlatformState<MusicPublicBrowseCollection>] = [:]
     private var songTask: Task<Void, Never>?, playlistTask: Task<Void, Never>?
-    private var repository: (any MusicSongRepositoryReading)?
     private var songObservation: Task<Void, Never>?, songProjectionTask: Task<Void, Never>?
     private var songProjectionID = UUID()
     private var songToken = UUID(), playlistToken = UUID()
@@ -66,47 +57,23 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private enum ReadMode { case initial, more, retry }
     private var usable: Bool { available && visible && !query.isEmpty }
 
-    init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
-         readRecording: @escaping RecordingRead, writeObservations: @escaping ObservationWrite = { _, _ in },
-         cacheProvider: @escaping @MainActor () -> MusicSearchResultsCache.Storage) {
-        self.readSongs = readSongs; self.readPlaylists = readPlaylists
-        self.readRecording = readRecording
-        self.writeObservations = writeObservations
-        self.cacheProvider = cacheProvider; cache = cacheProvider()
-    }
-    convenience init(owner: MusicViewModel) {
-        self.init(readSongs: { [weak owner] platform, query, page, limit in
-            guard let owner else { throw MusicServiceError.closed }
-            return try await owner.searchPage(platform: platform.rawValue, query: query, page: page, limit: limit)
-        }, readPlaylists: { [weak owner] platform, query, page, limit in
-            guard let owner else { throw MusicServiceError.closed }
-            return try await owner.searchPlaylistPage(platform: platform, query: query, page: page, limit: limit)
-        }, readRecording: { [weak owner] request in
-            guard let owner else { throw MusicServiceError.closed }
-            return try await owner.searchRecording(request)
-        }, writeObservations: { [weak owner] pages, references in
-            guard let owner else { throw MusicServiceError.closed }
-            try await owner.observeSearchPages(pages, references: references)
-        }, cacheProvider: { [weak owner] in
-            owner?.searchResultsCache ?? MusicSearchResultsCache.make()
-        })
-        repository = owner.service as? any MusicSongRepositoryReading
+    init(owner: MusicViewModel) {
+        self.owner = owner
+        self.cache = owner.searchResultsCache
     }
     public var moreSongs: Bool { songStates.values.contains { $0.next != nil } }
     public var morePlaylists: Bool { playlistStates.values.contains { $0.next != nil } }
     public var songPlatformsEmpty: Bool { preferences.songPlatforms.isEmpty }
     public var playlistPlatformsEmpty: Bool { preferences.effectivePlaylistPlatforms.isEmpty }
 
-    /// Returns true only when access changed, clearing rows/cursors and binding
-    /// to that access generation's cache.
     @discardableResult
-    public func setAccess(available: Bool, generation: UUID) -> Bool {
+    public func syncAccess() -> Bool {
+        let available = owner.map { !$0.isClosed } ?? false
+        let generation = owner?.searchAccessGeneration ?? access
         guard access != generation || self.available != available else { return false }
         clear()
         if access != generation || !available {
-            // An old loader retains only its old cache. It cannot refill the new
-            // account's cache even if physical cancellation is non-cooperative.
-            cache = cacheProvider()
+            cache = owner?.searchResultsCache ?? MusicSearchResultsCache.make()
         }
         access = generation; self.available = available
         songObservation?.cancel(); songObservation = nil
@@ -130,7 +97,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     }
     public func resumePagination() { if usable { automaticPaginationHeld = false } }
     private func observeSongs() {
-        guard visible, available, songObservation == nil, let repository else { return }
+        guard visible, available, songObservation == nil, let repository = owner?.service else { return }
         songObservation = Task { [weak self] in
             let changes = await repository.songChanges()
             await self?.refreshSongProjections()
@@ -141,7 +108,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         }
     }
     private func refreshSongProjections(changed: Set<String>? = nil) async {
-        guard !Task.isCancelled, usable, let repository else { return }
+        guard !Task.isCancelled, usable, let repository = owner?.service else { return }
         let own = UUID(), request = requestID, generation = access
         let referenced = Set(songStates.values.flatMap { $0.items + $0.roundItems + $0.pages.flatMap(\.items) }.map(\.songId))
         let ids = changed.map { referenced.intersection($0) } ?? referenced
@@ -234,13 +201,13 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     /// resolver. Search rows keep their permanent identities and positions.
     public func refreshTrack(_ row: MusicSearchSong, variant: MusicRemoteTrack? = nil) async throws -> MusicRemoteTrack {
         try Task.checkCancellation()
-        guard usable else { throw MusicServiceError.accessUnavailable }
+        guard usable, let owner else { throw MusicServiceError.accessUnavailable }
         guard recoveryID == nil else { throw MusicServiceError.busy }
         let target = try batchTarget(row, preferred: variant)
         let own = UUID(), request = requestID, generation = access, keyword = query
         holdPagination(); recoveryID = own
         defer { if recoveryID == own { recoveryID = nil } }
-        let result = try await readRecording(.init(query: keyword, targets: [target]))
+        let result = try await owner.searchRecording(.init(query: keyword, targets: [target]))
         guard accepts(request, generation), recoveryID == own else { throw MusicServiceError.staleResult }
         return result
     }
@@ -288,10 +255,8 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
             let references = Array(Set(self.preferences.songPlatforms.flatMap {
                 self.songStates[$0]?.items.map(\.ref) ?? []
             }))
-            do { try await self.writeObservations(pages, references) }
+            do { try await self.owner?.observeSearchPages(pages, references: references) }
             catch {
-                // The executed request already owns its facts. Expired display
-                // references cannot turn a successful page into a failed search.
                 if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
                     DebugRuntime.logError(.search, sub: "music.results", event: "writeObservations.error", error: error)
                 }
@@ -307,17 +272,18 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         songStates[platform]?.error = nil; songStates[platform]?.diagnosticID = nil
         let trace = MusicRequestTrace(.search, platform: platform)
         trace.record(.started)
-        let cache = cache, reader = readSongs
+        let cache = cache
         do {
             try await MusicSearchRoundReader.read(platform: platform, start: start,
                 pages: settings.pages, concurrency: settings.concurrency, load: { range in
                     guard self.accepts(request, generation), self.songToken == token else { throw MusicServiceError.cancelled }
                     let key = CacheKey(kind: .songs, platform: platform, query: keyword, request: range)
                     let cached = try await cache.value(for: key, lifetime: TimeInterval(settings.cacheMinutes) * 60,
-                        observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) {
+                        observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) { [weak self] in
+                        guard let owner = await self?.owner else { throw MusicServiceError.closed }
                         let value = try await MusicRequestTrace.$current.withValue(trace) {
                             try await MusicOperationDeadline.run(seconds: 25) {
-                                try await reader(platform, keyword, range.page, range.limit)
+                                try await owner.searchPage(platform: platform.rawValue, query: keyword, page: range.page, limit: range.limit)
                             }
                         }
                         return .songs(value)
@@ -395,17 +361,18 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         playlistStates[platform]?.error = nil; playlistStates[platform]?.diagnosticID = nil
         let trace = MusicRequestTrace(.playlist, platform: platform)
         trace.record(.started)
-        let cache = cache, reader = readPlaylists
+        let cache = cache
         do {
             try await MusicSearchRoundReader.read(platform: platform, start: start,
                 pages: settings.pages, concurrency: settings.concurrency, load: { range in
                     guard self.accepts(request, generation), self.playlistToken == token else { throw MusicServiceError.cancelled }
                     let key = CacheKey(kind: .playlists, platform: platform, query: keyword, request: range)
                     let cached = try await cache.value(for: key, lifetime: TimeInterval(settings.cacheMinutes) * 60,
-                        observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) {
+                        observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) { [weak self] in
+                        guard let owner = await self?.owner else { throw MusicServiceError.closed }
                         let value = try await MusicRequestTrace.$current.withValue(trace) {
                             try await MusicOperationDeadline.run(seconds: 25) {
-                                try await reader(platform, keyword, range.page, range.limit)
+                                try await owner.searchPlaylistPage(platform: platform, query: keyword, page: range.page, limit: range.limit)
                             }
                         }
                         return .playlists(value)
@@ -452,7 +419,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         songs = first ? MusicSearchFusion.songs(batches, platformOrder: preferences.songPlatforms)
             : MusicSearchFusion.appendSongs(displayed: songs, adding: batches, platformOrder: preferences.songPlatforms)
         for platform in preferences.songPlatforms { songStates[platform]?.roundItems = [] }
-        if repository != nil {
+        if owner?.service != nil {
             songProjectionTask?.cancel()
             songProjectionTask = Task { [weak self] in await self?.refreshSongProjections() }
         }

@@ -1,5 +1,5 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 import MeowStorage
 
 enum MusicHomeSnapshotStore {
@@ -39,60 +39,36 @@ enum MusicHomeSnapshotStore {
         guard let sourceRaw = try db.queryOne(
             "SELECT source FROM ios_music_home_state WHERE singleton=1",
             map: { try $0.text(0) }
-        ) else {
+        ), let source = MusicPublicBrowsePlatform(rawValue: sourceRaw) else {
             return nil
         }
-        guard let source = MusicPublicBrowsePlatform(rawValue: sourceRaw) else {
-            throw MusicServiceError.corruptStorage
-        }
 
-        let sectionRows: [(
-            id: String, title: String, layoutRaw: String, selectedFilter: String?, selectedTab: String?,
-            channelID: String?, channelTitle: String?, channelKindRaw: String?, channelPageCode: String?, channelPlatformRaw: String?
-        )] = try db.query(
+        let sectionRows = try db.query(
             "SELECT section_id,title,layout,selected_filter,selected_tab," +
-            "channel_id,channel_title,channel_kind,channel_page_code,channel_platform " +
-            "FROM ios_music_home_sections ORDER BY position"
+            "channel_id,channel_title,channel_kind,channel_page_code,channel_platform FROM ios_music_home_sections ORDER BY position"
         ) { c in
-            (
-                id: try c.text(0),
-                title: try c.text(1),
-                layoutRaw: try c.text(2),
-                selectedFilter: try c.optionalText(3),
-                selectedTab: try c.optionalText(4),
-                channelID: try c.optionalText(5),
-                channelTitle: try c.optionalText(6),
-                channelKindRaw: try c.optionalText(7),
-                channelPageCode: try c.optionalText(8),
-                channelPlatformRaw: try c.optionalText(9)
-            )
+            (id: try c.text(0), title: try c.text(1), layoutRaw: try c.text(2),
+             selectedFilter: try c.optionalText(3), selectedTab: try c.optionalText(4),
+             channelID: try c.optionalText(5), channelTitle: try c.optionalText(6),
+             channelKindRaw: try c.optionalText(7), channelPageCode: try c.optionalText(8),
+             channelPlatformRaw: try c.optionalText(9))
         }
 
         var avatarsBySection: [String: [URL]] = [:]
         try db.scan("SELECT section_id,avatar_url FROM ios_music_home_section_avatars ORDER BY section_id,position") { c in
             let sectionID = try c.text(0)
-            if let url = URL(string: try c.text(1)) {
-                avatarsBySection[sectionID, default: []].append(url)
-            }
+            if let url = URL(string: try c.text(1)) { avatarsBySection[sectionID, default: []].append(url) }
         }
-
         var filtersBySection: [String: [MusicPublicBrowseFilter]] = [:]
         try db.scan("SELECT section_id,filter_id,title,group_name FROM ios_music_home_section_filters ORDER BY section_id,position") { c in
-            let sectionID = try c.text(0)
-            filtersBySection[sectionID, default: []].append(
-                MusicPublicBrowseFilter(
-                    id: try c.text(1),
-                    title: try c.text(2),
-                    group: try c.optionalText(3) ?? ""
-                )
+            filtersBySection[try c.text(0), default: []].append(
+                MusicPublicBrowseFilter(id: try c.text(1), title: try c.text(2), group: try c.optionalText(3) ?? "")
             )
         }
-
         var tabsBySection: [String: [(id: String, title: String)]] = [:]
         try db.scan("SELECT section_id,tab_id,title FROM ios_music_home_section_tabs ORDER BY section_id,position") { c in
             tabsBySection[try c.text(0), default: []].append((try c.text(1), try c.text(2)))
         }
-
         var listsByItem: [String: [String: [String]]] = [:]
         try db.scan("SELECT item_uid,list_kind,item_value FROM ios_music_home_item_lists ORDER BY item_uid,list_kind,position") { c in
             listsByItem[try c.text(0), default: [:]][try c.text(1), default: []].append(try c.text(2))
@@ -104,150 +80,76 @@ enum MusicHomeSnapshotStore {
             "SELECT item_uid,preview_kind,preview_id,title,artist,album,artwork,duration,rank,last_rank " +
             "FROM ios_music_home_item_previews ORDER BY item_uid,preview_kind,position"
         ) { c in
-            let uid = try c.text(0)
-            let kind = try c.text(1)
+            let uid = try c.text(0), kind = try c.text(1)
             let artwork = (try c.optionalText(6)).flatMap(URL.init(string:))
             if kind == "displayOnly" {
-                displayPreviewsByItem[uid, default: []].append(
-                    MusicNativeTrackData.Display(
-                        title: try c.text(3),
-                        artist: try c.text(4),
-                        album: try c.optionalText(5) ?? "",
-                        duration: try c.optionalDouble(7) ?? 0,
-                        artwork: artwork
-                    )
-                )
+                displayPreviewsByItem[uid, default: []].append(MusicNativeTrackData.Display(
+                    title: try c.text(3), artist: try c.text(4), album: try c.optionalText(5) ?? "",
+                    duration: try c.optionalDouble(7) ?? 0, artwork: artwork
+                ))
             } else {
-                rankingPreviewsByItem[uid, default: []].append(
-                    MusicPublicBrowseRanking.Entry(
-                        id: try c.optionalText(2) ?? "",
-                        title: try c.text(3),
-                        artist: try c.text(4),
-                        artwork: artwork,
-                        rank: try c.optionalInteger(8),
-                        lastRank: try c.optionalInteger(9)
-                    )
-                )
+                rankingPreviewsByItem[uid, default: []].append(MusicPublicBrowseRanking.Entry(
+                    id: try c.optionalText(2) ?? "", title: try c.text(3), artist: try c.text(4),
+                    artwork: artwork, rank: try c.optionalInteger(8), lastRank: try c.optionalInteger(9)
+                ))
             }
         }
 
-        struct ParentKey: Hashable {
-            let sectionID: String
-            let tabID: String?
-        }
+        struct ParentKey: Hashable { let sectionID: String; let tabID: String? }
         var itemsByParent: [ParentKey: [MusicNativePublicBrowseItem]] = [:]
         try db.scan(itemSelectSQL) { c in
-            let uid = try c.text(0)
-            let sectionID = try c.text(1)
-            let tabID = try c.optionalText(2)
+            let uid = try c.text(0), sectionID = try c.text(1), tabID = try c.optionalText(2)
             let lists = listsByItem[uid] ?? [:]
             let content = try decodeContent(c, lists: lists)
-
-            let kind: MusicPublicBrowseItem.Kind?
-            if let rawKind = try c.optionalText(10) {
-                guard let parsed = MusicPublicBrowseItem.Kind(rawValue: rawKind) else {
-                    throw MusicServiceError.corruptStorage
-                }
-                kind = parsed
-            } else {
-                kind = nil
-            }
-
-            let coverRef: MusicPublicBrowseItem.CoverReference?
-            if let refPlatform = try c.optionalText(15),
-               let refKind = try c.optionalText(16),
-               let refID = try c.optionalText(17),
-               let platform = MusicPublicBrowsePlatform(rawValue: refPlatform),
-               let colKind = MusicPublicBrowseCollection.Kind(rawValue: refKind) {
-                coverRef = MusicPublicBrowseItem.CoverReference(platform: platform, kind: colKind, id: refID)
-            } else {
-                coverRef = nil
-            }
+            let kind = (try c.optionalText(10)).flatMap(MusicPublicBrowseItem.Kind.init(rawValue:))
+            let coverRef: MusicPublicBrowseItem.CoverReference? = if let refPlatform = try c.optionalText(15),
+                let refKind = try c.optionalText(16), let refID = try c.optionalText(17),
+                let platform = MusicPublicBrowsePlatform(rawValue: refPlatform),
+                let colKind = MusicPublicBrowseCollection.Kind(rawValue: refKind) {
+                MusicPublicBrowseItem.CoverReference(platform: platform, kind: colKind, id: refID)
+            } else { nil }
 
             let rankingPreviews = rankingPreviewsByItem[uid] ?? []
             let rankingSongArtwork = (try c.optionalText(18)).flatMap(URL.init(string:))
             let rankingUpdateFrequency = try c.optionalText(19)
-            let ranking: MusicPublicBrowseRanking?
-            if rankingUpdateFrequency != nil || rankingSongArtwork != nil || !rankingPreviews.isEmpty {
-                ranking = MusicPublicBrowseRanking(
-                    preview: rankingPreviews,
-                    songArtwork: rankingSongArtwork,
-                    updateFrequency: rankingUpdateFrequency ?? ""
-                )
-            } else {
-                ranking = nil
-            }
-
+            let ranking: MusicPublicBrowseRanking? = (rankingUpdateFrequency != nil || rankingSongArtwork != nil || !rankingPreviews.isEmpty)
+                ? MusicPublicBrowseRanking(preview: rankingPreviews, songArtwork: rankingSongArtwork, updateFrequency: rankingUpdateFrequency ?? "")
+                : nil
             let previewSongIDs: [String?] = (lists["previewSongIDs"] ?? []).map { $0.isEmpty ? nil : $0 }
             let displayPreviews = (displayPreviewsByItem[uid] ?? []).map {
                 MusicNativeTrackData(platform: "", data: Data("null".utf8), display: $0)
             }
-            let item = MusicNativePublicBrowseItem(
-                id: try c.text(3),
-                title: try c.text(5),
-                subtitle: try c.optionalText(6) ?? "",
-                artwork: (try c.optionalText(7)).flatMap(URL.init(string:)),
-                content: content,
-                ranking: ranking,
-                previewSongs: displayPreviews,
-                coverLabel: try c.optionalText(8) ?? "",
-                previewSongIDs: previewSongIDs,
-                requiresAccount: try c.optionalBool(9) ?? false,
-                kind: kind,
-                label: try c.optionalText(11) ?? "",
-                contextText: try c.optionalText(12) ?? "",
-                playCount: try c.optionalInteger(13),
-                presentation: try c.optionalText(14) ?? "",
-                coverRef: coverRef
-            )
-            itemsByParent[ParentKey(sectionID: sectionID, tabID: tabID), default: []].append(item)
+            itemsByParent[ParentKey(sectionID: sectionID, tabID: tabID), default: []].append(MusicNativePublicBrowseItem(
+                id: try c.text(3), title: try c.text(5), subtitle: try c.optionalText(6) ?? "",
+                artwork: (try c.optionalText(7)).flatMap(URL.init(string:)), content: content, ranking: ranking,
+                previewSongs: displayPreviews, coverLabel: try c.optionalText(8) ?? "", previewSongIDs: previewSongIDs,
+                requiresAccount: try c.optionalBool(9) ?? false, kind: kind, label: try c.optionalText(11) ?? "",
+                contextText: try c.optionalText(12) ?? "", playCount: try c.optionalInteger(13),
+                presentation: try c.optionalText(14) ?? "", coverRef: coverRef
+            ))
         }
 
         var sections: [MusicNativePublicBrowseSection] = []
         sections.reserveCapacity(sectionRows.count)
         for row in sectionRows {
-            guard let layout = MusicPublicBrowseSection.Layout(rawValue: row.layoutRaw) else {
-                throw MusicServiceError.corruptStorage
-            }
-            let channel: MusicPublicBrowseChannel?
-            if let chID = row.channelID,
-               let chKindRaw = row.channelKindRaw,
-               let chKind = MusicPublicBrowseChannel.Kind(rawValue: chKindRaw),
-               let chPlatformRaw = row.channelPlatformRaw,
-               let chPlatform = MusicPublicBrowsePlatform(rawValue: chPlatformRaw) {
-                channel = MusicPublicBrowseChannel(
-                    id: chID,
-                    title: row.channelTitle ?? "",
-                    kind: chKind,
-                    pageCode: row.channelPageCode ?? "",
-                    platform: chPlatform
-                )
-            } else {
-                channel = nil
-            }
+            guard let layout = MusicPublicBrowseSection.Layout(rawValue: row.layoutRaw) else { continue }
+            let channel: MusicPublicBrowseChannel? = if let chID = row.channelID,
+                let chKindRaw = row.channelKindRaw, let chKind = MusicPublicBrowseChannel.Kind(rawValue: chKindRaw),
+                let chPlatformRaw = row.channelPlatformRaw, let chPlatform = MusicPublicBrowsePlatform(rawValue: chPlatformRaw) {
+                MusicPublicBrowseChannel(id: chID, title: row.channelTitle ?? "", kind: chKind,
+                                         pageCode: row.channelPageCode ?? "", platform: chPlatform)
+            } else { nil }
             let tabs = (tabsBySection[row.id] ?? []).map { tab in
-                MusicNativePublicBrowseSectionTab(
-                    id: tab.id,
-                    title: tab.title,
-                    items: itemsByParent[ParentKey(sectionID: row.id, tabID: tab.id)] ?? []
-                )
+                MusicNativePublicBrowseSectionTab(id: tab.id, title: tab.title,
+                                                  items: itemsByParent[ParentKey(sectionID: row.id, tabID: tab.id)] ?? [])
             }
-            sections.append(
-                MusicNativePublicBrowseSection(
-                    id: row.id,
-                    title: row.title,
-                    items: itemsByParent[ParentKey(sectionID: row.id, tabID: nil)] ?? [],
-                    layout: layout,
-                    avatars: avatarsBySection[row.id] ?? [],
-                    channel: channel,
-                    filters: filtersBySection[row.id] ?? [],
-                    selectedFilter: row.selectedFilter ?? "",
-                    tabs: tabs,
-                    selectedTab: row.selectedTab ?? ""
-                )
-            )
+            sections.append(MusicNativePublicBrowseSection(
+                id: row.id, title: row.title, items: itemsByParent[ParentKey(sectionID: row.id, tabID: nil)] ?? [],
+                layout: layout, avatars: avatarsBySection[row.id] ?? [], channel: channel,
+                filters: filtersBySection[row.id] ?? [], selectedFilter: row.selectedFilter ?? "",
+                tabs: tabs, selectedTab: row.selectedTab ?? ""
+            ))
         }
-
         return (source, MusicNativePublicBrowseDiscovery(sections: sections))
     }
 
@@ -481,24 +383,15 @@ enum MusicHomeSnapshotStore {
         ]
         try db.execute(itemInsertSQL, values)
 
-        for (idx, id) in item.previewSongIDs.enumerated() {
-            try db.execute(
-                "INSERT INTO ios_music_home_item_lists(item_uid,list_kind,position,item_value) VALUES(?,?,?,?)",
-                [.text(uid), .text("previewSongIDs"), .integer(idx), .text(id ?? "")]
-            )
+        func insertList(_ kind: String, _ values: [String]) throws {
+            for (idx, val) in values.enumerated() {
+                try db.execute("INSERT INTO ios_music_home_item_lists(item_uid,list_kind,position,item_value) VALUES(?,?,?,?)",
+                               [.text(uid), .text(kind), .integer(idx), .text(val)])
+            }
         }
-        for (idx, id) in actionSourceIDs.enumerated() {
-            try db.execute(
-                "INSERT INTO ios_music_home_item_lists(item_uid,list_kind,position,item_value) VALUES(?,?,?,?)",
-                [.text(uid), .text("actionSourceIds"), .integer(idx), .text(id)]
-            )
-        }
-        for (idx, id) in actionIDs.enumerated() {
-            try db.execute(
-                "INSERT INTO ios_music_home_item_lists(item_uid,list_kind,position,item_value) VALUES(?,?,?,?)",
-                [.text(uid), .text("actionIds"), .integer(idx), .text(id)]
-            )
-        }
+        try insertList("previewSongIDs", item.previewSongIDs.map { $0 ?? "" })
+        try insertList("actionSourceIds", actionSourceIDs)
+        try insertList("actionIds", actionIDs)
 
         for (idx, display) in item.previewSongs.compactMap(\.display).enumerated() {
             let safeArt = MusicModel.publicURLString(display.artwork?.absoluteString ?? "")
@@ -532,110 +425,72 @@ enum MusicHomeSnapshotStore {
     }
 
     private static func decodeContent(_ c: SQLiteCursor, lists: [String: [String]]) throws -> MusicNativePublicBrowseContent {
-        let kind = try c.optionalText(20) ?? "unavailable"
-        switch kind {
+        switch try c.optionalText(20) ?? "unavailable" {
         case "collection":
             guard let platformRaw = try c.optionalText(22),
                   let platform = MusicPublicBrowsePlatform(rawValue: platformRaw),
                   let nativeID = try c.optionalText(23),
                   let colKindRaw = try c.optionalText(24),
                   let colKind = MusicPublicBrowseCollection.Kind(rawValue: colKindRaw) else {
-                throw MusicServiceError.corruptStorage
+                return .unavailable
             }
-            return .collection(
-                MusicPublicBrowseCollection(
-                    platform: platform,
-                    nativeID: nativeID,
-                    kind: colKind,
-                    title: try c.optionalText(25) ?? "",
-                    creator: try c.optionalText(26) ?? "",
-                    artwork: (try c.optionalText(27)).flatMap(URL.init(string:)),
-                    count: try c.optionalInteger(28),
-                    playCount: try c.optionalInteger(29)
-                )
-            )
+            return .collection(MusicPublicBrowseCollection(
+                platform: platform, nativeID: nativeID, kind: colKind,
+                title: try c.optionalText(25) ?? "", creator: try c.optionalText(26) ?? "",
+                artwork: (try c.optionalText(27)).flatMap(URL.init(string:)),
+                count: try c.optionalInteger(28), playCount: try c.optionalInteger(29)
+            ))
         case "record":
-            guard let id = try c.optionalText(21) else { throw MusicServiceError.corruptStorage }
-            return .record(id)
+            return (try c.optionalText(21)).map(MusicNativePublicBrowseContent.record) ?? .unavailable
         case "channel":
             guard let chID = try c.optionalText(30),
                   let chKindRaw = try c.optionalText(32),
                   let chKind = MusicPublicBrowseChannel.Kind(rawValue: chKindRaw),
                   let chPlatformRaw = try c.optionalText(34),
                   let chPlatform = MusicPublicBrowsePlatform(rawValue: chPlatformRaw) else {
-                throw MusicServiceError.corruptStorage
+                return .unavailable
             }
-            return .channel(
-                MusicPublicBrowseChannel(
-                    id: chID,
-                    title: try c.optionalText(31) ?? "",
-                    kind: chKind,
-                    pageCode: try c.optionalText(33) ?? "",
-                    platform: chPlatform
-                )
-            )
+            return .channel(MusicPublicBrowseChannel(
+                id: chID, title: try c.optionalText(31) ?? "", kind: chKind,
+                pageCode: try c.optionalText(33) ?? "", platform: chPlatform
+            ))
         case "daily":
             return .daily
-        case "unavailable":
-            return .unavailable
         case "action":
-            return .action(try decodeAction(c, lists: lists))
+            return (try decodeAction(c, lists: lists)).map(MusicNativePublicBrowseContent.action) ?? .unavailable
         default:
-            throw MusicServiceError.corruptStorage
+            return .unavailable
         }
     }
 
-    private static func decodeAction(_ c: SQLiteCursor, lists: [String: [String]]) throws -> MusicHomeAction {
-        guard let type = try c.optionalText(35) else { throw MusicServiceError.corruptStorage }
-        switch type {
+    private static func decodeAction(_ c: SQLiteCursor, lists: [String: [String]]) throws -> MusicHomeAction? {
+        switch try c.optionalText(35) ?? "" {
         case "fm":
             let provider = try c.optionalText(36) ?? ""
             if provider == "rule" {
-                guard let ruleID = try c.optionalText(40),
-                      let tabTagID = try c.optionalText(41) else {
-                    throw MusicServiceError.corruptStorage
-                }
+                guard let ruleID = try c.optionalText(40), let tabTagID = try c.optionalText(41) else { return nil }
                 return .ruleFM(ruleID: ruleID, tabTagID: tabTagID, sourceName: try c.optionalText(42) ?? "")
             }
-            guard provider.isEmpty,
-                  let modeRaw = try c.optionalText(37),
-                  let mode = MusicHomeAction.FMMode(rawValue: modeRaw) else {
-                throw MusicServiceError.corruptStorage
-            }
-            let entry: MusicHomeAction.FMEntry?
-            if let entryRaw = try c.optionalText(39) {
-                guard let parsed = MusicHomeAction.FMEntry(rawValue: entryRaw) else {
-                    throw MusicServiceError.corruptStorage
-                }
-                entry = parsed
-            } else {
-                entry = nil
-            }
+            guard provider.isEmpty, let modeRaw = try c.optionalText(37),
+                  let mode = MusicHomeAction.FMMode(rawValue: modeRaw) else { return nil }
+            let entry = (try c.optionalText(39)).flatMap(MusicHomeAction.FMEntry.init(rawValue:))
             return .fm(mode: mode, submode: try c.optionalText(38) ?? "", entry: entry)
         case "similar":
-            let sourceType = try c.optionalText(43) ?? ""
-            let ids = lists["actionSourceIds"] ?? []
-            let name = try c.optionalText(42) ?? ""
-            switch sourceType {
+            let ids = lists["actionSourceIds"] ?? [], name = try c.optionalText(42) ?? ""
+            switch try c.optionalText(43) ?? "" {
             case "song": return .similar(sourceIDs: ids, sourceName: name)
             case "artist": return .similarArtist(sourceIDs: ids, sourceName: name)
-            default: throw MusicServiceError.corruptStorage
+            default: return nil
             }
         case "daily":
-            guard let branchRaw = try c.optionalText(44),
-                  let branch = MusicHomeAction.DailyBranch(rawValue: branchRaw) else {
-                throw MusicServiceError.corruptStorage
-            }
+            guard let raw = try c.optionalText(44), let branch = MusicHomeAction.DailyBranch(rawValue: raw) else { return nil }
             return .daily(branch: branch)
         case "heartbeat":
-            if let songID = try c.optionalText(45) {
-                return .heartbeatSong(songID: songID)
-            }
-            return .heartbeat
+            return (try c.optionalText(45)).map { .heartbeatSong(songID: $0) } ?? .heartbeat
         case "song-collection":
             return .songCollection(ids: lists["actionIds"] ?? [])
         default:
-            throw MusicServiceError.corruptStorage
+            return nil
         }
     }
 }

@@ -13,7 +13,7 @@ final class MusicSourceExclusionsState: ObservableObject {
     @Published var busy = false
     let model: MusicViewModel
     init(model: MusicViewModel) { self.model = model }
-    var service: (any MusicSourceExclusionServing)? { model.service as? any MusicSourceExclusionServing }
+    var service: NativeMusicService? { model.service }
     func reload() async throws {
         guard let service else { throw MusicServiceError.unsupported }
         let rows = try await service.sourceExclusions()
@@ -47,7 +47,6 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
             state.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
         ])
         observe(uiChanges.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
-        observe(state.model.accessChanges, whenVisible: true) { [weak self] in self?.render() }
         render()
     }
 

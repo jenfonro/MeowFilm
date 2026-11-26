@@ -201,8 +201,6 @@ export function createTransport({ timeout = 30000, debug } = {}) {
         requireValue(typeof inputMethod === 'string' && /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(inputMethod));
         requireValue(inputBody === undefined || typeof inputBody === 'string' ||
           inputBody instanceof Uint8Array);
-        requireValue(inputSignal === undefined || typeof inputSignal?.addEventListener === 'function' &&
-          typeof inputSignal?.removeEventListener === 'function' && typeof inputSignal.aborted === 'boolean');
         signal = inputSignal;
         abort = () => controller.abort(new PanError('CANCELLED'));
         signal?.addEventListener('abort', abort, { once: true });
@@ -211,13 +209,7 @@ export function createTransport({ timeout = 30000, debug } = {}) {
           if (!controller.signal.aborted) controller.abort(new PanError('TIMEOUT'));
         } else {
           requireValue(duration > 0);
-          const deadline = performance.now() + duration;
-          const tick = () => {
-            const remaining = deadline - performance.now();
-            if (remaining <= 0) controller.abort(new PanError('TIMEOUT'));
-            else timer = setTimeout(tick, Math.min(remaining, 2147483647));
-          };
-          tick();
+          timer = setTimeout(() => controller.abort(new PanError('TIMEOUT')), Math.min(duration, 2147483647));
         }
         const url = address(input), method = inputMethod.toUpperCase();
         const headers = headerObject(inputHeaders), body = inputBody;
@@ -420,8 +412,6 @@ export async function followRedirects(ctx, initialURL, {
 export function delay(ms, signal) {
   return new Promise((resolve, reject) => {
     milliseconds(ms);
-    requireValue(signal === undefined || typeof signal?.addEventListener === 'function' &&
-      typeof signal?.removeEventListener === 'function' && typeof signal.aborted === 'boolean');
     let timer;
     const finish = error => {
       clearTimeout(timer);
@@ -432,12 +422,7 @@ export function delay(ms, signal) {
     const abort = () => finish(new PanError('CANCELLED'));
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener('abort', abort, { once: true });
-    const deadline = performance.now() + ms;
-    const tick = () => {
-      const remaining = deadline - performance.now();
-      if (remaining <= 0) finish();
-      else timer = setTimeout(tick, Math.min(remaining, 2147483647));
-    };
-    tick();
+    if (ms <= 0) finish();
+    else timer = setTimeout(finish, Math.min(ms, 2147483647));
   });
 }

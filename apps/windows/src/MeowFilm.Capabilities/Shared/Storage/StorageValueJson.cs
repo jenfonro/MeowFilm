@@ -115,7 +115,7 @@ internal static class StorageValueJson
     {
         StorageValueKind.Text => value.TextValue,
         StorageValueKind.Integer => value.IntValue.ToString(CultureInfo.InvariantCulture),
-        StorageValueKind.Real => MusicRules.JsNumber(value.RealValue),
+        StorageValueKind.Real => value.RealValue.ToString("G17", CultureInfo.InvariantCulture),
         StorageValueKind.ExactNumber => value.TextValue,
         StorageValueKind.Boolean => value.BoolValue ? "true" : "false",
         _ => null

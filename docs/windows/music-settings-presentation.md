@@ -24,11 +24,9 @@
 
 - 音质选择标签为“起播目标音质”，保留原 `request` 数据契约和优先级/回退算法，不把该值误称为不可降级的最低音质。
 
-## 设置回执
+## 设置持久化与结算
 
-共同规则以[设置保存与未知结果](../common/music/settings-receipts.md)为唯一来源。`Music/Settings/MusicSettingReceiptTracker.cs` 按 setting key 和 submission 顺序持有未知提示并由 `MusicCapability` 通过 `IDesktopOwnedNoticeSource` 暴露；Shell 经 `ShellOwnedNoticeBridge` 订阅稳定 owner，沿原 NoticeStack／样式呈现，不依赖设置视图存活。
-
-official、metadata、quality、search、appearance、首页来源、设备、桌面歌词与在线播放设置走同一回执入口；反馈等独立设置仍以其真实 owner 回执结算。页面关闭后不回填旧控件，未知不自动重试；同项后续明确成功只清对应较早提示，其他项及较新错误保留。普通读取／重开页面不是保存成功证据。
+official、metadata、quality、search、appearance、首页来源、设备、桌面歌词与在线播放设置直接提交至对应原生 owner 的本地 SQLite WAL 原子事务并按 `expectedRevision` CAS 结算；反馈设置由 `MusicFeedbackSettingsOwner` 原子持久化。页面关闭后不取消已准入的本地事务、不回填旧控件；CAS 冲突时重新读取权威结果恢复显示，不自动重放。
 
 ## 参考布局与资源
 

@@ -55,17 +55,7 @@ public sealed class FilmRuleService : IAsyncDisposable
     public Task<FilmRuleSet> SaveAsync(FilmRuleSet rules, CancellationToken cancellationToken = default)
     {
         var owned = Copy(rules);
-        return RunAsync(async token =>
-        {
-            Validate(owned);
-            var normalized = NormalizeForSave(owned);
-            if (saved is { } current && SameRules(current, normalized))
-                return Copy(current);
-            storageRevision = await FilmRulesStore.SaveAsync(database, normalized, storageRevision, token).ConfigureAwait(false);
-            var committed = AcceptLocal(normalized);
-            notifications?.SettingsChanged("film.rules");
-            return committed;
-        }, cancellationToken);
+        return RunAsync(token => PersistAsync(owned, token), cancellationToken);
     }
 
     /// <summary>Restores the selected section, then saves the entire supplied panel draft.</summary>
@@ -74,7 +64,7 @@ public sealed class FilmRuleService : IAsyncDisposable
     {
         _ = SectionKey(section);
         var owned = Copy(draft);
-        return RunAsync(async token =>
+        return RunAsync(token =>
         {
             var defaults = Defaults("restore");
             var next = section switch
@@ -84,15 +74,20 @@ public sealed class FilmRuleService : IAsyncDisposable
                 FilmRuleSection.Season => owned with { SeasonRules = defaults.SeasonRules },
                 _ => owned with { AggregateRegexRules = defaults.AggregateRegexRules }
             };
-            Validate(next);
-            next = NormalizeForSave(next);
-            if (saved is { } existing && SameRules(existing, next))
-                return Copy(existing);
-            storageRevision = await FilmRulesStore.SaveAsync(database, next, storageRevision, token).ConfigureAwait(false);
-            var committed = AcceptLocal(next);
-            notifications?.SettingsChanged("film.rules");
-            return committed;
+            return PersistAsync(next, token);
         }, cancellationToken);
+    }
+
+    private async Task<FilmRuleSet> PersistAsync(FilmRuleSet candidate, CancellationToken token)
+    {
+        Validate(candidate);
+        var normalized = NormalizeForSave(candidate);
+        if (saved is { } current && SameRules(current, normalized))
+            return Copy(current);
+        storageRevision = await FilmRulesStore.SaveAsync(database, normalized, storageRevision, token).ConfigureAwait(false);
+        var committed = AcceptLocal(normalized);
+        notifications?.SettingsChanged("film.rules");
+        return committed;
     }
 
     public Task<FilmRuleResult> ProcessAsync(FilmRuleRequest request, FilmRuleSet rules,

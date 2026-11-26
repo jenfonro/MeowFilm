@@ -28,7 +28,6 @@ import MeowPlayback
         get { lifetime.closed }
         set { lifetime.closed = newValue }
     }
-    private var modelClosed: Bool
     private var binding: MusicSystemMetadataBinding? {
         get { lifetime.binding }
         set { lifetime.binding = newValue }
@@ -50,7 +49,6 @@ import MeowPlayback
         self.model = model; self.playback = playback; self.appearance = appearance
         self.lifetime = Lifetime(playback: playback, appearance: appearance)
         favorites = model.favorites
-        modelClosed = model.isClosed
 
         Publishers.MergeMany(model.playbackChanges, model.metadataChanges, model.libraryChanges,
                              model.noticeChanges).sink { [weak self] in
@@ -77,12 +75,6 @@ import MeowPlayback
             .sink { [weak self] _ in self?.schedule() }
             .store(in: &observations)
 
-        model.accessState.$isClosed.sink { [weak self] value in
-            guard let self else { return }
-            self.modelClosed = value
-            if value { self.revoke(); self.suppressCurrentMusicAttempt() }
-            self.schedule()
-        }.store(in: &observations)
         model.playbackState.$state.sink { [weak self] state in
             guard let self else { return }
             if let binding = self.binding, state.currentId != binding.occurrenceID { self.revoke() }
@@ -124,14 +116,17 @@ import MeowPlayback
 
     private func refresh() {
         guard !closed else { return }
-        guard !modelClosed, !model.isClosed,
-              let entry = model.current, let attempt = playback.currentAttempt,
+        if model.isClosed {
+            revoke(); suppressCurrentMusicAttempt()
+            return
+        }
+        guard let entry = model.current, let attempt = playback.currentAttempt,
               let next = MusicSystemMetadataBinding(
                 entry: entry, attempt: attempt, activeAttemptID: model.activeNativeAttemptID,
                 activeResourceID: model.activeResourceID, activeOccurrenceID: model.activeOccurrenceID,
                 snapshot: playback.snapshot),
               playback.isCurrent(attempt) else {
-            if binding != nil || modelClosed { revoke() }
+            if binding != nil { revoke() }
             return
         }
         if let old = binding, old != next { revoke() }

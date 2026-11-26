@@ -20,16 +20,6 @@ struct MusicReferenceQueueIntent: Hashable, Sendable {
     }
 }
 
-/// A confirmation/read action may not survive a replaced detail, even when the
-/// history ID is unchanged. The service still verifies the opaque token itself.
-struct MusicReferenceHistoryIntent: Equatable, Sendable {
-    let request: UUID
-    let token: MusicHistoryActionToken
-    func admits(request: UUID, token: MusicHistoryActionToken?, permitted: Bool) -> Bool {
-        permitted && self.request == request && self.token == token
-    }
-}
-
 /// Three category labels share one native strip: current, songs, history cards.
 enum MusicReferenceQueuePage: Int, CaseIterable, Sendable {
     case current, songs, playlists

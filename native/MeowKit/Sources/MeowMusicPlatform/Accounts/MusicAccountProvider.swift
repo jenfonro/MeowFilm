@@ -1,7 +1,6 @@
 import CryptoKit
 import Foundation
 import MeowAccounts
-import MeowMusicFeature
 import MeowRuntime
 
 public func musicSHA256Hex(_ data: Data) -> String {

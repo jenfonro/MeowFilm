@@ -1,26 +1,13 @@
 import { isUtf8 } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
 import { BridgeError } from '@meowfilm/runtime-bridge';
-import { isRawJSON, parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 export const APP_SETTINGS_BLOCKS = new Set([
   'cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences', 'film.video-sources',
 ]);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const revision = value => Number.isSafeInteger(value) && value >= 0;
-const providers = new Set(['baidu', 'quark', 'uc', 'tianyi', 'yidong']);
-
-function cloneValue(value) {
-  if (value === null || typeof value !== 'object' || isRawJSON(value)) return value;
-  if (Array.isArray(value)) return value.map(cloneValue);
-  const copy = {};
-  for (const key of Object.keys(value)) {
-    const next = cloneValue(value[key]);
-    if (key === '__proto__') Object.defineProperty(copy, key, { value: next, enumerable: true, writable: true, configurable: true });
-    else copy[key] = next;
-  }
-  return copy;
-}
 
 /** An in-memory read capability over an App-owned private stream, never a settings store. */
 export function createNativeSettings(stream, stop, { debug } = {}) {
@@ -47,8 +34,7 @@ export function createNativeSettings(stream, stop, { debug } = {}) {
   }
   function request(kind, block, extra = {}) {
     if (closed) return Promise.reject(new BridgeError('CLOSED'));
-    if (!APP_SETTINGS_BLOCKS.has(block) || !Number.isSafeInteger(sequence + 1))
-      return Promise.reject(new BridgeError('INVALID_REQUEST'));
+    if (!APP_SETTINGS_BLOCKS.has(block)) return Promise.reject(new BridgeError('INVALID_REQUEST'));
     const id = ++sequence;
     const line = stringifyJSONValue({ kind, id, block, ...extra }, -2) + '\n';
     const startedAt = debug ? performance.now() : 0;
@@ -61,9 +47,7 @@ export function createNativeSettings(stream, stop, { debug } = {}) {
     });
   }
   function update(block, command) {
-    if (block !== 'pan.accounts' || !object(command) || !providers.has(command.provider) ||
-        !['replace', 'refresh'].includes(command.mode) || !revision(command.accountRevision) ||
-        !revision(command.rowRevision) || !object(command.credentials))
+    if (block !== 'pan.accounts' || !object(command))
       return Promise.reject(new BridgeError('INVALID_REQUEST'));
     return request('settings.pan.update', block, { command });
   }
@@ -109,7 +93,7 @@ export function createNativeSettings(stream, stop, { debug } = {}) {
             revision: reply.revision, document: reply.document,
           }, { durationMs });
           snapshots.set(exchange.block, value);
-          exchange.resolve(cloneValue(value));
+          exchange.resolve(value);
         }
       }
     },
@@ -118,27 +102,27 @@ export function createNativeSettings(stream, stop, { debug } = {}) {
     read(block) {
       if (closed) throw new BridgeError('CLOSED');
       if (!snapshots.has(block)) throw new BridgeError('INVALID_REQUEST');
-      return cloneValue(snapshots.get(block).document);
+      return snapshots.get(block).document;
     },
     update,
     accounts(block) {
       if (closed) throw new BridgeError('CLOSED');
       if (block !== 'pan.accounts' || !snapshots.has(block)) throw new BridgeError('INVALID_REQUEST');
-      let current = cloneValue(snapshots.get(block));
+      let current = snapshots.get(block);
       const open = () => { if (current === null || closed) throw new BridgeError('CLOSED'); };
       return {
-        read() { open(); return cloneValue(current.document); },
+        read() { open(); return current.document; },
         async reload() {
           open();
           const value = await request('settings.read', block);
           open(); current = value;
-          return cloneValue(current.document);
+          return current.document;
         },
         async update(command) {
           open();
           const value = await update(block, command);
           open(); current = value;
-          return cloneValue(current.document);
+          return current.document;
         },
         close() { current = null; },
       };

@@ -89,7 +89,7 @@ public sealed partial class MusicAccountOwner
                     FenceDetailsLocked(platform);
                 }
                 state.Current = account;
-                return new DetailsBaseline(account, null, state.Epoch, state.Revoked || state.Uncertain);
+                return new DetailsBaseline(account, null, state.Epoch, state.Revoked);
             }
         }, token).ConfigureAwait(false);
         if (changed) Notify(platform);
@@ -137,7 +137,7 @@ public sealed partial class MusicAccountOwner
                 AccountRules.Require(baseline.Account.Generation == expectedGeneration, "SESSION_CHANGED");
                 AccountRules.Require(!baseline.Hidden && baseline.Account.Cookie is not null, "AUTH_REQUIRED");
                 flight = detailsFlights.FirstOrDefault(f => f.Session.Platform == platform && f.Epoch == baseline.Epoch &&
-                    f.Before.ValueFingerprint == baseline.Account.ValueFingerprint && !f.Completion.Task.IsCompleted && f.Revocation is null);
+                    Same(f.Before, baseline.Account) && !f.Completion.Task.IsCompleted && f.Revocation is null);
                 if (flight is null)
                 {
                     var account = baseline.Account;
@@ -179,8 +179,8 @@ public sealed partial class MusicAccountOwner
                 flight.Cache is { } old && old.BelongsTo(flight.Before) && old.Rights.Membership.Vip is not null
                     ? old.Rights : rights;
             var next = new StoredAccountDetails(flight.Before.Generation,
-                flight.Before.Scope!, flight.Before.ValueFingerprint!, flight.Session.UserId, profile,
-                observed.ProfileFetchedAt, observed.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl, persistRights);
+                flight.Before.Scope!, flight.Session.UserId, profile,
+                observed.ProfileFetchedAt, observed.ProfileFetchedAt + StoredAccountDetails.ProfileTtl, persistRights);
             await SaveDetails(flight, next).ConfigureAwait(false);
             lock (gate)
             {
@@ -220,7 +220,7 @@ public sealed partial class MusicAccountOwner
             var snapshot = await ReadSnapshot(flight.Deadline.Token, flight.Session.Platform).ConfigureAwait(false);
             DetailsGuard(flight);
             var actualAccount = snapshot.Get(flight.Session.Platform);
-            if (actualAccount.ValueFingerprint != flight.Before.ValueFingerprint)
+            if (!Same(actualAccount, flight.Before))
             {
                 lock (gate)
                 {
@@ -274,8 +274,7 @@ public sealed partial class MusicAccountOwner
                     guard();
                     AccountDetailsStore.Write(db, platform, next);
                     return true;
-                }, retainedBytes: 512,
-                    commit: commit => { guard(); commit(); }).ConfigureAwait(false);
+                }, commit: commit => { guard(); commit(); }).ConfigureAwait(false);
             }
             catch (Exception error)
             {
@@ -294,7 +293,7 @@ public sealed partial class MusicAccountOwner
         bool hidden, MusicAccountEntitlements? observed = null)
     {
         var state = states[platform];
-        hidden |= state.Revoked || state.Uncertain;
+        hidden |= state.Revoked;
         string status = hidden ? "revoked" : account.Cookie is null ? "none" :
             state.Verified is { } verified && Same(verified, account) ? "verified" : "saved";
         if (hidden || account.Cookie is null)
@@ -302,7 +301,7 @@ public sealed partial class MusicAccountOwner
         if (cache?.BelongsTo(account) != true) cache = null;
         var profile = cache?.Profile ?? account.Profile;
         long fetched = cache?.ProfileFetchedAt ?? account.ValidatedAt ?? 0;
-        long expires = fetched > 0 ? fetched + AccountDetailsSnapshot.ProfileTtl : 0;
+        long expires = fetched > 0 ? fetched + StoredAccountDetails.ProfileTtl : 0;
         long now = clock.GetUtcNow().ToUnixTimeMilliseconds();
         var rights = observed ?? cache?.Rights;
         bool fresh = rights is not null && rights.RecheckAt > now;

@@ -1,7 +1,6 @@
 import {
   sourceFault, sourceObject, sourceRequire, sourceSafeError,
 } from './errors.js';
-import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 
 export const hostApiVersion = 2;
 
@@ -32,258 +31,91 @@ const forbiddenHeaders = new Set([
   'proxy-authorization', 'proxy-connection', 'te',
 ]);
 
-function text(value, maximum, code = 'INVALID_ARGUMENT') {
-  sourceRequire(typeof value === 'string' && (maximum === undefined || value.length <= maximum) &&
-    !/[\u0000-\u001f\u007f]/.test(value), code);
-  return value;
-}
-
-function profile(value) {
-  sourceRequire(typeof value === 'string' && value.length > 0);
-  return text(value, 512);
-}
-
-function route(value) {
-  sourceRequire(typeof value === 'string' &&
-    /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(value));
-  return value;
-}
-
-function httpUrl(value, code = 'INVALID_ARGUMENT') {
-  sourceRequire(typeof value === 'string', code);
+function httpUrl(value) {
+  sourceRequire(typeof value === 'string');
   try {
     const url = new URL(value);
-    sourceRequire(['http:', 'https:'].includes(url.protocol), code);
+    sourceRequire(['http:', 'https:'].includes(url.protocol));
     return url.href;
   } catch (error) {
     if (error?.code) throw error;
-    throw sourceFault(code);
+    throw sourceFault('INVALID_ARGUMENT');
   }
-}
-
-function headers(value = {}, code = 'INVALID_ARGUMENT') {
-  sourceObject(value, code);
-  const result = {};
-  for (const [key, item] of Object.entries(value)) {
-    sourceRequire(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(key), code);
-    const values = Array.isArray(item) ? item : [item];
-    sourceRequire(values.length > 0, code);
-    result[key.toLowerCase()] = values.map(entry => {
-      sourceRequire(typeof entry === 'string' && !/[\r\n]/.test(entry), code);
-      return entry;
-    });
-  }
-  return result;
 }
 
 function requestHeaders(value = {}) {
-  const result = headers(value);
-  for (const name of Object.keys(result)) {
-    sourceRequire(!forbiddenHeaders.has(name), 'PERMISSION_DENIED');
-  }
-  if (result.connection) {
-    sourceRequire(result.connection.length === 1 &&
-      ['close', 'keep-alive'].includes(result.connection[0].toLowerCase()),
-    'PERMISSION_DENIED');
-    delete result.connection;
+  sourceObject(value);
+  const result = {};
+  for (const [key, item] of Object.entries(value)) {
+    const lower = key.toLowerCase();
+    sourceRequire(!forbiddenHeaders.has(lower), 'PERMISSION_DENIED');
+    const values = (Array.isArray(item) ? item : [item]).map(entry => {
+      sourceRequire(typeof entry === 'string' && !/[\r\n]/.test(entry));
+      return entry;
+    });
+    sourceRequire(values.length > 0);
+    if (lower === 'connection') {
+      sourceRequire(values.length === 1 && ['close', 'keep-alive'].includes(values[0].toLowerCase()),
+        'PERMISSION_DENIED');
+      continue;
+    }
+    result[lower] = values;
   }
   return result;
 }
 
-function bytes(value, code = 'INVALID_ARGUMENT') {
-  sourceRequire(value instanceof Uint8Array, code);
-  return new Uint8Array(value);
-}
-
-function jsonClone(value, code = 'INVALID_ARGUMENT') {
-  try { return cloneJSONValue(value); }
-  catch { throw sourceFault(code); }
-}
-
-function fields(value, required, code = 'INVALID_ARGUMENT') {
-  sourceObject(value, code);
-  sourceRequire(required.every(key => Object.hasOwn(value, key)), code);
-  return value;
-}
-
-function validateHttp(input) {
-  fields(input, ['version', 'url']);
+function normalizeInput(name, input) {
+  sourceObject(input);
   sourceRequire(input.version === hostApiVersion);
-  const method = String(input.method ?? 'GET').toUpperCase();
-  sourceRequire(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(method));
-  const timeoutMs = input.timeoutMs ?? 15000;
-  const redirects = input.redirects ?? 5;
-  sourceRequire(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 120000);
-  sourceRequire(Number.isSafeInteger(redirects) && redirects >= 0 && redirects <= 10);
-  sourceRequire(input.cookieProfile === undefined || typeof input.cookieProfile === 'string');
-  return {
-    version: hostApiVersion,
-    url: httpUrl(input.url),
-    method,
-    headers: requestHeaders(input.headers),
-    body: bytes(input.body ?? new Uint8Array()),
-    timeoutMs,
-    redirects,
-    cookieProfile: input.cookieProfile === undefined ? '' : profile(input.cookieProfile),
-  };
-}
-
-function validateHttpResult(value) {
-  fields(value, ['version', 'status', 'url', 'body'], 'INVALID_RESPONSE');
-  sourceRequire(value.version === hostApiVersion && Number.isInteger(value.status) &&
-    value.status >= 100 && value.status <= 999, 'INVALID_RESPONSE');
-  return {
-    version: hostApiVersion,
-    status: value.status,
-    statusText: typeof value.statusText === 'string' ? value.statusText : '',
-    headers: headers(value.headers, 'INVALID_RESPONSE'),
-    url: httpUrl(value.url, 'INVALID_RESPONSE'),
-    body: bytes(value.body, 'INVALID_RESPONSE'),
-  };
-}
-
-function validateInput(name, input) {
   switch (name) {
-    case 'reader.values.read':
-      fields(input, ['version', 'profile']);
-      sourceRequire(input.version === hostApiVersion);
-      return { version: hostApiVersion, profile: profile(input.profile) };
-    case 'reader.values.apply': {
-      fields(input, ['version', 'profile', 'revision', 'entries']);
-      sourceRequire(input.version === hostApiVersion && Number.isSafeInteger(input.revision) && input.revision >= 0);
-      sourceRequire(input.variable === undefined || typeof input.variable === 'string');
-      sourceRequire(Array.isArray(input.entries) && (input.entries.length > 0 || input.variable !== undefined));
-      const seen = new Set();
-      const entries = input.entries.map(pair => {
-        sourceRequire(Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && !seen.has(pair[0]));
-        seen.add(pair[0]);
-        return [pair[0], jsonClone(pair[1])];
-      });
-      return { version: hostApiVersion, profile: profile(input.profile), revision: input.revision, entries,
-        ...(input.variable === undefined ? {} : { variable: input.variable }) };
-    }
-    case 'http.request': return validateHttp(input);
-    case 'cookie.get':
-    case 'cookie.clear':
-      fields(input, ['version', 'profile', 'url']);
-      sourceRequire(input.version === hostApiVersion && typeof input.url === 'string');
-      return { version: hostApiVersion, profile: profile(input.profile), url: httpUrl(input.url) };
-    case 'cookie.set':
-      fields(input, ['version', 'profile', 'url', 'values']);
-      sourceRequire(input.version === hostApiVersion && typeof input.url === 'string');
-      {
-        const values = Array.isArray(input.values) ? input.values : [input.values];
-        sourceRequire(values.length > 0);
-        return {
-          version: hostApiVersion, profile: profile(input.profile), url: httpUrl(input.url),
-          values: values.map(value => text(value)),
-        };
-      }
-    case 'storage.get':
-    case 'storage.delete':
-      fields(input, ['version', 'profile', 'key']);
-      sourceRequire(input.version === hostApiVersion);
-      return {
-        version: hostApiVersion, profile: profile(input.profile),
-        key: text(input.key),
-      };
-    case 'storage.set':
-      fields(input, ['version', 'profile', 'key', 'value']);
-      sourceRequire(input.version === hostApiVersion);
-      return {
-        version: hostApiVersion, profile: profile(input.profile),
-        key: text(input.key), value: jsonClone(input.value),
-      };
-    case 'encoding.encode':
-      fields(input, ['version', 'encoding', 'text']);
-      sourceRequire(input.version === hostApiVersion &&
-        typeof input.text === 'string');
-      return {
-        version: hostApiVersion, encoding: text(input.encoding, 64).toLowerCase(),
-        text: input.text,
-      };
-    case 'encoding.decode':
-      fields(input, ['version', 'encoding', 'body']);
-      sourceRequire(input.version === hostApiVersion);
-      return {
-        version: hostApiVersion, encoding: text(input.encoding, 64).toLowerCase(),
-        body: bytes(input.body ?? new Uint8Array()),
-      };
-    case 'crypto.digest':
-      fields(input, ['version', 'algorithm', 'data']);
-      sourceRequire(input.version === hostApiVersion &&
-        ['md5', 'sha1', 'sha256', 'sha512'].includes(input.algorithm));
-      return {
-        version: hostApiVersion, algorithm: input.algorithm,
-        data: bytes(input.data),
-      };
-    case 'crypto.hmac':
-      fields(input, ['version', 'algorithm', 'key', 'data']);
-      sourceRequire(input.version === hostApiVersion &&
-        ['md5', 'sha1', 'sha256', 'sha512'].includes(input.algorithm));
-      return {
-        version: hostApiVersion, algorithm: input.algorithm,
-        key: bytes(input.key), data: bytes(input.data),
-      };
-    case 'crypto.aes':
-      fields(input, ['version', 'operation', 'algorithm', 'key', 'data']);
-      sourceRequire(input.version === hostApiVersion &&
-        ['encrypt', 'decrypt'].includes(input.operation) &&
-        /^aes-(128|192|256)-(cbc|ecb)$/.test(input.algorithm));
-      {
-        const key = bytes(input.key);
-        const iv = bytes(input.iv ?? new Uint8Array());
-        const bits = Number(/^aes-(128|192|256)-/.exec(input.algorithm)[1]);
-        sourceRequire(key.length === bits / 8);
-        sourceRequire(input.algorithm.endsWith('-ecb')
-          ? iv.length === 0 : iv.length === 16);
-        return {
-          version: hostApiVersion, operation: input.operation, algorithm: input.algorithm,
-          key, iv,
-          data: bytes(input.data),
-        };
-      }
-    case 'crypto.random':
-      fields(input, ['version', 'length']);
-      sourceRequire(input.version === hostApiVersion &&
-        Number.isSafeInteger(input.length) && input.length >= 0);
-      return { version: hostApiVersion, length: input.length };
-    case 'web.interact':
-      fields(input, ['version', 'profile', 'mode', 'request']);
-      sourceRequire(input.version === hostApiVersion);
+    case 'http.request':
       return {
         version: hostApiVersion,
-        profile: profile(input.profile),
-        mode: text(input.mode, 64),
-        request: jsonClone(sourceObject(input.request)),
+        url: httpUrl(input.url),
+        method: String(input.method ?? 'GET').toUpperCase(),
+        headers: requestHeaders(input.headers),
+        body: input.body ?? new Uint8Array(),
+        timeoutMs: input.timeoutMs ?? 15000,
+        redirects: input.redirects ?? 5,
+        cookieProfile: input.cookieProfile ?? '',
+      };
+    case 'cookie.get':
+    case 'cookie.clear':
+      return { version: hostApiVersion, profile: input.profile, url: httpUrl(input.url) };
+    case 'cookie.set':
+      return {
+        version: hostApiVersion,
+        profile: input.profile,
+        url: httpUrl(input.url),
+        values: Array.isArray(input.values) ? input.values : [input.values],
+      };
+    case 'encoding.encode':
+      return { version: hostApiVersion, encoding: String(input.encoding).toLowerCase(), text: input.text };
+    case 'encoding.decode':
+      return {
+        version: hostApiVersion,
+        encoding: String(input.encoding).toLowerCase(),
+        body: input.body ?? new Uint8Array(),
+      };
+    case 'crypto.aes':
+      return {
+        version: hostApiVersion,
+        operation: input.operation,
+        algorithm: input.algorithm,
+        key: input.key,
+        iv: input.iv ?? new Uint8Array(),
+        data: input.data,
       };
     case 'virtual.register':
-      fields(input, ['version', 'profile', 'route']);
-      sourceRequire(input.version === hostApiVersion);
       return {
-        version: hostApiVersion, profile: profile(input.profile),
-        route: route(input.route), metadata: jsonClone(input.metadata ?? {}),
+        version: hostApiVersion,
+        profile: input.profile,
+        route: input.route,
+        metadata: input.metadata ?? {},
       };
-    case 'virtual.unregister':
-      fields(input, ['version', 'profile', 'route']);
-      sourceRequire(input.version === hostApiVersion);
-      return {
-        version: hostApiVersion, profile: profile(input.profile), route: route(input.route),
-      };
-    default: throw sourceFault('CAPABILITY_UNAVAILABLE');
+    default:
+      return { ...input, version: hostApiVersion };
   }
-}
-
-function validateResult(name, value) {
-  if (name === 'http.request') return validateHttpResult(value);
-  if (name === 'encoding.encode' || name.startsWith('crypto.')) {
-    return bytes(value, 'INVALID_RESPONSE');
-  }
-  if (name === 'encoding.decode' || name === 'cookie.get') {
-    sourceRequire(typeof value === 'string', 'INVALID_RESPONSE');
-    return value;
-  }
-  return jsonClone(value, 'INVALID_RESPONSE');
 }
 
 export function createCapabilityClient({ invoke } = {}) {
@@ -293,13 +125,12 @@ export function createCapabilityClient({ invoke } = {}) {
     names: Object.freeze([...names]),
     async call(name, input, context = {}) {
       sourceRequire(names.has(name), 'CAPABILITY_UNAVAILABLE');
-      sourceRequire(context.signal === undefined || context.signal instanceof AbortSignal);
       if (context.signal?.aborted) throw sourceSafeError(context.signal.reason, 'CANCELLED');
-      const captured = validateInput(name, input);
+      const captured = normalizeInput(name, input);
       try {
         const result = await invoke(name, captured, context);
         if (context.signal?.aborted) throw sourceSafeError(context.signal.reason, 'CANCELLED');
-        return validateResult(name, result);
+        return result;
       } catch (error) {
         throw sourceSafeError(error, name === 'http.request' ? 'NETWORK_ERROR' : 'CAPABILITY_UNAVAILABLE');
       }
@@ -339,7 +170,6 @@ export function base64ToBytes(value) {
     if (offset < output.length) output[offset++] = ((b & 15) << 4) | (c >>> 2);
     if (offset < output.length) output[offset++] = ((c & 3) << 6) | d;
   }
-  sourceRequire(bytesToBase64(output) === value);
   return output;
 }
 

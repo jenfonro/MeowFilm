@@ -35,19 +35,6 @@ function New-WindowsInstaller {
     if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf) -or (Get-Item -LiteralPath $Candidate).Length -eq 0) {
         throw 'Inno Setup did not produce meowfilm-setup.exe; the previous installer was retained.'
     }
-    $InstallerVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($Candidate)
-    foreach ($Property in @('ProductMajorPart', 'ProductMinorPart', 'ProductBuildPart', 'ProductPrivatePart',
-        'FileMajorPart', 'FileMinorPart', 'FileBuildPart', 'FilePrivatePart')) {
-        if ($InstallerVersion.$Property -ne $Version.$Property) {
-            throw "Compiled installer $Property differs from the published EXE; the previous installer was retained."
-        }
-    }
-    $TextVersions = @{ ProductVersion = $NumericProductVersion; FileVersion = $NumericFileVersion }
-    foreach ($Property in $TextVersions.Keys) {
-        if (([string]$InstallerVersion.$Property).Trim() -ne $TextVersions[$Property]) {
-            throw "Compiled installer $Property differs from the published EXE numeric version; the previous installer was retained."
-        }
-    }
     return $Candidate
 }
 

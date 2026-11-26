@@ -15,7 +15,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
   - `Navigation/` — 导航条目与图标契约（`NavigationItem`、`NavigationIcon`）
   - `Shell/` — 按职责分为 4 个子目录：
     - `Shell/Window/` — `DesktopWindow`、`NativeCaption`、`DesktopTrayIcon`、`DesktopTrayIcon.Native`、`DesktopSystemSettings`、`ShellWindowStartupSize`
-    - `Shell/Coordinators/` — `ShellModuleCoordinator`（模块挂载/属性批处理/串行请求/历史恢复）、`ShellSidebarCoordinator`（主导航与分组同步/自定义侧栏）、`ShellInputCoordinator`（快捷键与焦点/指针保护）、`ShellCloseCoordinator`（关闭偏好/托盘/退出编排）、`ShellNavigationHistory`、`ShellSearchCoordinator`、`ShellOwnedNoticeBridge`、`ShellSurfaceMotion`
+    - `Shell/Coordinators/` — `ShellModuleCoordinator`（模块挂载/属性批处理/串行请求/历史恢复）、`ShellSidebarCoordinator`（主导航与分组同步/自定义侧栏）、`ShellInputCoordinator`（快捷键与焦点/指针保护）、`ShellCloseCoordinator`（关闭偏好/托盘/退出编排）、`ShellNavigationHistory`、`ShellSearchCoordinator`、`ShellSurfaceMotion`
     - `Shell/Views/` — 薄窗口壳 `ShellWindow.xaml(.cs)`（与 `Header`/`Pages`/`Settings`/`Surfaces`/`UserDataReset` 分部）、`ShellNavigationGroupHeader`、`ShellSearchScope`、`ShellState`
     - `Shell/Debug/` — `ShellDebugAdapter`
   - `Theme/` — 公共资源字典入口 `Theme.xaml`（含 `MeowFilm.FlyoutPresenter`/`BareListViewItem`/`BareGridViewItem`/`GroupHeaderItem`）、`Typography.xaml`、`FilterChrome.xaml`、`ButtonTemplates.xaml`、`ContentTemplates.xaml`、滚动条样式与中性视觉／高对比辅助（`DesktopVisual`、`DesktopTheme`、`SystemAppearance`）

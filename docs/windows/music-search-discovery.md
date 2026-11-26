@@ -6,7 +6,7 @@
 
 `NativeMusicSearchDiscovery` 提供 `ReadAsync(refresh)`、`Rotate(expectedGeneration)`、`Invalidate(platform?)`、`CancelAndDrainAsync()` 和 `DisposeAsync()`。
 
-`MusicSearchDiscoverySnapshot` 保存 hot、suggestions、recommended、charts、failures、generation 和抓取时间。`MusicPlatformSearchDiscovery` 经同一 `MusicPlatformClient` 调 `wy/searchDiscovery`，随后采用已取得歌曲到 `MusicLibraryOwner`，再映射规范结果；原生不直接解析上游私有 envelope、验证成员身份或交接响应 Cookie。
+`MusicSearchDiscoverySnapshot` 保存 hot、suggestions、recommended、charts、failures、generation 和抓取时间。`NativeMusicSearchDiscovery` 经同一 `MusicPlatformClient` 调 `wy/searchDiscovery`，随后采用已取得歌曲到 `MusicLibraryOwner`，再映射规范结果；原生不直接解析上游私有 envelope、验证成员身份或交接响应 Cookie。
 
 ## 读取和缓存
 

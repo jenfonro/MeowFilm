@@ -174,7 +174,7 @@ public final class FilmPlaybackModel {
     let makeRequest: @Sendable () async throws -> FilmPlaybackRequest
     let searchContext: FilmSearchContext?
     var restorePresentation: FilmPlaybackSnapshot?
-    let media: any FilmPlaybackMediaControlling
+    let media: FilmPlaybackMedia.Session
     let preferencesStore: FilmPlayerPreferencesStore
     let playbackPreferences: FilmPlaybackSettingsModel?
     let chapterModel: FilmPlaybackChapterModel
@@ -276,7 +276,7 @@ public final class FilmPlaybackModel {
         let ui: Bool
     }
 
-    public init(transport: FilmPlaybackTransport, media: any FilmPlaybackMediaControlling,
+    public init(transport: FilmPlaybackTransport, media: FilmPlaybackMedia.Session,
                 searchContext: FilmSearchContext? = nil,
                 playerPreferences: FilmPlayerPreferencesStore? = nil,
                 playbackPreferences: FilmPlaybackSettingsModel? = nil,

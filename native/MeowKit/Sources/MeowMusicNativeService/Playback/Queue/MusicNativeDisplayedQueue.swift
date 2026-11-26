@@ -1,7 +1,7 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
-extension NativeMusicService: MusicDisplayedQueuePlaying {
+extension NativeMusicService {
     public func replaceDisplayedQueue(_ tracks: [MusicRemoteTrack], index: Int,
                                       origin: MusicDisplayedQueueOrigin, expectedRevision: Int,
                                       intent: MusicQueueAuthorization) async throws -> MusicPlaybackState {
@@ -20,7 +20,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
             historyDate = date
         }
         let result = try intent.perform {
-            try similarQueueTransaction([.queue, .playback, .history]) { state in
+            try transaction([.queue, .playback, .history]) { state in
                 try musicRequire(state.queue.revision == expectedRevision, .staleRevision)
                 if let historyDate {
                     let ids = Set(state.history.days.first { $0.date == historyDate }?.songs.map(\.songID) ?? [])

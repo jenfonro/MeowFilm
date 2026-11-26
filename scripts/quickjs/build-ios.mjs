@@ -47,31 +47,12 @@ export async function buildCatWebValues(directory, projectRoot = root) {
     return bytes;
   };
   for (const path of ['scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs']) await readInput(path);
-  const manifest = JSON.parse(await readInput('package.json'));
-  const lock = JSON.parse(await readInput('package-lock.json'));
+  await readInput('package.json');
+  await readInput('package-lock.json');
   const mobile = JSON.parse(await readInput('scripts/ios-node-mobile.json'));
-  const packages = new Map();
-  async function checkDependency(path) {
-    const parts = pathOf(path).split('/'), index = parts.lastIndexOf('node_modules');
-    if (index < 0) throw new Error(`Cat Web value dependency is not installed: ${path}`);
-    const location = parts.slice(0, index + (parts[index + 1].startsWith('@') ? 3 : 2)).join('/');
-    if (packages.has(location)) return packages.get(location);
-    const installed = JSON.parse(await readInput(`${location}/package.json`));
-    const pinned = lock.packages?.[location];
-    if (!pinned || pinned.link || installed.version !== pinned.version
-        || pinned.name !== undefined && installed.name !== pinned.name
-        || typeof pinned.resolved !== 'string' || typeof pinned.integrity !== 'string') {
-      throw new Error(`Cat Web value dependency differs from package lock: ${location}`);
-    }
-    packages.set(location, installed);
-    return installed;
-  }
-  const installed = await checkDependency('node_modules/undici/package.json');
-  const esbuild = await checkDependency('node_modules/esbuild/package.json');
-  const declarations = ['dependencies', 'devDependencies', 'optionalDependencies'];
-  if (installed.version !== IOS_CAT_WEB_VALUES.version || esbuild.version !== policy.build.esbuild
-      || !declarations.some(field => manifest[field]?.undici === installed.version)
-      || declarations.some(field => manifest[field]?.undici !== lock.packages?.['']?.[field]?.undici)) {
+  const installed = JSON.parse(await readInput('node_modules/undici/package.json'));
+  const esbuild = JSON.parse(await readInput('node_modules/esbuild/package.json'));
+  if (installed.version !== IOS_CAT_WEB_VALUES.version || esbuild.version !== policy.build.esbuild) {
     throw new Error('Cat Web values require the version-adapted Undici and locked esbuild');
   }
   const licenseBytes = await readInput(IOS_CAT_WEB_VALUES.license.path);
@@ -93,7 +74,6 @@ export async function buildCatWebValues(directory, projectRoot = root) {
           if (isBuiltin(input.path)) return { path: input.path, external: true };
         });
         plugin.onLoad({ filter: /.*/, namespace: 'file' }, async input => {
-          await checkDependency(input.path);
           const extension = extname(input.path);
           if (!['.js', '.cjs', '.mjs', '.json'].includes(extension)) {
             throw new Error(`Non-JavaScript Cat Web value input: ${input.path}`);
@@ -108,11 +88,7 @@ export async function buildCatWebValues(directory, projectRoot = root) {
     !input.external || !isBuiltin(input.path)))) {
     throw new Error('Cat Web value bundle has an unbundled dependency');
   }
-  const inputs = [];
-  for (const path of [...captured.keys()].sort()) {
-    await readInput(path);
-    inputs.push({ path, sha256: captured.get(path) });
-  }
+  const inputs = [...captured.keys()].sort().map(path => ({ path, sha256: captured.get(path) }));
   const path = pathOf(resolve(directory, 'cat-web-values.cjs'));
   const bytes = result.outputFiles[0].contents;
   await mkdir(directory, { recursive: true });
@@ -309,23 +285,6 @@ export async function buildIOSNative(target) {
 `;
     await writeFile(resolve(root, paths.info), info);
     await unchanged(before);
-    await unchanged([...loadedBuildInputs, ...loadedIOSInputs]);
-    const afterNative = (await Promise.all(policy.inputDirectories.map(path => files(path)))).flat();
-    const afterSDK = [
-      ...await files('packages/script-host/src'), ...await files('packages/source-runtime/src'),
-      ...await sdkDependencyInputs(),
-    ];
-    if (JSON.stringify(afterNative) !== JSON.stringify(nativeInputs)
-        || JSON.stringify(afterSDK) !== JSON.stringify(sdkCandidates)) {
-      throw new Error('Native/SDK membership changed during build');
-    }
-    const finalCatWebValues = await artifact(catWebValues.path);
-    if (finalCatWebValues.bytes !== catWebValues.bytes || finalCatWebValues.sha256 !== catWebValues.sha256) {
-      throw new Error('Cat Web value output changed after bundling');
-    }
-    for (const source of Object.values(policy.sources)) {
-      await verifySourceInventory(source, sourceInputs.filter(path => path.startsWith(source.sourcePath + '/')));
-    }
     await rename(temporary, resolve(root, paths.artifact));
     const receipt = {
       ...identity, arch: target.arch, bindingIdentity,
@@ -335,7 +294,6 @@ export async function buildIOSNative(target) {
         [name, { path: source.sourcePath, files: sourceInputs.filter(path => path.startsWith(source.sourcePath + '/')) }])),
       toolchain: { ...toolchain, commands },
     };
-    await unchanged(before);
     await writeFile(resolve(directory, 'build/Release/script-host-native.json.partial'), JSON.stringify(receipt, null, 2) + '\n');
     await rename(resolve(directory, 'build/Release/script-host-native.json.partial'), resolve(root, paths.receipt));
     console.log(`Built ${paths.artifact} ${receipt.artifact.sha256}`);

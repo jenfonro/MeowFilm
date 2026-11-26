@@ -62,6 +62,6 @@ guest 只得到能力调用结果，不得到 Node socket、`fetch` 实现、Coo
 
 `web.interact` 的 request 由 owner 注入权威 `cookies:[{name,value,domain,hostOnly,path,secure,httpOnly,sameSite,expires}]`，仅含当前源 HTTP profile 未过期 Cookie；显式 Cookie header 只合并到临时种子，不提前持久化。平台使用 cookies 初始化隔离 Web store，不从 header 扩大作用域。结果封套为 `{value,url,headers,cookieChanges?:[{url,setCookie}]}`；普通附加成员不改变解封或 Cookie 处理，只消费 value/url/headers 和各项 url/setCookie；每条变化按自身 HTTP(S) origin 处理，与响应 headers 的 Set-Cookie 合为一次可回滚持久化事务，受取消及 generation fence 约束，再仅返回 value。sameSite 为 null／Lax／Strict／None，expires 为 null／Unix 毫秒；不再回填旧持久 Cookie 缺失的 httpOnly／sameSite。参数顺序、标量类型、前缀与删除规则见[Web ABI 有据表](source-library.md#已核实的-web-helper-abi)。
 
-iOS 通过内置 `MeowScriptHost.framework`、Windows 通过受信原生 Node addon 承载原生核心，均使用 HTTP v1 和此能力 ABI，source 与音乐、Cat 共用各自平台的 Node 主控；平台装配与验证边界分别见[iOS 平台预检](../ios/runtime-preflight.md)和[Windows 平台接入](../windows/app-runtime.md)。不将通用验证视为全平台通过，也不据此声明 Android 已接入。Reader/CatVod 的规则与动作维护一份；只有新增现有 ABI 无法表达的系统语义时才扩展 ABI，并由各平台分别实现。不能据此宣称 CatNode 的 Node 兼容层可脱离 Node。
+iOS 通过内置 `MeowScriptHost.framework`、Windows 通过受信原生 Node addon 承载原生核心，均使用 HTTP v1 和此能力 ABI，source 与音乐、Cat 共用各自平台的 Node 主控；平台装配与验证边界分别见[iOS 架构](../ios/architecture.md)和[Windows 平台接入](../windows/app-runtime.md)。不将通用验证视为全平台通过，也不据此声明 Android 已接入。Reader/CatVod 的规则与动作维护一份；只有新增现有 ABI 无法表达的系统语义时才扩展 ABI，并由各平台分别实现。不能据此宣称 CatNode 的 Node 兼容层可脱离 Node。
 
 当前 ABI 文档描述通用迁移契约；通用原生构建与定向回归已通过（见[通用验证范围](script-runtime.md#构建发布与验证边界)），不能把接口或合成夹具视为平台业务通过。

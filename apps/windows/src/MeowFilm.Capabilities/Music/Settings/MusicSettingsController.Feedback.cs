@@ -80,10 +80,7 @@ public sealed partial class MusicSettingsController
     {
         feedbackRevision = settings.Revision;
         foreach (var row in FeedbackPlatforms)
-        {
             row.Apply(settings.Enabled.Contains(row.Platform));
-            FeedbackPlatformChanged?.Invoke(row.Platform);
-        }
         feedbackLoaded = true; feedbackStatus = "";
         Changed(nameof(CanEditFeedback)); PublishFeedbackStatus();
     }
@@ -102,21 +99,15 @@ public sealed partial class MusicSettingsController
         long expectedRevision = feedbackRevision, currentGeneration = feedbackGeneration;
         feedbackBusy = true;
         Changed(nameof(CanEditFeedback));
-        FeedbackPlatformChanged?.Invoke(row.Platform);
         var nextWork = RunAsync(async () =>
         {
-            long receipt = ctx.Receipts.NextSubmission();
             try
             {
                 var value = await PlaybackFeedback.SaveSettingsAsync(expectedRevision, targets, lifetime.Token);
-                ctx.Receipts.Record("music.feedback.settings.save", "播放上报", receipt, confirmed: true);
                 if (FeedbackCurrent(currentGeneration)) PublishFeedbackSettings(value);
             }
-            catch (Exception error)
+            catch
             {
-                bool uncertain = error is MusicFeedbackException { Code: "COMMIT_UNKNOWN" };
-                if (uncertain)
-                    ctx.Receipts.Record("music.feedback.settings.save", "播放上报", receipt, confirmed: false);
                 if (!FeedbackCurrent(currentGeneration)) return;
                 try
                 {
@@ -124,16 +115,14 @@ public sealed partial class MusicSettingsController
                     if (!FeedbackCurrent(currentGeneration)) return;
                     PublishFeedbackSettings(value);
                     bool matched = FeedbackPlatforms.First(v => v.Platform == row.Platform).Enabled == enabled;
-                    if (uncertain && matched)
-                        ctx.Receipts.Record("music.feedback.settings.save", "播放上报", receipt, confirmed: true);
-                    feedbackStatus = matched ? "" : (uncertain ? "保存结果未确认，请重新读取" : "播放上报设置未生效");
+                    feedbackStatus = matched ? "" : "播放上报设置未生效";
                 }
                 catch
                 {
                     if (FeedbackCurrent(currentGeneration))
                     {
                         feedbackLoaded = false;
-                        feedbackStatus = uncertain ? "保存结果未确认，请重新读取" : "播放上报设置保存失败";
+                        feedbackStatus = "播放上报设置保存失败";
                     }
                 }
             }
@@ -144,7 +133,6 @@ public sealed partial class MusicSettingsController
                     feedbackBusy = false;
                     Changed(nameof(CanEditFeedback));
                     PublishFeedbackStatus();
-                    FeedbackPlatformChanged?.Invoke(row.Platform);
                 }
             }
         }, publishStatus: false);

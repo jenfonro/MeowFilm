@@ -18,10 +18,10 @@ public sealed partial class MusicCatalogController
 
     public bool CanCatalogAction => CanCatalogBrowse && ctx.LoadCancellation is null && IsCatalogCollection &&
         (!IsDailyStyle || !dailyStyleBusy && !dailyStyleNeedsRead && catalogAccountStamp.Length > 0);
-    public bool CanPlayCatalogPlaylist => CanCatalogAction && contentState.Total > 0;
+    public bool CanPlayCatalogPlaylist => CanCatalogAction && catalogTotal > 0;
 
     private PlaylistRow? CurrentNetworkPlaylist => IsCatalogPlaylist
-        ? contentState.NetworkPlaylists.FirstOrDefault(reference => reference.Route == ctx.CurrentRoute) : null;
+        ? library.NetworkPlaylists.FirstOrDefault(reference => reference.Route == ctx.CurrentRoute) : null;
     public bool ShowsNetworkPlaylistAction => IsCatalogPlaylist &&
         catalogLoadedTarget?.ManagedPlaylist != true &&
         catalogLoadedTarget?.Params.Personal is null;
@@ -109,7 +109,7 @@ public sealed partial class MusicCatalogController
         return TrackCatalogAction(async (signal, currentAction) =>
         {
             RequireCatalogContent();
-            var reply = await MusicCatalogDispatcher.InvokeCardReadAsync(application, card, previewLimit: false, signal);
+            var reply = await MusicCatalogDispatcher.InvokeCardReadAsync(application.Catalog, card, previewLimit: false, signal);
             if (!currentAction()) return;
             var songs = MusicCatalogDto.Read(reply, card.Platform, card.Kind, "").SelectMany(s => s.Items)
                 .Where(c => c.Song is not null).Select(c => c.Song!.Record).ToArray();
@@ -121,7 +121,7 @@ public sealed partial class MusicCatalogController
                 try
                 {
                     playbackController.AdvanceQueueEpoch();
-                    await application.ReplaceQueueAsync(songs, 0, null, cardSource, ct: signal);
+                    await application.Library.ReplaceQueueAsync(songs, 0, null, cardSource, cancellationToken: signal);
                     await playbackController.ReadQueue(lifetime.Token);
                 }
                 catch (OperationCanceledException) { return; }
@@ -153,7 +153,8 @@ public sealed partial class MusicCatalogController
         if (card.Song is null || !card.CanFavorite) return Task.CompletedTask;
         try { RequireCatalogContent(); }
         catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        return SongFavoriteRequested?.Invoke(card.Song, toggle) ?? Task.CompletedTask;
+        if (IsDailyStyle && !CatalogSongsSource.Any(row => ReferenceEquals(row, card.Song))) return Task.CompletedTask;
+        return toggle ? library.ToggleSongFavoriteAsync(card.Song) : library.FavoriteSongAsync(card.Song);
     }
 
     public Task SimilarCatalogCardAsync(MusicCatalogCard card)
@@ -187,7 +188,8 @@ public sealed partial class MusicCatalogController
         if (!card.CanFavorite || card.Song is not { } song) return Task.CompletedTask;
         try { RequireCatalogContent(); }
         catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        return SongAppendNextRequested?.Invoke(song) ?? Task.CompletedTask;
+        if (IsDailyStyle && !CatalogSongsSource.Any(row => ReferenceEquals(row, song))) return Task.CompletedTask;
+        return library.AppendSongNextAsync(song, CaptureCatalogFeedbackContext());
     }
 
     public Task HeartbeatFavoritesCatalogCardAsync(MusicCatalogCard card)
@@ -221,17 +223,25 @@ public sealed partial class MusicCatalogController
         return IsCatalogBatch ? CatalogBatchActionAsync("play", 0) : CatalogPlaylistActionAsync("play", 0);
     }
 
+    public Task PlaySelectedCatalogSongAsync()
+    {
+        var song = catalogSelectedSong;
+        var card = song is null ? null : CatalogSections.SelectMany(section => section.Items)
+            .FirstOrDefault(item => ReferenceEquals(item.Song, song));
+        return card is null ? Task.CompletedTask : OpenCatalogCardAsync(card);
+    }
+
     public Task SaveCatalogPlaylistAsync() => IsCatalogBatch ? CatalogBatchActionAsync("save", 0) : SaveNetworkPlaylistAsync();
 
     public Task ToggleNetworkPlaylistAsync() => !CanToggleNetworkPlaylist ? Task.CompletedTask :
         CurrentNetworkPlaylist is { } reference ? RemoveNetworkPlaylistAsync(reference.Id) : SaveNetworkPlaylistAsync();
 
     internal PlaylistRow? NetworkPlaylistForCard(MusicCatalogCard card) =>
-        contentState.NetworkPlaylists.FirstOrDefault(reference => reference.Platform == card.Platform && reference.RemoteId == card.ActionId);
+        library.NetworkPlaylists.FirstOrDefault(reference => reference.Platform == card.Platform && reference.RemoteId == card.ActionId);
 
     public Task RemoveNetworkPlaylistAsync(string id)
     {
-        var reference = contentState.NetworkPlaylists.FirstOrDefault(item => item.Id == id);
+        var reference = library.NetworkPlaylists.FirstOrDefault(item => item.Id == id);
         return reference is null || !CanEdit ? Task.CompletedTask : RemoveNetworkPlaylistAsync(reference);
     }
 
@@ -240,8 +250,8 @@ public sealed partial class MusicCatalogController
         var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
-            var receipt = await application.RemoveNetworkPlaylistAsync(reference.Id, reference.Revision, lifetime.Token);
-            if (PlaylistsChanged is { } changed) await changed(lifetime.Token);
+            var receipt = await application.Library.RemoveNetworkPlaylistAsync(reference.Id, reference.Revision, lifetime.Token);
+            await library.RefreshPlaylists(lifetime.Token);
             if (origin == ctx.LoadGeneration) PublishNetworkPlaylistReceipt(receipt, "已取消收藏");
         });
     }
@@ -252,16 +262,16 @@ public sealed partial class MusicCatalogController
             !CanCatalogBrowse || !entry.CanSavePlaylist || !ContainsCatalogCard(entry)) return Task.CompletedTask;
         string[] parts = entry is null ? ctx.CurrentRoute.Split('/', 3) : ["catalog-playlist", entry.Platform, Uri.EscapeDataString(entry.ActionId)];
         var platform = parts[1]; var id = Uri.UnescapeDataString(parts[2]);
-        string title = entry?.Title ?? contentState.Heading, cover = entry?.Cover ?? catalogArtwork;
-        int count = entry?.Count ?? (entry is null ? contentState.Total : 0);
+        string title = entry?.Title ?? catalogHeading, cover = entry?.Cover ?? catalogArtwork;
+        int count = entry?.Count ?? (entry is null ? catalogTotal : 0);
         return TrackCatalogAction(async (signal, currentAction) =>
         {
             RequireCatalogContent();
             await RunAsync(async () =>
             {
                 if (!currentAction()) return;
-                var receipt = await application.SaveCatalogPlaylistAsync(platform, id, title, cover, count, signal);
-                if (PlaylistsChanged is { } changed) await changed(lifetime.Token);
+                var receipt = await application.Catalog.SavePlaylistAsync(platform, id, title, cover, count, signal);
+                await library.RefreshPlaylists(lifetime.Token);
                 if (currentAction()) PublishNetworkPlaylistReceipt(receipt, "已收藏歌单");
             });
         }, card: entry);
@@ -292,9 +302,9 @@ public sealed partial class MusicCatalogController
         return TrackCatalogAction(async (signal, currentAction) =>
         {
             RequireCatalogContent();
-            var queueSnapshot = await application.GetQueueAsync(0, 1, signal);
+            var queueSnapshot = await application.Library.GetQueueAsync(0, 1, signal);
             long version = queueSnapshot.Version;
-            var prepared = await application.PrepareCatalogPlaylistAsync(platform, id, refresh: true, personal: personalLocator, ct: signal);
+            var prepared = await application.Catalog.PreparePlaylistAsync(platform, id, refresh: true, personal: personalLocator, cancellationToken: signal);
             var token = prepared.Token;
             try
             {
@@ -307,7 +317,7 @@ public sealed partial class MusicCatalogController
                     try
                     {
                         playbackController.AdvanceQueueEpoch();
-                        var result = await application.CommitCatalogPlaylistAsync(
+                        var result = await application.Catalog.CommitPlaylistAsync(
                             token,
                             action,
                             version,
@@ -315,7 +325,7 @@ public sealed partial class MusicCatalogController
                             memberId: action == "play" ? memberId : null,
                             songId: action == "play" && memberId is null ? songId : null,
                             memberOccurrence: action == "play" && (memberId is not null || songId is not null) ? memberOccurrence : 0,
-                            ct: signal);
+                            cancellationToken: signal);
                         if (action == "next")
                         {
                             playbackController.ObservePreloadQueueMutation(result);
@@ -347,7 +357,7 @@ public sealed partial class MusicCatalogController
             }
             finally
             {
-                try { await application.DiscardCatalogPlaylistAsync(token, lifetime.Token); }
+                try { await application.Catalog.DiscardPlaylistAsync(token, lifetime.Token); }
                 catch (OperationCanceledException) { }
                 catch (Exception error)
                 {
@@ -402,10 +412,10 @@ public sealed partial class MusicCatalogController
 
     private Task CatalogBatchActionAsync(string action, int index)
     {
-        var activeSongs = ctx.ActiveSongs;
+        var activeSongs = CatalogSongsSource;
         if (!CanCatalogAction || !IsCatalogBatch || action == "play" && (index < 0 || index >= activeSongs.Count)) return Task.CompletedTask;
         var songs = activeSongs.Select(s => s.Record).ToArray();
-        var title = contentState.Heading; var route = ctx.CurrentRoute; var platform = catalogLoadedPlatform;
+        var title = catalogHeading; var route = ctx.CurrentRoute; var platform = catalogLoadedPlatform;
         var kind = catalogLoadedTarget!.Operation;
         var capturedContext = CaptureCatalogFeedbackContext();
         var playContext = (capturedContext ?? MusicPlayContextRecord.Empty) with { SourceTitle = title };
@@ -424,7 +434,7 @@ public sealed partial class MusicCatalogController
                     if (action == "play")
                     {
                         playbackController.AdvanceQueueEpoch();
-                        await application.ReplaceQueueAsync(songs, index, playContext, queueSource, ct: signal);
+                        await application.Library.ReplaceQueueAsync(songs, index, playContext, queueSource, cancellationToken: signal);
                         await playbackController.ReadQueue(lifetime.Token);
                         queueUpdated = true;
                         if (currentAction())
@@ -432,8 +442,8 @@ public sealed partial class MusicCatalogController
                     }
                     else
                     {
-                        await application.CreatePlaylistAsync(title, songs, signal);
-                        if (PlaylistsChanged is { } changed) await changed(lifetime.Token);
+                        await application.Library.CreatePlaylistAsync(title, songs, signal);
+                        await library.RefreshPlaylists(lifetime.Token);
                         if (currentAction()) ctx.SetStatus("已保存到本地歌单");
                     }
                 }
@@ -474,7 +484,7 @@ public sealed partial class MusicCatalogController
                 if (!current()) return;
                 RequireCatalogContent();
                 playbackController.AdvanceQueueEpoch();
-                try { await application.ReplaceQueueAsync(songs, index, null, sectionSource, ct: signal); }
+                try { await application.Library.ReplaceQueueAsync(songs, index, null, sectionSource, cancellationToken: signal); }
                 catch { playbackController.MarkQueueUnsaved(); throw; }
                 await playbackController.ReadQueue(lifetime.Token);
                 if (current()) await StartCatalogCurrent(signal);
@@ -505,7 +515,7 @@ public sealed partial class MusicCatalogController
     {
         if (requireCatalogContent) RequireCatalogContent();
         if (!sourceCurrent()) return;
-        var record = await application.GetCatalogSongAsync(platform, id, ct: signal);
+        var record = await application.Catalog.SongAsync(platform, id, cancellationToken: signal);
         if (!currentAction() || !sourceCurrent()) return;
         var song = SongRow.FromRecord(record);
         var songContext = MusicPlayContextRecord.Empty with { SourcePlatform = platform, SourceType = "song" };
@@ -514,7 +524,7 @@ public sealed partial class MusicCatalogController
             if (!currentAction() || !sourceCurrent()) return;
             if (requireCatalogContent) RequireCatalogContent();
             await playbackController.QueueCallAsync(
-                ct => application.ReplaceQueueAsync([song.Record], 0, songContext, ct: ct),
+                ct => application.Library.ReplaceQueueAsync([song.Record], 0, songContext, cancellationToken: ct),
                 clearsSearchRecommendation: true);
             await playbackController.ReadQueue(lifetime.Token);
             if (currentAction() && sourceCurrent())
@@ -530,7 +540,7 @@ public sealed partial class MusicCatalogController
 
     internal void PublishCatalogActionError(Exception error)
     {
-        string code = error is MusicOperationException e ? e.Code : error is OperationCanceledException ? "CANCELLED" : "INVALID_RESPONSE";
+        string code = ErrorCode(error) ?? "INVALID_RESPONSE";
         if (!IsCatalogHome && code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "STALE_SESSION" or "SESSION_CHANGED")
             RetireCatalogSession();
         ctx.SetStatus(MusicCatalogDto.ErrorText(code));
@@ -553,7 +563,7 @@ public sealed partial class MusicCatalogController
     {
         if (catalogAction is not { } pending || pending.PlaybackEpoch != playbackController.PlaybackEpoch) return;
         catalogAction = null;
-        catalogActions.ClearPreparingCard();
+        ClearPreparingCard();
         Changed(nameof(CanCancelCatalog));
     }
 
@@ -561,8 +571,8 @@ public sealed partial class MusicCatalogController
     {
         if (stopping) return Task.CompletedTask;
         ClearCatalogAccountNotice(); ctx.NotifyStatusChanged();
-        catalogActions.Invalidate();
-        var generation = catalogActions.Generation; var locationGeneration = ctx.LoadGeneration;
+        InvalidateCatalogAction();
+        var generation = actionGeneration; var locationGeneration = ctx.LoadGeneration;
         bool fromHome = IsCatalogHome;
         var navigation = ctx.NavigationSubmission;
         var actionPlatform = card?.Platform ?? catalogLoadedPlatform;
@@ -573,11 +583,11 @@ public sealed partial class MusicCatalogController
         catalogAction = pending;
         var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         loadDrains.Add(drained.Task);
-        catalogActions.SetPreparingCard(card);
+        SetPreparingCard(card);
         if (loadingStatus is not null) ctx.SetStatus(loadingStatus);
         Changed(nameof(CanCancelCatalog));
         return Execute();
-        bool Current() => !stopping && !request.IsCancellationRequested && generation == catalogActions.Generation &&
+        bool Current() => !stopping && !request.IsCancellationRequested && generation == actionGeneration &&
             observation == accounts.PlatformObservation(actionPlatform) &&
             (fromHome ? IsCatalogHome && navigation == ctx.NavigationSubmission : locationGeneration == ctx.LoadGeneration);
         async Task Execute()
@@ -602,7 +612,7 @@ public sealed partial class MusicCatalogController
                 if (ReferenceEquals(catalogAction, pending))
                 {
                     catalogAction = null;
-                    if (generation == catalogActions.Generation) catalogActions.ClearPreparingCard();
+                    if (generation == actionGeneration) ClearPreparingCard();
                 }
                 request.Dispose(); loadDrains.Remove(drained.Task); drained.TrySetResult();
                 if (!disposed) Changed(nameof(CanCancelCatalog));

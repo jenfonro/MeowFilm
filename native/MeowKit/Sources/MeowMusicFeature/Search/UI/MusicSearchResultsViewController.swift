@@ -168,8 +168,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
     public override func pageDidBecomeActive() {
         let preferences = self.preferences
         runPageTask { await preferences.reload() }
-        _ = results.setAccess(available: !model.isClosed,
-                              generation: model.searchAccessGeneration)
+        _ = results.syncAccess()
         actions.setActive(true)
         activateSelectedContent()
         render()
@@ -325,7 +324,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
     private func reconcileAccess() {
         let open = !model.isClosed
         let keyword = submittedKeyword
-        guard results.setAccess(available: open, generation: model.searchAccessGeneration) else { return }
+        guard results.syncAccess() else { return }
         if isPageActive, open, !selected.isAdditional, !keyword.isEmpty {
             results.submit(keyword, preferences: preferences.preferences)
             results.holdPagination()

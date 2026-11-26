@@ -117,14 +117,12 @@ struct FilmSourceRepository: Sendable {
                 FilmSourceKey(installationId: try $0.text(0), siteKey: try $0.text(1))
             }
             let state = FilmSourceState(cats: cats, videos: videos, deleted: deleted)
-            try Self.validate(state)
             return (state, revision)
         }
     }
 
     func save(_ value: FilmSourceState, previous: FilmSourceState, expected: Int) async throws -> Int {
-        try Self.validate(value)
-        return try await database.transaction { db in
+        try await database.transaction { db in
             let current = try db.ownerRevision(Self.ownerKey)
             guard current == Int64(expected) else {
                 throw FilmSourceError(code: "STORAGE_CONFLICT")
@@ -281,21 +279,6 @@ struct FilmSourceRepository: Sendable {
 
             let next = try db.commitOwnerRevision(Self.ownerKey, expectedRevision: current)
             return Int(next)
-        }
-    }
-
-    private static func validate(_ value: FilmSourceState) throws {
-        func valid(_ key: FilmSourceKey) -> Bool { !key.installationId.isEmpty && !key.siteKey.isEmpty }
-        guard Set(value.cats.map(\.installationId)).count == value.cats.count,
-              value.cats.allSatisfy({ cat in
-                  !cat.installationId.isEmpty && cat.inputRevision > 0 && cat.inputRevision <= 9_007_199_254_740_991 &&
-                  cat.sites.allSatisfy({ !$0.key.isEmpty }) && Set(cat.sites.map(\.key)).count == cat.sites.count
-              }),
-              value.videos.allSatisfy({ valid($0.key) }),
-              Set(value.videos.map(\.key)).count == value.videos.count,
-              value.videos.filter({ $0.options.aggregateImages }).count <= 1,
-              value.deleted.allSatisfy(valid), Set(value.deleted).count == value.deleted.count else {
-            throw FilmSourceError(code: "INVALID_DATA")
         }
     }
 }

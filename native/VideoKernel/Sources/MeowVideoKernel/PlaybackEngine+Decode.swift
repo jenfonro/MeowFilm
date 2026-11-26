@@ -13,10 +13,10 @@ extension PlaybackEngine {
             guard let entry = videoPackets.pop(reachedEOF: &eof, eofSerial: &eofSerial) else {
                 if interruptBox.isAborted { break }
                 if eof {
-                    guard currentVideoSerialSnapshot() == eofSerial else { continue }
+                    guard currentVideoSerial == eofSerial else { continue }
                     var drained: [DecodedVideoFrame] = []
                     pthread_mutex_lock(&videoDecoderLock)
-                    if currentVideoSerialSnapshot() == eofSerial {
+                    if currentVideoSerial == eofSerial {
                         videoDecoder.drainEOF(packetSerial: eofSerial) { drained.append($0) }
                     }
                     pthread_mutex_unlock(&videoDecoderLock)
@@ -28,7 +28,7 @@ extension PlaybackEngine {
                     }
 
                     pthread_mutex_lock(&frameMutex)
-                    if currentVideoSerialSnapshot() == eofSerial {
+                    if currentVideoSerial == eofSerial {
                         videoDecodeEOF = true
                         pthread_cond_broadcast(&frameNotEmpty)
                     }
@@ -49,7 +49,7 @@ extension PlaybackEngine {
             }
             if entry.serial != lastSerial {
                 pthread_mutex_lock(&videoDecoderLock)
-                if currentVideoSerialSnapshot() == entry.serial {
+                if currentVideoSerial == entry.serial {
                     videoDecoder.flush(newSerial: entry.serial)
                 }
                 pthread_mutex_unlock(&videoDecoderLock)
@@ -69,7 +69,7 @@ extension PlaybackEngine {
 
             var decodedBatch: [DecodedVideoFrame] = []
             pthread_mutex_lock(&videoDecoderLock)
-            guard currentVideoSerialSnapshot() == entry.serial else {
+            guard currentVideoSerial == entry.serial else {
                 pthread_mutex_unlock(&videoDecoderLock)
                 continue
             }
@@ -101,7 +101,7 @@ extension PlaybackEngine {
                     if allowPreviewFlush {
                         var previewBatch: [DecodedVideoFrame] = []
                         pthread_mutex_lock(&videoDecoderLock)
-                        if currentVideoSerialSnapshot() == entry.serial {
+                        if currentVideoSerial == entry.serial {
                             videoDecoder.flushPreviewFrames(packetSerial: entry.serial) {
                                 previewBatch.append($0)
                             }
@@ -159,9 +159,9 @@ extension PlaybackEngine {
             guard let entry = audioPackets.pop(reachedEOF: &eof, eofSerial: &eofSerial) else {
                 if interruptBox.isAborted { break }
                 if eof {
-                    guard currentAudioSerialSnapshot() == eofSerial else { continue }
+                    guard currentAudioSerial == eofSerial else { continue }
                     drainAudioEOF(frame: frame, serial: eofSerial, outScratch: &outScratch)
-                    if currentAudioSerialSnapshot() == eofSerial {
+                    if currentAudioSerial == eofSerial {
                         audioOutput.markEOF()
                     }
                     pthread_mutex_lock(&stateMutex)
@@ -189,7 +189,7 @@ extension PlaybackEngine {
             }()
 
             pthread_mutex_lock(&audioDecoderLock)
-            guard currentAudioSerialSnapshot() == entry.serial, let ctx = audioCodecCtx else {
+            guard currentAudioSerial == entry.serial, let ctx = audioCodecCtx else {
                 pthread_mutex_unlock(&audioDecoderLock)
                 continue
             }
@@ -221,7 +221,7 @@ extension PlaybackEngine {
         }()
 
         pthread_mutex_lock(&audioDecoderLock)
-        if currentAudioSerialSnapshot() == serial, let ctx = audioCodecCtx {
+        if currentAudioSerial == serial, let ctx = audioCodecCtx {
             _ = avcodec_send_packet(ctx, nil)
         }
         pthread_mutex_unlock(&audioDecoderLock)
@@ -230,7 +230,7 @@ extension PlaybackEngine {
         // Flush swresample internal tail buffer.
         pthread_mutex_lock(&audioDecoderLock)
         var tailFrames = 0
-        if currentAudioSerialSnapshot() == serial, let swr = swrCtx {
+        if currentAudioSerial == serial, let swr = swrCtx {
             let maxOut = 2048
             let needed = maxOut * AudioOutputPipeline.outputChannels
             if outScratch.count < needed { outScratch = [Float](repeating: 0, count: needed) }
@@ -246,9 +246,9 @@ extension PlaybackEngine {
 
     private func receiveAndPushAudioFrames(frame: UnsafeMutablePointer<AVFrame>, timeBase aTB: Double,
                                            serial: Int, outScratch: inout [Float]) {
-        while !interruptBox.isAborted && currentAudioSerialSnapshot() == serial {
+        while !interruptBox.isAborted && currentAudioSerial == serial {
             pthread_mutex_lock(&audioDecoderLock)
-            guard currentAudioSerialSnapshot() == serial, let ctx = audioCodecCtx else {
+            guard currentAudioSerial == serial, let ctx = audioCodecCtx else {
                 pthread_mutex_unlock(&audioDecoderLock)
                 break
             }
@@ -323,7 +323,7 @@ extension PlaybackEngine {
 
     private func writeAudioToRing(_ scratch: [Float], frameCount: Int, ptsSeconds: Double?, serial: Int) {
         var offsetFrames = 0
-        while offsetFrames < frameCount && !interruptBox.isAborted && currentAudioSerialSnapshot() == serial {
+        while offsetFrames < frameCount && !interruptBox.isAborted && currentAudioSerial == serial {
             let written = scratch.withUnsafeBufferPointer { buf in
                 audioOutput.writeInterleavedFloat(
                     buf.baseAddress!.advanced(by: offsetFrames * AudioOutputPipeline.outputChannels),
@@ -334,7 +334,7 @@ extension PlaybackEngine {
             }
             offsetFrames += written
             if offsetFrames < frameCount {
-                waitOnStateCondForAudio(seconds: 0.005, expectedAudioSerial: serial)
+                waitOnStateCond(seconds: 0.005) { audioSerial == serial }
             }
         }
     }

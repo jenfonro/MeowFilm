@@ -90,8 +90,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
             content.artworkChanges.sink { [weak self] in self?.updateArtwork() },
             content.appearanceChanges.sink { [weak self] in self?.updateBackground() },
             content.playbackChanges.sink { [weak self] in self?.reconcileTitleSwipe() },
-            content.queueChanges.sink { [weak self] in self?.reconcileTitleSwipe() },
-            content.accessChanges.sink { [weak self] in self?.reconcileTitleSwipe() }
+            content.queueChanges.sink { [weak self] in self?.reconcileTitleSwipe() }
         ]
         for name in [UIApplication.didBecomeActiveNotification, UIApplication.willResignActiveNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) {

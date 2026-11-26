@@ -1,7 +1,5 @@
-using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace MeowFilm.Core.Runtime;
@@ -9,41 +7,12 @@ namespace MeowFilm.Core.Runtime;
 public static class BridgeCodec
 {
     public const long MaximumSafeInteger = 9_007_199_254_740_991;
-    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly JsonSerializerOptions Serializer = new()
     {
-        MaxDepth = 67, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        Converters = { new StrictStringConverter(), new StrictCharConverter(), new StrictNodeConverter(), new RawElementConverter() }
+        MaxDepth = 67,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        Converters = { new RawElementConverter() }
     };
-
-    // System.Text.Json otherwise replaces invalid UTF-16 while writing strings.
-    // Validating the already-serialized JSON is too late to detect that loss.
-    private sealed class StrictStringConverter : JsonConverter<string>
-    {
-        public override string Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options) =>
-            reader.GetString()!;
-        public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
-        {
-            _ = StrictUtf8.GetByteCount(value);
-            writer.WriteStringValue(value);
-        }
-        public override void WriteAsPropertyName(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
-        {
-            _ = StrictUtf8.GetByteCount(value);
-            writer.WritePropertyName(value);
-        }
-    }
-
-    private sealed class StrictCharConverter : JsonConverter<char>
-    {
-        public override char Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options) =>
-            reader.GetString()![0];
-        public override void Write(Utf8JsonWriter writer, char value, JsonSerializerOptions options)
-        {
-            if (char.IsSurrogate(value)) Invalid();
-            writer.WriteStringValue(value.ToString());
-        }
-    }
 
     private sealed class RawElementConverter : JsonConverter<JsonElement>
     {
@@ -53,108 +22,30 @@ public static class BridgeCodec
             writer.WriteRawValue(value.GetRawText(), skipInputValidation: true);
     }
 
-    // JsonValue's primitive writer bypasses the ordinary string converter.
-    // Walk nodes explicitly so it cannot replace an invalid surrogate first.
-    private sealed class StrictNodeConverter : JsonConverter<JsonNode>
-    {
-        public override bool CanConvert(Type type) => typeof(JsonNode).IsAssignableFrom(type);
-        public override JsonNode? Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options) =>
-            throw new NotSupportedException();
-        public override void Write(Utf8JsonWriter writer, JsonNode value, JsonSerializerOptions options) =>
-            WriteNode(writer, value, options);
-
-        private static void WriteNode(Utf8JsonWriter writer, JsonNode? node, JsonSerializerOptions options)
-        {
-            if (writer.CurrentDepth > 64) Invalid();
-            switch (node)
-            {
-                case null: writer.WriteNullValue(); break;
-                case JsonObject obj:
-                    writer.WriteStartObject();
-                    foreach (var (key, value) in obj)
-                    {
-                        _ = StrictUtf8.GetByteCount(key);
-                        writer.WritePropertyName(key);
-                        WriteNode(writer, value, options);
-                    }
-                    writer.WriteEndObject();
-                    break;
-                case JsonArray array:
-                    writer.WriteStartArray();
-                    foreach (var item in array) WriteNode(writer, item, options);
-                    writer.WriteEndArray();
-                    break;
-                case JsonValue value when value.TryGetValue<string>(out var text):
-                    _ = StrictUtf8.GetByteCount(text);
-                    writer.WriteStringValue(text);
-                    break;
-                case JsonValue value when value.TryGetValue<char>(out var character):
-                    if (char.IsSurrogate(character)) Invalid();
-                    writer.WriteStringValue(character.ToString());
-                    break;
-                default: node.WriteTo(writer, options); break;
-            }
-        }
-    }
-
     public static byte[] EncodeJSONValue(object? value)
     {
-        try
-        {
-            return JsonSerializer.SerializeToUtf8Bytes(value, Serializer);
-        }
+        try { return JsonSerializer.SerializeToUtf8Bytes(value, Serializer); }
         catch (BridgeException) { throw; }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
     }
 
-    public static JsonElement Value(object? value)
-    {
-        try
-        {
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(value, Serializer);
-            return DecodeJSONValue(bytes);
-        }
-        catch (BridgeException) { throw; }
-        catch { throw new BridgeException("INVALID_MESSAGE"); }
-    }
+    public static JsonElement Value(object? value) => DecodeJSONValue(EncodeJSONValue(value));
 
-    // Only consumed identity/control fields require an unambiguous member.
-    // Ordinary extension members remain raw JSON, including repeated names.
-    public static JsonElement RequiredProperty(JsonElement value, string name)
-    {
-        if (value.ValueKind != JsonValueKind.Object) Invalid();
-        bool found = false;
-        JsonElement result = default;
-        foreach (var property in value.EnumerateObject())
-        {
-            if (!property.NameEquals(name)) continue;
-            if (found) Invalid();
-            found = true;
-            result = property.Value;
-        }
-        if (!found) Invalid();
-        return result;
-    }
+    public static JsonElement RequiredProperty(JsonElement value, string name) =>
+        value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var result)
+            ? result
+            : throw new BridgeException("INVALID_MESSAGE");
 
     public static JsonElement DecodeJSONValue(ReadOnlyMemory<byte> body) => ParseJSON(body);
 
     internal static JsonElement ParseJSON(ReadOnlyMemory<byte> body)
     {
-        using var document = ParseDocument(body);
-        return document.RootElement.Clone();
-    }
-
-    private static JsonDocument ParseDocument(ReadOnlyMemory<byte> body)
-    {
         try
         {
             if (body.Span.StartsWith("\uFEFF"u8)) body = body[3..];
-            return JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 67 });
+            using var document = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 67 });
+            return document.RootElement.Clone();
         }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
     }
-
-    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
-    private static void Invalid() => throw new BridgeException("INVALID_MESSAGE");
-
 }

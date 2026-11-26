@@ -33,7 +33,7 @@ public sealed partial class MusicCatalogController
         }
 
         if (route != "catalog-home" || !IsCatalogHome || catalogLoadedPlatform != request.Key.Platform)
-            catalogActions.Invalidate();
+            InvalidateCatalogAction();
         var generation = ctx.AdvanceLoadGeneration();
         var stamp = ctx.NextStatusEpoch();
         ctx.LoadCancellation?.Cancel();
@@ -75,7 +75,7 @@ public sealed partial class MusicCatalogController
         JsonElement? continuation, bool refresh, string tag)
     {
         var platform = MusicCatalogDispatcher.IsCatalogSourceRoute(route) ? settings.CatalogSourcePlatform : SelectedCatalogPlatform.Key;
-        var kind = contentState.SearchKindLabel;
+        var kind = search.SearchKindLabel;
         var routeParts = route.Split('/', 3);
         if (routeParts.Length == 3) platform = routeParts[1];
         var target = CatalogRouteTarget(route, platform);
@@ -199,7 +199,7 @@ public sealed partial class MusicCatalogController
                 };
             }
             var reply = await MusicCatalogDispatcher.InvokeOperationAsync(
-                application, operation, platform, target, routeId, tag, key.PageCode, number, continuation, refresh, token);
+                application.Catalog, operation, platform, target, routeId, tag, key.PageCode, number, continuation, refresh, token);
             token.ThrowIfCancellationRequested();
             if (stopping || generation != ctx.LoadGeneration || key.AccountObservation != accounts.PlatformObservation(platform)) return;
             if (accountStamp != CatalogAccountKey(platform)) throw new MusicOperationException("STALE_SESSION");
@@ -271,13 +271,14 @@ public sealed partial class MusicCatalogController
             if (!stopping && generation == ctx.LoadGeneration && stamp == ctx.StatusEpoch &&
                 key.AccountObservation == accounts.PlatformObservation(platform))
             {
-                if (!IsCatalogHome && error is MusicOperationException { Code: "AUTH_REQUIRED" or "AUTH_EXPIRED" or "STALE_SESSION" or "SESSION_CHANGED" })
+                string? code = ErrorCode(error);
+                if (!IsCatalogHome && code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "STALE_SESSION" or "SESSION_CHANGED")
                     RetireCatalogSession();
-                var message = MusicCatalogDto.ErrorText(error is MusicOperationException failure ? failure.Code : "INVALID_RESPONSE");
+                var message = MusicCatalogDto.ErrorText(code ?? "INVALID_RESPONSE");
                 ctx.SetStatusQuiet(message);
                 if (route == "catalog-channels" || route == lastChannelRoute && channelSections.Count == 0)
                     channelEntryError = message;
-                if (error is MusicOperationException { Code: "PAGINATION_STALLED" })
+                if (code == "PAGINATION_STALLED")
                 {
                     catalogMore = false;
                     if (catalogPages.TryGetValue(catalogPage, out var prior))
@@ -287,14 +288,14 @@ public sealed partial class MusicCatalogController
                 try
                 {
                     SelectedCatalogPlatform = CatalogPlatforms.FirstOrDefault(p => p.Key == catalogLoadedPlatform) ?? SelectedCatalogPlatform;
-                    contentState.SearchKindLabel = catalogLoadedKind;
+                    search.SearchKindLabel = catalogLoadedKind;
                     if (catalogPages.TryGetValue(catalogPage, out var previous)) PublishPersonalCatalog(previous);
                     ctx.NotifyStatusChanged(); CatalogBindings();
                 }
                 finally { ctx.Publishing = false; }
-                if (error is MusicOperationException { Code: "AUTH_REQUIRED" or "AUTH_EXPIRED" })
+                if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED")
                 {
-                    PublishCatalogAccountNotice(((MusicOperationException)error).Code);
+                    PublishCatalogAccountNotice(code);
                     RecoverHomeAfterAuthenticationFailure();
                 }
             }
@@ -332,9 +333,9 @@ public sealed partial class MusicCatalogController
             Publish();
             return true;
         }
-        catch (MusicOperationException error) when (error.Code is "STORAGE_UNAVAILABLE" or "CORRUPT_STORAGE" or "STORAGE")
+        catch (Exception error) when (ErrorCode(error) is ("STORAGE_UNAVAILABLE" or "CORRUPT_STORAGE" or "STORAGE") and var code)
         {
-            if (Current()) { ctx.SetStatus(MusicCatalogDto.ErrorText(error.Code)); CatalogBindings(); }
+            if (Current()) { ctx.SetStatus(MusicCatalogDto.ErrorText(code)); CatalogBindings(); }
             return false;
         }
         finally { loadDrains.Remove(drained.Task); drained.TrySetResult(); }
@@ -348,7 +349,7 @@ public sealed partial class MusicCatalogController
                 ctx.SetLocation(new(route), heading: state.Title, clearCollection: true);
                 if (route.StartsWith("catalog-channel/", StringComparison.Ordinal))
                 { lastChannelRoute = route; channelEntryError = ""; }
-                catalogQuery = query; catalogLoadedPlatform = platform; catalogLoadedKind = kind; contentState.SearchKindLabel = kind;
+                catalogQuery = query; catalogLoadedPlatform = platform; catalogLoadedKind = kind; search.SearchKindLabel = kind;
                 catalogPage = number; catalogMore = state.More && !state.ContinuationBlocked; catalogContinuation = state.Next;
                 catalogTag = state.Tag;
                 catalogArtwork = state.Artwork.Length > 0 ? state.Artwork : state.Target?.Artwork ?? "";
@@ -362,8 +363,8 @@ public sealed partial class MusicCatalogController
                 if (!IsCatalogHome)
                 {
                     var songs = state.Sections.SelectMany(s => s.Items).Select(i => i.Song).OfType<SongRow>().ToArray();
-                    MusicRuntimeContext.ReconcileSongRows(ctx.ActiveSongs, songs);
-                    if (songs.Length > 0 && songs.Length == ctx.ActiveSongs.Count)
+                    MusicRuntimeContext.ReconcileSongRows(CatalogSongsSource, songs);
+                    if (songs.Length > 0 && songs.Length == CatalogSongsSource.Count)
                     {
                         int songIndex = 0;
                         bool anyReplaced = false;
@@ -376,7 +377,7 @@ public sealed partial class MusicCatalogController
                             {
                                 var item = section.Items[i];
                                 if (item.Song is null) continue;
-                                var reconciled = ctx.ActiveSongs[songIndex++];
+                                var reconciled = CatalogSongsSource[songIndex++];
                                 if (!ReferenceEquals(item.Song, reconciled))
                                 {
                                     items ??= section.Items.ToArray();
@@ -408,14 +409,16 @@ public sealed partial class MusicCatalogController
                         CatalogTagGroups = channelTags.GroupBy(tag => tag.Group, StringComparer.Ordinal)
                             .Select(group => new MusicCatalogTagGroup(group.Key, group.ToArray())).ToArray();
                 }
-                contentState.PublishCatalogSummary(state.Total, !append);
+                catalogHeading = state.Title;
+                catalogTotal = state.Total;
+                if (!append) ClearCatalogSelection();
                 var visibleCount = IsCatalogHome
                     ? homeDisplaySections.Sum(section => section.Items.Count)
                     : state.Sections.Sum(section => section.Items.Count);
                 if (!append) ctx.SetStatusQuiet(visibleCount == 0 ? "暂无内容" : "");
                 if (state.ContinuationBlocked) ctx.SetStatusQuiet(MusicCatalogDto.ErrorText("PAGINATION_STALLED"));
                 ctx.PublishContentSelection(previousSelection);
-                contentState.NotifySelectionChanged(); ctx.RefreshBindings();
+                ctx.RefreshBindings();
             }
             finally { ctx.Publishing = false; }
             state.OptionalReads = optionalReads.Activate(route, platform, state.OptionalReads, initializeEntries);

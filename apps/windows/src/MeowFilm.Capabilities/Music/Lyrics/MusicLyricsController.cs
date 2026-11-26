@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Media;
 using MeowFilm.Platform.Files;
 
 namespace MeowFilm.Capabilities;
@@ -51,6 +52,86 @@ public sealed partial class MusicLyricsController : MusicController
         this.settings = settings;
         this.playbackController = playbackController;
         lyricRows.CollectionChanged += OnLyricRowsChanged;
+        playback.PropertyChanged += OnPlaybackDeviceChanged;
+        application.Library.DesktopLyricsChanged += OnDesktopLyricsChanged;
+        application.Library.QualityPolicyChanged += OnQualityPolicyChanged;
+        application.Library.MetadataPolicyChanged += OnMetadataPolicyChanged;
+        application.Library.OfficialSourcesChanged += OnOfficialSourcesChanged;
+        application.Scripts.SourcesChanged += OnScriptSourcesChanged;
+        application.Accounts.SessionChanged += OnAccountSessionChanged;
+    }
+
+    internal void Unsubscribe()
+    {
+        playback.PropertyChanged -= OnPlaybackDeviceChanged;
+        application.Library.DesktopLyricsChanged -= OnDesktopLyricsChanged;
+        application.Library.QualityPolicyChanged -= OnQualityPolicyChanged;
+        application.Library.MetadataPolicyChanged -= OnMetadataPolicyChanged;
+        application.Library.OfficialSourcesChanged -= OnOfficialSourcesChanged;
+        application.Scripts.SourcesChanged -= OnScriptSourcesChanged;
+        application.Accounts.SessionChanged -= OnAccountSessionChanged;
+    }
+
+    private void OnPlaybackDeviceChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (stopping || disposed) return;
+        if (e.PropertyName is not (nameof(NativeAudioPlayback.PositionSeconds) or nameof(NativeAudioPlayback.Volume) or nameof(NativeAudioPlayback.IsBuffering)))
+            DesktopLyricBindings();
+    }
+
+    private void OnDesktopLyricsChanged(MusicDesktopLyricsRecord desktopRecord)
+    {
+        if (!ctx.Dispatcher.IsClosing)
+            _ = ctx.Dispatcher.EnqueueAsync(() => { if (!stopping && !disposed) DesktopLyricBindings(); });
+    }
+
+    private void OnQualityPolicyChanged(MusicQualitySettingsResult qualityResult)
+    {
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(async () =>
+        {
+            if (stopping || disposed) return;
+            try
+            {
+                var online = await application.Library.GetOnlineSettingsAsync(lifetime.Token);
+                if (!stopping && !disposed) PublishOnlineSettings(online.LyricsEnabled);
+            }
+            catch { }
+        });
+    }
+
+    private void OnMetadataPolicyChanged(MusicMetadataPolicyRecord metadataPolicy)
+    {
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (stopping || disposed) return;
+            RetireLyrics();
+            if (NeedsLyrics && playbackController.CurrentSong is not null) _ = RestoreLyricsAsync();
+        });
+    }
+
+    private void OnOfficialSourcesChanged(MusicOfficialSourcesRecord officialSources) => EnqueueSourcesChanged();
+    private void OnScriptSourcesChanged() => EnqueueSourcesChanged();
+
+    private void EnqueueSourcesChanged()
+    {
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (!stopping && !disposed) NotifySourcesChanged();
+        });
+    }
+
+    private void OnAccountSessionChanged(string platform)
+    {
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (stopping || disposed) return;
+            RetireLyrics();
+            if (NeedsLyrics && playbackController.CurrentSong is not null) _ = RestoreLyricsAsync();
+        });
     }
 
     public ObservableCollection<MusicLyricRow> Lyrics => lyricRows;
@@ -323,7 +404,7 @@ public sealed partial class MusicLyricsController : MusicController
                 if (epoch != lyricEpoch || selected != playbackController.CurrentSong || stopping) return;
                 // Once the sole native writer admits CAS, cancellation must not
                 // invent a rollback or lose a known receipt.
-                await application.SaveLocalLyricsAsync(selected.Record, snapshot.Text);
+                await application.Library.SaveLocalLyricsAsync(selected.Record, snapshot.Text);
                 if (epoch != lyricEpoch || selected != playbackController.CurrentSong || stopping) return;
                 ResetLyricOffset();
             }
@@ -352,7 +433,7 @@ public sealed partial class MusicLyricsController : MusicController
                 !await ConfirmAsync("移除“" + selected.Title + "”的本地歌词？", "移除本地歌词", lifetime.Token)) return;
             if (epoch != lyricEpoch || selected != playbackController.CurrentSong || stopping) return;
             RetireLyrics();
-            await application.RemoveLocalLyricsAsync(selected.Record);
+            await application.Library.RemoveLocalLyricsAsync(selected.Record);
             if (selected == playbackController.CurrentSong) ResetLyricOffset();
             if (selected == playbackController.CurrentSong && NeedsLyrics) await RestoreLyricsAsync();
         });
@@ -403,14 +484,14 @@ public sealed partial class MusicLyricsController : MusicController
             try
             {
                 string? requestedSourceKey = string.IsNullOrEmpty(sourceKey) ? null : sourceKey;
-                var local = await application.GetLocalLyricsAsync(rawSong, request.Token);
+                var local = await application.Library.GetLocalLyricsAsync(rawSong, request.Token);
                 if (!CurrentRequest()) return;
                 hasLocalLyrics = local.Available;
                 Changed(nameof(CanRemoveLocalLyrics));
                 bool useLocal = requestedSourceKey is null && local.State is "local" or "disabled";
                 MusicLyricLookupResult reply = useLocal ? local : new("none", []);
                 if (!useLocal && restore)
-                    reply = await application.GetDisplayLyricsAsync(playbackSong, requestedSourceKey, request.Token);
+                    reply = await application.Library.GetDisplayLyricsAsync(playbackSong, requestedSourceKey, request.Token);
                 if (!CurrentRequest()) return;
                 bool restored = useLocal || restore && reply.State is "restored" or "disabled";
                 if (!restored)
@@ -453,7 +534,7 @@ public sealed partial class MusicLyricsController : MusicController
                     {
                         string saveKey = !string.IsNullOrEmpty(reply.SourceKey) ? reply.SourceKey
                             : throw new MusicOperationException("INVALID_RESPONSE");
-                        await application.SaveDisplayLyricsAsync(rawSong, saveKey, reply.Lines, request.Token);
+                        await application.Library.SaveDisplayLyricsAsync(rawSong, saveKey, reply.Lines, request.Token);
                     }
                     catch (Exception error)
                     {
@@ -465,15 +546,16 @@ public sealed partial class MusicLyricsController : MusicController
                 }
             }
             catch (OperationCanceledException) { if (CurrentRequest()) lyricStatus = "已取消"; }
-            catch (MusicOperationException error)
+            catch (Exception error)
             {
                 if (CurrentRequest())
-                    lyricStatus = error.Code switch {
+                    lyricStatus = ErrorCode(error) switch
+                    {
                         "CAPABILITY_UNAVAILABLE" => "当前音源不提供歌词",
-                        "CANCELLED" => "已取消", _ => ErrorText(error)
+                        "CANCELLED" => "已取消",
+                        _ => ErrorText(error)
                     };
             }
-            catch (Exception error) { if (CurrentRequest()) lyricStatus = ErrorText(error); }
             finally
             {
                 bool clearedCancellation = ReferenceEquals(lyricCancellation, request);

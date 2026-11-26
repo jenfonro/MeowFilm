@@ -21,8 +21,6 @@ public sealed partial class MusicAccountsController
 
     private void LibrarySyncChanged()
     {
-        // The native coordinator can finish on a pool thread. Coalesce refreshes
-        // on the existing UI command lane, never create another library writer.
         if (ctx.Dispatcher.IsClosing) return;
         _ = ctx.Dispatcher.EnqueueAsync(() =>
         {
@@ -37,8 +35,6 @@ public sealed partial class MusicAccountsController
                     while (syncRefreshRequested && !stopping && !disposed)
                     {
                         syncRefreshRequested = false;
-                        long origin = ctx.LoadGeneration;
-                        if (LibrarySynced is { } synced) await synced(origin, lifetime.Token);
                         if (ctx.IsSettingsActive() && LibrarySync.CanEdit)
                             await LibrarySync.RefreshStatusAsync();
                     }
@@ -50,7 +46,7 @@ public sealed partial class MusicAccountsController
 
     internal async ValueTask DisposeLibrarySyncAsync()
     {
-        application.LibrarySyncChanged -= LibrarySyncChanged;
+        application.LibrarySync.StateChanged -= LibrarySyncChanged;
         await LibrarySync.DisposeAsync();
     }
 }

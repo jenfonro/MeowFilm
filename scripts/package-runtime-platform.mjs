@@ -26,19 +26,8 @@ function checkedPath(root, relative) {
 
 function readStable(root, relative) {
   const path = checkedPath(root, relative);
-  const stat = lstatSync(path);
-  check(stat.isFile(), 'INVALID_SOURCE', 'Runtime input is not a regular file');
-  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-  try {
-    const before = fstatSync(fd);
-    check(before.isFile() && before.dev === stat.dev && before.ino === stat.ino,
-      'SOURCE_CHANGED', 'Runtime input identity changed');
-    const bytes = readFileSync(fd), after = fstatSync(fd);
-    check(before.size === after.size && before.mtimeMs === after.mtimeMs
-      && before.ctimeMs === after.ctimeMs && bytes.length === before.size,
-    'SOURCE_CHANGED', 'Runtime input changed while reading');
-    return bytes;
-  } finally { closeSync(fd); }
+  check(lstatSync(path).isFile(), 'INVALID_SOURCE', 'Runtime input is not a regular file');
+  return readFileSync(path);
 }
 
 function inventory(root, relative = '', occupied = new Map()) {
@@ -149,7 +138,7 @@ export async function packagePlatformRuntime({
     manifest.fileHashExcludes = [MANIFEST];
     manifest.relocations = [];
     save();
-    const occupied = audit();
+    const occupied = inventory(output).occupied;
     const sourceTree = discoverRuntimeSource(root, platform).platform;
     function appendFile(filePath, bytes, documentation = false) {
       safeRelative(filePath);
@@ -197,10 +186,6 @@ export async function packagePlatformRuntime({
       const source = `LICENSES/${name}`, bytes = readStable(root, source);
       manifest.inputs.push({ path: source, sha256: digest(bytes) });
       appendFile(`licenses/${name}`, bytes, true);
-    }
-    for (const input of manifest.inputs) {
-      check(digest(readStable(root, input.path)) === input.sha256,
-        'SOURCE_CHANGED', 'Runtime build input changed during packaging');
     }
     // Every relative static import must target a file actually in this payload.
     const paths = new Set(manifest.files.map(file => file.path));

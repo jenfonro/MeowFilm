@@ -158,7 +158,6 @@ def node_mobile(pinned):
             finally:
                 if staging.exists():
                     shutil.rmtree(staging)
-        verify_extraction(directory, package, members)
     return directory / FRAMEWORK
 
 

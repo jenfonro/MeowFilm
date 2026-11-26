@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Core.Debug;
@@ -19,6 +20,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
     private static readonly string[] AllPlatforms = ["wy", "tx", "kg", "kw", "mg"];
     private readonly MusicPlatformCatalog catalog;
     private readonly MusicLibraryOwner library;
+    private readonly MusicAccountOwner accounts;
+    private readonly MusicNativeApplication.CatalogSessions sessions;
+    private readonly Func<Task> saveSongMatchesAsync;
     private static TimeProvider clock => TimeProvider.System;
     private readonly object gate = new();
     private readonly Dictionary<string, PlatformState> platformStates =
@@ -50,9 +54,19 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         internal long LastUsed { get; set; } = lastUsed;
     }
 
-    public MusicNativeCatalogOwner(MusicPlatformCatalog catalog, MusicLibraryOwner library)
-        => (this.catalog, this.library) = (catalog ?? throw new ArgumentNullException(nameof(catalog)),
-            library ?? throw new ArgumentNullException(nameof(library)));
+    internal MusicNativeCatalogOwner(
+        MusicPlatformCatalog catalog,
+        MusicLibraryOwner library,
+        MusicAccountOwner accounts,
+        MusicNativeApplication.CatalogSessions sessions,
+        Func<Task> saveSongMatchesAsync)
+    {
+        this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
+        this.library = library ?? throw new ArgumentNullException(nameof(library));
+        this.accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
+        this.sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
+        this.saveSongMatchesAsync = saveSongMatchesAsync ?? throw new ArgumentNullException(nameof(saveSongMatchesAsync));
+    }
 
     private static string StorageCode(StorageException error) => error.Error switch
     {
@@ -87,6 +101,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             request = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token, state.Session.Token);
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
+        using var frame = sessions.Begin();
         try
         {
             Guard(request.Token, opPlatform, captured);
@@ -110,6 +125,12 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             }
             return result;
         }
+        catch (MusicPlatformException error)
+        {
+            if (error.Code is "AUTH_REQUIRED" or "AUTH_EXPIRED" && frame.Session is { } failed)
+                accounts.Revoke(failed);
+            throw;
+        }
         catch (CatalogFailure error) { throw new MusicPlatformException(error.Code); }
         catch (StorageException error) { throw new MusicPlatformException(StorageCode(error)); }
         finally
@@ -118,6 +139,13 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             lock (gate) { if (--pending == 0) drained.TrySetResult(); }
         }
     }
+
+    internal Task<JsonElement> QueryAsync(
+        string platform,
+        MusicLibraryOwner.PlatformSongShape songShape,
+        Func<MusicPlatformCatalog, CancellationToken, Task<JsonElement>> query,
+        CancellationToken cancellationToken = default) =>
+        RunCatalogAsync(platform, songShape, (signal, _) => query(catalog, signal), cancellationToken);
 
     private Task<JsonElement> RunCatalogAsync(
         string opPlatform,
@@ -164,105 +192,6 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 return adopted;
             }, cancellationToken);
 
-    public Task<JsonElement> PlaylistAsync(string platform, string id, int page = 1, int limit = 100, bool refresh = false,
-        JsonElement? personal = null, JsonElement? continuation = null, CancellationToken cancellationToken = default) =>
-        RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
-            (signal, _) => catalog.PlaylistAsync(new(platform, id, page, limit, refresh, personal, continuation), signal),
-            cancellationToken);
-
-    public Task<JsonElement> HomeAsync(string platform, JsonElement? continuation = null, bool refresh = false,
-        CancellationToken cancellationToken = default) =>
-        RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Catalog,
-            (signal, _) => catalog.HomeAsync(new(platform, continuation, refresh), signal), cancellationToken);
-
-    public Task<JsonElement> ChannelsAsync(string platform, bool refresh = false, CancellationToken cancellationToken = default) =>
-        RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.None,
-            (signal, _) => catalog.ChannelsAsync(new(platform, refresh), signal), cancellationToken);
-
-    public Task<JsonElement> ChannelAsync(string platform, string id, string? pageCode = null, JsonElement? continuation = null,
-        string? tag = null, bool refresh = false, CancellationToken cancellationToken = default) =>
-        RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Catalog,
-            (signal, _) => catalog.ChannelAsync(new(platform, id, pageCode, continuation, tag, refresh), signal), cancellationToken);
-
-    public Task<JsonElement> PersonalPlaylistsAsync(string platform, string kind = "all", int page = 1, int limit = 30,
-        JsonElement? continuation = null, bool refresh = false, CancellationToken cancellationToken = default)
-    {
-        var personalKind = kind switch
-        {
-            "all" => MusicPersonalListKind.All,
-            "created" => MusicPersonalListKind.Created,
-            "subscribed" => MusicPersonalListKind.Subscribed,
-            _ => throw new MusicPlatformException("INVALID_REQUEST")
-        };
-        return RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.None,
-            (signal, _) => catalog.PersonalPlaylistsAsync(new(platform, personalKind, page, limit, continuation, refresh), signal),
-            cancellationToken);
-    }
-
-    public Task<JsonElement> DailyAsync(string platform, string branch = "default", bool refresh = false,
-        CancellationToken cancellationToken = default)
-    {
-        var parsed = branch switch
-        {
-            "default" => MusicDailyBranch.Default,
-            "style" => MusicDailyBranch.Style,
-            _ => throw new MusicPlatformException("INVALID_REQUEST")
-        };
-        return RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
-            (signal, _) => catalog.DailyAsync(new(platform, parsed, refresh), signal), cancellationToken);
-    }
-
-    public Task<JsonElement> FmAsync(string platform, string mode = "default", string submode = "", bool preview = false,
-        string? ruleId = null, string? tabTagId = null, CancellationToken cancellationToken = default)
-    {
-        var fmMode = mode switch
-        {
-            "default" => MusicFmMode.Default,
-            "familiar" => MusicFmMode.Familiar,
-            "explore" => MusicFmMode.Explore,
-            "puzzle" => MusicFmMode.Puzzle,
-            "scene" => MusicFmMode.Scene,
-            _ => throw new MusicPlatformException("INVALID_REQUEST")
-        };
-        return RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
-            (signal, _) => catalog.FmAsync(new(platform, fmMode, submode, preview, ruleId, tabTagId), signal), cancellationToken);
-    }
-
-    public Task<JsonElement> SimilarAsync(string platform, string[] sourceIds, string sourceType,
-        CancellationToken cancellationToken = default)
-    {
-        Check(sourceIds.Length > 0, "INVALID_REQUEST");
-        return RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
-            (signal, _) => catalog.SimilarAsync(new(platform, sourceIds, sourceType), signal), cancellationToken);
-    }
-
-    public Task<JsonElement> HeartbeatAsync(string platform, string entry, string? songId = null, string? playlistId = null,
-        CancellationToken cancellationToken = default)
-    {
-        var parsed = entry switch
-        {
-            "favorites" => MusicHeartbeatEntry.Favorites,
-            "current" => MusicHeartbeatEntry.CurrentSong,
-            _ => throw new MusicPlatformException("INVALID_REQUEST")
-        };
-        Check(parsed != MusicHeartbeatEntry.CurrentSong || !string.IsNullOrEmpty(songId) && !string.IsNullOrEmpty(playlistId), "INVALID_REQUEST");
-        return RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
-            (signal, _) => catalog.HeartbeatAsync(new(platform, parsed, songId, playlistId), signal), cancellationToken);
-    }
-
-    public Task<JsonElement> AlbumAsync(string platform, string id, bool refresh = false, CancellationToken cancellationToken = default) =>
-        RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
-            (signal, _) => catalog.AlbumAsync(new(platform, id, refresh), signal), cancellationToken);
-
-    public Task<JsonElement> ChartAsync(string platform, string kind, string period = "daily", int? year = null, bool refresh = false,
-        CancellationToken cancellationToken = default) =>
-        RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Catalog,
-            (signal, _) => catalog.ChartAsync(new(platform, kind, period, year, refresh), signal), cancellationToken);
-
-    public Task<JsonElement> ArtistAsync(string platform, string id, bool refresh = false, CancellationToken cancellationToken = default) =>
-        RunCatalogAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
-            (signal, _) => catalog.ArtistAsync(new(platform, id, refresh), signal), cancellationToken);
-
     public Task<PreparedCatalogPlaylist> PreparePlaylistAsync(string platform, string id, bool refresh = false, JsonElement? personal = null,
         CancellationToken cancellationToken = default) =>
         RunCatalogTypedAsync(platform,
@@ -278,6 +207,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         CancellationTokenSource? operation = null;
         CancellationTokenSource? deadline = null;
         long captured = 0;
+        using var frame = sessions.Begin();
         try
         {
             lock (gate)
@@ -323,7 +253,12 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             throw new MusicPlatformException(code);
         }
         catch (CatalogFailure error) { throw new MusicPlatformException(error.Code); }
-        catch (MusicPlatformException) { throw; }
+        catch (MusicPlatformException error)
+        {
+            if (error.Code is "AUTH_REQUIRED" or "AUTH_EXPIRED" && frame.Session is { } failed)
+                accounts.Revoke(failed);
+            throw;
+        }
         catch (MusicLibraryException error) { throw new MusicPlatformException(error.Code); }
         catch (StorageException error) { throw new MusicPlatformException(StorageCode(error)); }
         catch (Exception error)
@@ -457,6 +392,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         IMusicQueuePosition result = action == "next"
             ? await library.AppendQueueAsync(item.Songs, playContext, next: true, expectedVersion: expectedVersion, cancellationToken: signal).ConfigureAwait(false)
             : await library.ReplaceQueueAsync(item.Songs, index, playContext, queueSource, expectedVersion: expectedVersion, cancellationToken: signal).ConfigureAwait(false);
+        await saveSongMatchesAsync().ConfigureAwait(false);
         return new MusicQueuePositionResult(result.CurrentId, result.Version, result.Mode);
     }
 

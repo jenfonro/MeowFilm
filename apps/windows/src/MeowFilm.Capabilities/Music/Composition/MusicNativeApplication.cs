@@ -4,7 +4,6 @@ using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Capabilities.Library;
-using MeowFilm.Capabilities.Lyrics;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Recommendations;
 using MeowFilm.Capabilities.Scripting;
@@ -24,11 +23,23 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     private readonly MusicVipPageOwner vipPage;
     private readonly MusicPlatformCatalog catalog;
     private readonly MusicNativeCatalogOwner nativeCatalog;
+    private readonly NativeMusicSearchDiscovery discovery;
     private readonly MusicScriptOwner scripts;
     private readonly MusicLyricApplication lyrics;
     private readonly CatalogSessions sessions;
     private readonly IStorageDatabase dataDatabase;
     private readonly IStorageDatabase cacheDatabase;
+    internal MusicLibraryOwner Library => library;
+    internal MusicAccountOwner Accounts => accounts;
+    internal MusicNativeCatalogOwner Catalog => nativeCatalog;
+    internal MusicVipPageOwner VipPage => vipPage;
+    internal MusicScriptOwner Scripts => scripts;
+    internal MusicLyricApplication Lyrics => lyrics;
+    internal MusicSearchCoordinator Search => searchCoordinator;
+    internal NativeMusicSearchDiscovery Discovery => discovery;
+    internal MusicRecommendationCoordinator Recommendations => recommendations;
+    internal PlaybackCache.MusicSourceCache SourceCache => sourceCache;
+    internal MusicSongMatcher SongMatcher => songMatcher;
     internal PlaybackCache.MusicPresentationCache PresentationCache => library.PresentationCache;
     internal Task ArtworkLoadCompletedAsync(string address, bool succeeded) =>
         library.ArtworkLoadCompletedAsync(address, succeeded);
@@ -87,11 +98,7 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
             lock (gate) if (--pending == 0) drained.TrySetResult();
         }
     }
-    internal void ClearMemoryCaches()
-    {
-        lyrics.ClearMemoryCache();
-        searchCoordinator.ClearMemoryCache();
-    }
+    internal void ClearMemoryCaches() => searchCoordinator.ClearMemoryCache();
     internal Task ClearCachesAsync(CancellationToken cancellationToken = default) =>
         RunAdmittedAsync<bool>(async token =>
         {
@@ -110,26 +117,21 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         {
             sourceCache = new { entryCount = sources.EntryCount, storedBytes = sources.StoredBytes, maximumBytes = sources.MaximumBytes },
             songMatches = new { songCount = matches.SongCount, storedBytes = matches.StoredBytes, maximumBytes = matches.MaximumBytes },
-            lyricMemoryCache = lyrics.GetCacheStats(),
+            lyricFlights = lyrics.GetCacheStats(),
             searchResultsCache = searchCoordinator.GetCacheStats()
         };
-    }
-    internal Task<MusicLibraryOwner.SongSnapshotBatch> SongSnapshotsAsync(IEnumerable<string> ids,
-        CancellationToken cancellationToken = default) =>
-        RunAdmittedAsync(token => library.SongSnapshotsAsync(ids, token), cancellationToken);
-    internal MusicSongRecord? ReadSongRecord(string id) => library.ReadSongRecord(id);
-    internal event Action<IReadOnlySet<string>>? SongMetadataChanged
-    {
-        add => library.SongMetadataChanged += value;
-        remove => library.SongMetadataChanged -= value;
     }
     private readonly object gate = new();
     private CancellationTokenSource lifetime = new();
     private TaskCompletionSource drained = Completed();
     private Task? preparation, release;
     private int pending;
-    private bool stopping, closed, accountReceiptUnknown;
-    private long accountReceiptEpoch;
+    private bool stopping, closed;
+
+    private void OnScriptSourcesChanged() => lyrics.Invalidate();
+    private void OnMetadataPolicyChanged(MusicMetadataPolicyRecord _) => lyrics.Invalidate();
+    private void OnLocalLyricsChanged() => lyrics.Invalidate();
+    private void OnLocalCollectionsChanged() => _ = SaveSongMatchesAsync(CancellationToken.None);
 
     public MusicNativeApplication(IStorageDatabase dataStore, IStorageDatabase cacheStore, MusicLibraryDatabase libraryStore, IRuntimeClient scriptRuntime)
     {
@@ -144,17 +146,15 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         platform = new(scriptRuntime);
         library = new(libraryStore, cacheStore);
         accounts = new(dataStore, cacheStore, new MusicAccountProtocol(platform));
-        vipPage = new(accounts, new MusicVipPageProtocol(platform));
-        officialAudio = new(platform);
+        vipPage = new(accounts, platform);
         sourceCache = new(cacheStore);
         sessions = new(accounts);
         platform.BindSessions(sessions);
         catalog = new(platform, sessions);
         songMatcher = new(library, new(cacheStore), SearchCatalogAsync);
-        nativeCatalog = new(catalog, library);
-        recommendationQueue = new(library);
+        nativeCatalog = new(catalog, library, accounts, sessions, () => SaveSongMatchesAsync(CancellationToken.None));
         fmPreferences = new(dataStore);
-        recommendations = new(catalog, recommendationQueue, SelectRecommendationAsync, readAsync: async (request, token) =>
+        recommendations = new(catalog, library, SelectRecommendationAsync, readAsync: async (request, token) =>
         {
             await PrepareSongFactsAsync(token).ConfigureAwait(false);
             long observation = library.BeginSongObservation();
@@ -164,16 +164,14 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         searchCoordinator = new(catalog, SearchCatalogAsync, songMatcher.NextObservation);
         searchCoordinator.SongFactsProjection = songMatcher.ProjectKnownFacts;
         searchCoordinator.MatchingObserved += ObserveSongMatches;
-        var discoverySessions = new DiscoverySessions(accounts);
-        discovery = new NativeMusicSearchDiscovery(discoverySessions, platform, library);
+        discovery = new NativeMusicSearchDiscovery(accounts, platform, library);
         scripts = new(library, scriptRuntime);
-        lyrics = new(library, new NativeMusicLyrics(platform), scripts);
+        lyrics = new(library, platform, scripts);
         librarySync = new(library, accounts, platform);
         var feedbackSettings = new MusicFeedbackSettingsOwner(dataStore);
         Feedback = new(feedbackSettings,
             new NativeMusicFeedbackProtocol(accounts, platform,
                 store: dataStore, settings: feedbackSettings, authenticationRejected: session => accounts.Revoke(session)), accounts);
-        // Fence recommendation callbacks synchronously before any catalog cleanup.
         accounts.SessionChanged += RecommendationAccountChanged;
         accounts.SessionChanged += nativeCatalog.Invalidate;
         accounts.SessionChanged += searchCoordinator.Invalidate;
@@ -181,19 +179,35 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         accounts.SessionChanged += lyrics.Invalidate;
         accounts.SessionChanged += Feedback.AccountChanged;
         accounts.SessionChanged += librarySync.Invalidate;
-        accounts.SessionChanged += AccountDetailsChanged;
-        accounts.SessionChanged += DiscoveryAccountChanged;
+        accounts.SessionChanged += discovery.Invalidate;
         accounts.SessionChanged += InvalidateChorus;
         accounts.SessionChanged += InvalidateAccountCaches;
+        scripts.SourcesChanged += OnScriptSourcesChanged;
+        library.MetadataPolicyChanged += OnMetadataPolicyChanged;
+        library.LocalLyricsChanged += OnLocalLyricsChanged;
+        library.LocalCollectionsChanged += OnLocalCollectionsChanged;
     }
 
     public MusicFeedbackController Feedback { get; }
     public MusicLibrarySyncService LibrarySync => librarySync;
-    public event Action? LibrarySyncChanged
-    {
-        add => librarySync.StateChanged += value;
-        remove => librarySync.StateChanged -= value;
-    }
+
+    public Task<MusicLyricLookupResult> LookupLyricsAsync(
+        MusicSongRecord song,
+        string? sourceKey = null,
+        CancellationToken cancellationToken = default) =>
+        RunAdmittedAsync(async token =>
+        {
+            using var frame = sessions.Begin();
+            try
+            {
+                return await lyrics.LookupAsync(song, sourceKey, token).ConfigureAwait(false);
+            }
+            catch (MusicPlatformException error) when (error.Code is "AUTH_REQUIRED" or "AUTH_EXPIRED")
+            {
+                if (frame.Session is { } failed) accounts.Revoke(failed);
+                throw;
+            }
+        }, cancellationToken);
 
     public Task InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -258,15 +272,6 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
     }
 
-    public Task<MusicScriptSourceDetail> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
-        string? installationId = null, CancellationToken cancellationToken = default) =>
-        RunAdmittedAsync(async token =>
-        {
-            lyrics.Invalidate();
-            try { return await scripts.ImportSourceAsync(source, basename, installationId, token).ConfigureAwait(false); }
-            finally { lyrics.Invalidate(); }
-        }, cancellationToken);
-
     public Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
         Task task;
@@ -291,7 +296,6 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         var accountReadDrain = accounts.PrepareReadShutdownAsync();
         try { nativeCatalog.Invalidate(); } catch (Exception e) { failure ??= e; }
         try { lyrics.Invalidate(); } catch (Exception e) { failure ??= e; }
-        lock (gate) issuedDiscoveryGeneration = 0;
         try { discovery.Invalidate(); } catch (Exception e) { failure ??= e; }
         try { songMatcher.CancelFlights(); } catch (Exception e) { failure ??= e; }
         await Task.WhenAll(
@@ -312,7 +316,6 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         await Attempt(platform.DrainAsync).ConfigureAwait(false);
         await Attempt(cacheDatabase.DrainAsync).ConfigureAwait(false);
         await Attempt(dataDatabase.DrainAsync).ConfigureAwait(false);
-        lock (gate) if (accountReceiptUnknown) failure ??= new MusicAccountException("COMMIT_UNKNOWN");
         if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
@@ -368,12 +371,13 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         accounts.SessionChanged -= lyrics.Invalidate;
         accounts.SessionChanged -= Feedback.AccountChanged;
         accounts.SessionChanged -= librarySync.Invalidate;
-        accounts.SessionChanged -= AccountDetailsChanged;
-        accounts.SessionChanged -= DiscoveryAccountChanged;
+        accounts.SessionChanged -= discovery.Invalidate;
         accounts.SessionChanged -= InvalidateChorus;
         accounts.SessionChanged -= InvalidateAccountCaches;
-        // Explicit finalization may follow failed preparation. Abort fences memory;
-        // it neither retries a commit nor declares an unknown receipt rolled back.
+        scripts.SourcesChanged -= OnScriptSourcesChanged;
+        library.MetadataPolicyChanged -= OnMetadataPolicyChanged;
+        library.LocalLyricsChanged -= OnLocalLyricsChanged;
+        library.LocalCollectionsChanged -= OnLocalCollectionsChanged;
         await Attempt(() => library.AbortAsync()).ConfigureAwait(false);
         try { songMatcher.Dispose(); } catch (Exception e) { failure ??= e; }
         try { catalog.Dispose(); } catch (Exception e) { failure ??= e; }
@@ -383,7 +387,6 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         await Attempt(dataDatabase.DrainAsync).ConfigureAwait(false);
         try { recommendationLifetime.Dispose(); } catch (Exception e) { failure ??= e; }
         try { lifetime.Dispose(); } catch (Exception e) { failure ??= e; }
-        recommendationQueue.Dispose();
         searchPolicyLane.Dispose();
         if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
     }
@@ -395,7 +398,7 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     }
 
     /// <summary>Native-only operation context; credentials never enter result DTOs or diagnostics.</summary>
-    private sealed class CatalogSessions(MusicAccountOwner owner) : IMusicPlatformSessionSource
+    internal sealed class CatalogSessions(MusicAccountOwner owner) : IMusicPlatformSessionSource
     {
         private readonly AsyncLocal<Frame?> current = new();
         internal Frame Begin(bool awaitPhysical = false, bool inheritLease = false)

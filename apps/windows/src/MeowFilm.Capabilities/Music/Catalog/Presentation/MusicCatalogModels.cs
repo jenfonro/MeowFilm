@@ -427,8 +427,6 @@ public static class MusicCatalogDto
         "CLOSED" => "内容连接已关闭",
         "CATALOG_TOKEN_EXPIRED" => "歌单加载结果已失效",
         "CATALOG_CONTENT_EXPIRED" => "内容已过期，请刷新",
-        "COMMIT_UNKNOWN" => "保存结果未确认",
-        "PENDING_WRITE" => "保存未完成，请重试保存",
         "STORAGE" or "STORAGE_UNAVAILABLE" => "本地保存失败",
         "STORAGE_CONFLICT" => "本地内容已变更，请刷新",
         _ => "平台内容暂不可用"

@@ -5,13 +5,8 @@ public sealed partial class MusicLibraryOwner
     private static readonly MusicAppearanceRecord DefaultAppearance =
         new(0, "grid", "starlight", "song", "lilac");
 
-    private static MusicAppearanceRecord Appearance(MusicLibrarySession doc)
-    {
-        var value = doc.ReadAppearance() ?? DefaultAppearance;
-        try { ValidateAppearance(value); }
-        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
-        return value;
-    }
+    private static MusicAppearanceRecord Appearance(MusicLibrarySession doc) =>
+        doc.ReadAppearance() ?? DefaultAppearance;
 
     private static void ValidateAppearance(MusicAppearanceRecord value)
     {
@@ -23,27 +18,23 @@ public sealed partial class MusicLibraryOwner
     }
 
     public Task<MusicAppearanceRecord> GetAppearanceAsync(CancellationToken cancellationToken = default) =>
-        RunLibraryReadAsync(doc =>
-        {
-            MusicRules.Require(pending is null, "PENDING_WRITE");
-            return Appearance(doc);
-        }, cancellationToken, authoritativeFor: PendingOwner.Appearance);
+        RunLibraryReadAsync(Appearance, cancellationToken);
 
-    public Task<MusicAppearanceRecord> SaveAppearanceAsync(
+    public async Task<MusicAppearanceRecord> SaveAppearanceAsync(
         long ifRevision,
         string playlistView,
         string playerTheme,
         string colorMode,
         string colorPalette,
-        CancellationToken cancellationToken = default) =>
-        RunLibraryWriteAsync(PendingOwner.Appearance, doc =>
+        CancellationToken cancellationToken = default)
+    {
+        bool mutated = false;
+        var saved = await RunLibraryWriteAsync(doc =>
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            MusicRules.Require(pending is null, "PENDING_WRITE");
-            var saved = Appearance(doc);
-            MusicRules.Require(ifRevision == saved.Revision, "REVISION_CONFLICT");
+            var current = Appearance(doc);
+            MusicRules.Require(ifRevision == current.Revision, "REVISION_CONFLICT");
             var next = new MusicAppearanceRecord(
-                checked(saved.Revision + 1),
+                checked(current.Revision + 1),
                 playlistView,
                 playerTheme,
                 colorMode,
@@ -51,5 +42,8 @@ public sealed partial class MusicLibraryOwner
             ValidateAppearance(next);
             doc.SetAppearance(next);
             return (next, true);
-        }, cancellationToken);
+        }, cancellationToken, onCommitted: () => mutated = true).ConfigureAwait(false);
+        if (mutated) InvokeSafe(AppearanceChanged, saved);
+        return saved;
+    }
 }

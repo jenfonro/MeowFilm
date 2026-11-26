@@ -1,6 +1,6 @@
 import Foundation
 import MeowContracts
-import MeowMusicFeature
+import MeowMusicPlatform
 
 /// Public roaming owns a platform read fence, not a fabricated signed-in account.
 enum MusicNativeSimilarLease: Sendable {
@@ -203,47 +203,6 @@ enum MusicNativeSimilarData {
             history: queue.history,
             source: queue.source
         )
-    }
-
-    static func validateSession(_ saved: MusicQueueSimilarState, serial: Int, songs: [String: MusicSongRecord]) throws {
-        try musicRequire(
-            (saved.seedSongID == nil || songs[saved.seedSongID!] != nil) &&
-            (0...musicMaxSafeInteger).contains(saved.offsetVal) &&
-            !saved.sourceIDs.isEmpty &&
-            MusicSimilarModeProvider(rawValue: saved.provider) != nil,
-            .corruptStorage
-        )
-        if let returnQueue = saved.returnQueue {
-            try validateQueue(returnQueue, songs: songs)
-            let maximum = returnQueue.entries.compactMap { Int($0.id.dropFirst(6)) }.max() ?? 0
-            try musicRequire(serial >= maximum, .corruptStorage)
-        }
-        if saved.provider == MusicSimilarModeProvider.heartbeat.rawValue {
-            try musicRequire(
-                !(saved.providerPID ?? "").isEmpty &&
-                !(saved.providerSID ?? "").isEmpty &&
-                saved.providerCount != nil,
-                .corruptStorage
-            )
-        }
-        for batch in saved.batches {
-            try musicRequire(
-                !batch.id.isEmpty &&
-                (batch.basedOnSongID == nil || songs[batch.basedOnSongID!] != nil) &&
-                MusicSimilarModeProvider(rawValue: batch.provider) != nil,
-                .corruptStorage
-            )
-        }
-    }
-
-    static func validateQueue(_ saved: MusicQueueSimilarReturnRecord, songs: [String: MusicSongRecord]) throws {
-        var ids = Set<String>()
-        for row in saved.entries {
-            try musicRequire(!row.id.isEmpty && ids.insert(row.id).inserted &&
-                songs[row.songID] != nil, .corruptStorage)
-        }
-        try musicRequire(saved.currentID == nil || ids.contains(saved.currentID!), .corruptStorage)
-        try musicRequire(saved.priority.allSatisfy(ids.contains) && saved.history.allSatisfy(ids.contains), .corruptStorage)
     }
 
     static func batch(_ id: String, basedOn: MusicSongRecord, provider: MusicSimilarModeProvider,

@@ -86,15 +86,15 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 
 ## 写入、取消与关闭
 
-- 账号文档由其稳定 owner 的队列形成变更，共享存储按准入次序完成 CAS。账号详情使用独立可选缓存，成功刷新直接发布内存并安排落盘；缓存写入不进入凭据的 pending/reconcile，写失败不会产生业务 `COMMIT_UNKNOWN`。
+- 账号文档由其稳定 owner 的队列形成变更，共享存储按准入次序完成 CAS。账号详情使用独立可选缓存，成功刷新直接发布内存并安排落盘；缓存写失败不影响凭据事务。
 - 账号详情/VIP读取不由最后一个等待者关闭；App 关闭准备显式退休并排空这些读取。VIP签到等用户写事务保持独立语义，不因本次读取调整而重放。
 
 
 - 凭据写入在账号 owner 的存储队列内重读当前账号行、校验当前字段并执行 revision CAS；generation 与凭据在同一事务提交。
-- 同平台基线变化返回 `STORAGE_CONFLICT`；提交结果无法确认返回 `COMMIT_UNKNOWN` 或对应 handoff 未确认错误。两者都不自动重试或重放登录。
-- 调用方取消只撤销尚未进入原子提交点的工作。已准入写入必须等待真实结算，不能把取消解释为回滚。
-- 页面取消已开始的账号核对读取属于取消结算；应用关闭准备等待它完成，不再次取消该确认读取或把正常离页改报为未知提交。
-- 显式重新观察账号状态只读取权威文档；失败 owner 不通过丢弃 pending、影子状态或额外 writer 恢复。
+- 同平台基线变化返回 `STORAGE_CONFLICT`；事务失败原子回滚，不自动重试或重放登录。
+- 调用方取消只撤销尚未进入原子提交点的工作。已准入写入等待真实结算。
+- 页面取消已开始的账号核对读取属于取消结算；应用关闭准备等待它完成，不再次取消该确认读取。
+- 显式重新观察账号状态只读取权威文档，不建立影子状态或额外 writer。
 - 关闭先停止新调用、撤销首次观察和全部已签发会话，再等待网络、协议、存储和通知真实结算；已发布但尚未进入物理存储计数的首次观察同样属于关闭排空范围。最后才释放协议，共享数据库由 App 在全部 owner 排空后释放。
 - 原生账号读取／安全提交与 Node publication 分别排空；`MusicAccountProtocol.DisposeAsync` 阻止新调用、取消并等待其已登记工作。共同匿名工作随运行器模块关闭，不建立原生设备回执协调器。
 
@@ -107,12 +107,12 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 
 ## 账号文件传输
 
-文件与批次行为以[共同账号文件契约](../common/music/account-transfer.md)为准。Windows 由 `MusicNativeApplication`（`MusicNativeAccountTransfer.cs`）与 `MusicAccountOwner` 直接提供原生强类型账号传输方法，不新增 JSON／Node 命令；`MusicAccountTransferFile` 持有显式用户文件的完整字节，读写和解码不设文件大小配额，使用后清零。`MusicAccountTransferPlan` 持有 owner 捕获的完整账号值 fingerprint 与授权 epoch，普通序列化和调试字符串不包含凭据。界面只能取得平台冲突摘要及最终逐平台结果。
+文件与批次行为以[共同账号文件契约](../common/music/account-transfer.md)为准。Windows 由 `MusicAccountOwner` 直接提供原生强类型账号传输方法，不新增 JSON／Node 命令；`MusicAccountTransferFile` 持有显式用户文件的完整字节，读写和解码不设文件大小配额，使用后清零。`MusicAccountTransferPlan` 持有 owner 捕获的完整账号值 fingerprint 与授权 epoch，普通序列化和调试字符串不包含凭据。界面只能取得平台冲突摘要及最终逐平台结果。
 
 - 准备先完整检查文件结构，再在账号磁盘队列中捕获各平台基线。跳过平台不调用网络、不写账号；计划只能消费一次，策略不跨批次保存。
 - 候选通过 `MusicAccountProtocol.ValidateAsync` 进入共同 Node 认证，不先发布为当前账号；失败候选不替换已保存授权，不恢复原生设备 writer。
-- 候选身份与现有登录资料／权益读取完成后，仍由 `MusicAccountOwner` 在同一个物理队列中核对准备值和 epoch、执行文档 CAS 并读回。只有成功读回才推进账号资格，复用 `SessionChanged` 的目录、搜索、歌词、曲库同步、反馈、Chorus 和播放失效链。新账号得到本机生成的新 generation／scope。
-- 文件传输由 `MusicNativeApplication` 的同一 pending/lifetime 关闭边界管理；逐项未知回执会登记 `accountReceiptUnknown`，正常关闭失败，只有显式账号读取可以核对，不自动重试。已准入写入不传页面取消 token，等待真实写入与读回；取消停止后续平台。
+- 候选身份与现有登录资料／权益读取完成后，仍由 `MusicAccountOwner` 在同一个物理队列中核对准备值和 epoch 并执行原子 CAS 提交。提交成功后推进账号资格，复用 `SessionChanged` 的目录、搜索、歌词、曲库同步、反馈、Chorus 和播放失效链。新账号得到本机生成的新 generation／scope。
+- 文件传输由 `MusicAccountOwner` 的关闭边界管理；已准入写入不传页面取消 token，等待真实原子事务完成；取消停止后续平台。
 - 用户显式导出只读取已保存且未撤销的账号，不联网；JSON 作为用户选择的外部交换文件，不属于内部持久化。
 
 Windows 以 Cookie 字符串承载当前协议凭据；外部文件的字段、别名、数字及字符串语义沿共同 B09 契约，不把它改成内部文档迁移入口。无法安全表达或缺少真实认证材料时逐平台失败，不从其他安装补造。

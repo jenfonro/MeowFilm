@@ -36,6 +36,8 @@ internal static class NeteasePlaybackOutboxStore
         database.ReadSnapshotAsync(db =>
         {
             var revision = db.Revision(StorageOwner);
+            if (revision == StorageRevision.Empty)
+                return ([], revision);
             var rows = db.Query("""
                 SELECT playback_id,consent_revision,recording_id,source,source_id,algorithm,
                        start_confirmed,play_scene,
@@ -45,29 +47,18 @@ internal static class NeteasePlaybackOutboxStore
                 FROM windows_music_feedback_outbox
                 ORDER BY position
                 """,
-                row =>
-                {
-                    FeedbackProtocolRules.Require(Guid.TryParse(row.GetString(0), out var playbackId), "CORRUPT_STORAGE");
-                    var account = new NeteasePlaybackAccount(row.GetString(8), row.GetInt64(9), row.GetString(10));
-                    var start = ReadEvent(row, 11);
-                    var end = ReadEvent(row, 18);
-                    return new NeteasePlaybackPending(
-                        playbackId,
-                        account,
-                        row.GetInt64(1),
-                        row.GetString(2),
-                        row.GetNullableString(3),
-                        row.GetNullableString(4),
-                        row.GetNullableString(5),
-                        row.GetBool(6),
-                        start,
-                        end,
-                        row.GetNullableString(7));
-                }).ToArray();
-
-            if (revision == StorageRevision.Empty && rows.Length > 0)
-                throw new MusicFeedbackException("CORRUPT_STORAGE");
-
+                row => new NeteasePlaybackPending(
+                    Guid.Parse(row.GetString(0)),
+                    new NeteasePlaybackAccount(row.GetString(8), row.GetInt64(9), row.GetString(10)),
+                    row.GetInt64(1),
+                    row.GetString(2),
+                    row.GetNullableString(3),
+                    row.GetNullableString(4),
+                    row.GetNullableString(5),
+                    row.GetBool(6),
+                    ReadEvent(row, 11),
+                    ReadEvent(row, 18),
+                    row.GetNullableString(7))).ToArray();
             return (rows, revision);
         }, token);
 
@@ -177,26 +168,11 @@ internal static class NeteasePlaybackOutboxStore
         }, token);
     }
 
-    private static NeteasePlaybackEvent? ReadEvent(Microsoft.Data.Sqlite.SqliteDataReader row, int offset)
-    {
-        string? rawId = row.GetNullableString(offset);
-        long? at = row.GetNullableInt64(offset + 1);
-        bool? inflight = row.GetNullableBool(offset + 2);
-        double? time = row.GetNullableDouble(offset + 3);
-        double? realtime = row.GetNullableDouble(offset + 4);
-        string? reason = row.GetNullableString(offset + 5);
-        double? rate = row.GetNullableDouble(offset + 6);
-
-        if (rawId is null && at is null && inflight is null && time is null && realtime is null && reason is null && rate is null)
-            return null;
-
-        Guid id = Guid.Empty;
-        FeedbackProtocolRules.Require(
-            rawId is not null && Guid.TryParse(rawId, out id) &&
-            at is not null && inflight is not null && time is not null &&
-            realtime is not null && reason is not null && rate is not null,
-            "CORRUPT_STORAGE");
-
-        return new NeteasePlaybackEvent(id, at!.Value, inflight!.Value, time!.Value, realtime!.Value, reason!, rate!.Value);
-    }
+    private static NeteasePlaybackEvent? ReadEvent(Microsoft.Data.Sqlite.SqliteDataReader row, int offset) =>
+        row.GetNullableString(offset) is { } rawId && Guid.TryParse(rawId, out var id) &&
+        row.GetNullableInt64(offset + 1) is { } at && row.GetNullableBool(offset + 2) is { } inflight &&
+        row.GetNullableDouble(offset + 3) is { } time && row.GetNullableDouble(offset + 4) is { } realtime &&
+        row.GetNullableString(offset + 5) is { } reason && row.GetNullableDouble(offset + 6) is { } rate
+            ? new NeteasePlaybackEvent(id, at, inflight, time, realtime, reason, rate)
+            : null;
 }

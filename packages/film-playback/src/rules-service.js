@@ -24,10 +24,6 @@ function copyRules(rules) {
       seasonRules: matches(rules.seasonRules) };
   } catch { throw fault('INVALID_RULES'); }
 }
-function previewText(value) {
-  return validRuleText(value) || Array.isArray(value) &&
-    value.every(unit => Number.isInteger(unit) && unit >= 0 && unit > -1 && unit <= 65535);
-}
 const ruleGroups = {
   episodeClean: ['episodeCleanRegexRules', 'episode'],
   episode: ['episodeRules', 'episode'],
@@ -51,10 +47,9 @@ function groupDraft(group, rows) {
   return copyRules({ ...emptyRules(), [key]: rows });
 }
 function previewRequest({ section, text, query }) {
-  if (!['episode', 'movie', 'search', 'season'].includes(section) || !previewText(text) ||
-      section === 'search' && query !== undefined && !previewText(query)) throw fault('INVALID_REQUEST');
-  return { section, text: Array.isArray(text) ? [...text] : text,
-    ...(section === 'search' && query !== undefined ? { query: Array.isArray(query) ? [...query] : query } : {}) };
+  if (!['episode', 'movie', 'search', 'season'].includes(section) || !validRuleText(text) ||
+      section === 'search' && query !== undefined && !validRuleText(query)) throw fault('INVALID_REQUEST');
+  return { section, text, ...(section === 'search' && query !== undefined ? { query } : {}) };
 }
 
 /** The standalone rule owner publishes only after its typed-row transaction commits. */

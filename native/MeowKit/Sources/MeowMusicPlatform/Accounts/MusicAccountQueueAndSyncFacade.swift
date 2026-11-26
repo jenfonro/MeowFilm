@@ -1,9 +1,8 @@
 import Foundation
 import MeowAccounts
-import MeowMusicFeature
 import MeowRuntime
 
-extension NativeMusicAccountService: MusicNativeAccountQueueProviding {
+extension NativeMusicAccountService {
     func revokeAccountQueues(_ platform: MusicAccountPlatform? = nil) {
         let ids = accountQueueBindings.filter { platform == nil || $0.value.lease.platform == platform }.map(\.key)
         for id in ids { accountQueueBindings.removeValue(forKey: id)?.revoke() }
@@ -21,7 +20,7 @@ extension NativeMusicAccountService: MusicNativeAccountQueueProviding {
             let credential = try await accounts.credentialUpdateLease(for: token)
             do {
                 guard let provider = providers[platform] else { throw MusicServiceError.unsupported }
-                let nativeID = try await provider.nativeID(credential.credential)
+                let nativeID = await provider.nativeID(credential.credential)
                 try await validToken(token, platform: platform, own: own, revision: revision)
                 let lease = MusicAccountQueueLease(platform: platform)
                 accountQueueBindings[lease.id] = .init(lease: lease, credential: credential, epoch: own,
@@ -56,18 +55,28 @@ extension NativeMusicAccountService: MusicNativeAccountQueueProviding {
                                  cursor: String?) async throws -> MusicNativeTrackPage {
         do {
             try await checkAccountQueue(lease)
-            var fields: RuntimeObject = ["platform": .string(lease.platform.rawValue),
-                "cursor": cursor.map(RuntimeValue.string) ?? .null]
+            let slice: (rows: [RuntimeValue], cursor: String?, total: Int)
             switch kind {
             case .collection(let id):
-                fields["operation"] = .string("tracks"); fields["collectionId"] = .string(id)
-            case .recommendation(let kind):
-                fields["operation"] = .string("recommendations"); fields["kind"] = .string(kind)
+                slice = try await pagedRows(platform: lease.platform, operation: "tracks", argument: id,
+                                            cursor: cursor, queueLease: lease) { provider, token, own, revision, _ in
+                    let rows = try await self.authenticated(lease.platform, token: token, own: own, revision: revision) {
+                        try await provider.tracks(collectionID: id)
+                    }
+                    return (rows, nil, nil)
+                }
+            case .recommendation(let recommendationKind):
+                slice = try await pagedRows(platform: lease.platform, operation: "recommendations",
+                                            argument: recommendationKind, cursor: cursor, queueLease: lease) {
+                    provider, token, own, revision, pageNumber in
+                    let value = try await self.authenticated(lease.platform, token: token, own: own, revision: revision) {
+                        try await provider.recommendations(kind: recommendationKind, page: pageNumber)
+                    }
+                    return (value.rows, value.nextPage, value.expiresAt)
+                }
             }
-            let value = try await business(fields, queueLease: lease)
             try await checkAccountQueue(lease)
-            guard case .object(let result) = value else { throw MusicServiceError.invalidResponse }
-            return try nativePage(result, platform: lease.platform)
+            return try nativeTrackPage(slice, platform: lease.platform)
         } catch {
             let failure = safe(error)
             if failure.isAuthenticationFailure || failure == .staleAccess || failure == .staleResult {
@@ -84,61 +93,54 @@ extension NativeMusicAccountService: MusicNativeAccountQueueProviding {
     }
 }
 
-extension NativeMusicAccountService: MusicNativeLibrarySyncProviding {
+extension NativeMusicAccountService {
     func revokeLibrarySync(_ platform: MusicAccountPlatform? = nil) {
         let ids = librarySyncBindings.filter { platform == nil || $0.value.session.platform == platform }.map(\.key)
         for id in ids { librarySyncBindings.removeValue(forKey: id)?.revoke() }
     }
 
     public func beginLibrarySync(platform: MusicAccountPlatform) async throws -> MusicLibrarySyncSession {
-        do { return try await makeLibrarySyncSession(platform: platform) }
-        catch { throw safe(error) }
-    }
-
-    private func makeLibrarySyncSession(platform: MusicAccountPlatform) async throws -> MusicLibrarySyncSession {
-        try check()
-        let expired = librarySyncBindings.filter { $0.value.expires <= now() }.map(\.key)
-        for id in expired { librarySyncBindings.removeValue(forKey: id)?.revoke() }
-        guard providers[platform] != nil else { throw MusicServiceError.unsupported }
-        guard !librarySyncBindings.values.contains(where: { $0.session.platform == platform }) else { throw MusicServiceError.busy }
-        let token = try await session(platform), own = epoch, revision = revisions[platform, default: 0]
-        try await validToken(token, platform: platform, own: own, revision: revision)
-        let lease = try await accounts.credentialUpdateLease(for: token)
         do {
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            let uid = try await providers[platform]!.nativeID(lease.credential)
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            guard !librarySyncBindings.values.contains(where: { $0.session.platform == platform }) else { throw MusicServiceError.busy }
-            let identity = token.identity
-            let scope = identity.source.installationID.uuidString.lowercased() + ":" + identity.source.siteKey + ":" + identity.accountID.uuidString.lowercased()
-            let result = MusicLibrarySyncSession(id: UUID(), platform: platform, accountID: uid, scope: scope)
-            let authorization = MusicAccountSyncAuthorization { [weak self] in
-                guard let self else { throw MusicServiceError.closed }
-                try await self.checkLibrarySync(result)
+            try check()
+            for id in librarySyncBindings.filter({ $0.value.expires <= now() }).map(\.key) {
+                librarySyncBindings.removeValue(forKey: id)?.revoke()
             }
-            librarySyncBindings[result.id] = .init(session: result, lease: lease, epoch: own, revision: revision,
-                                                   expires: now().addingTimeInterval(600), authorization: authorization)
-            return result
-        } catch { lease.revoke(); throw safe(error) }
+            guard let provider = providers[platform] else { throw MusicServiceError.unsupported }
+            guard !librarySyncBindings.values.contains(where: { $0.session.platform == platform }) else { throw MusicServiceError.busy }
+            let token = try await session(platform), own = epoch, revision = revisions[platform, default: 0]
+            try await validToken(token, platform: platform, own: own, revision: revision)
+            let lease = try await accounts.credentialUpdateLease(for: token)
+            do {
+                let uid = await provider.nativeID(lease.credential)
+                try await validToken(token, platform: platform, own: own, revision: revision)
+                guard !librarySyncBindings.values.contains(where: { $0.session.platform == platform }) else { throw MusicServiceError.busy }
+                let scope = Self.identityKey(token.identity)
+                let result = MusicLibrarySyncSession(id: UUID(), platform: platform, accountID: uid, scope: scope)
+                let authorization = MusicAccountSyncAuthorization { [weak self] in
+                    guard let self else { throw MusicServiceError.closed }
+                    try await self.checkLibrarySync(result)
+                }
+                librarySyncBindings[result.id] = .init(session: result, lease: lease, epoch: own, revision: revision,
+                                                       expires: now().addingTimeInterval(600), authorization: authorization)
+                return result
+            } catch { lease.revoke(); throw safe(error) }
+        } catch { throw safe(error) }
     }
 
     public func checkLibrarySync(_ session: MusicLibrarySyncSession) async throws {
-        do { try await checkLibrarySyncBinding(session) }
-        catch { throw safe(error) }
-    }
-
-    private func checkLibrarySyncBinding(_ session: MusicLibrarySyncSession) async throws {
-        guard let entry = librarySyncBindings[session.id], entry.session == session, entry.expires > now() else {
-            throw MusicServiceError.staleResult
-        }
-        try entry.authorization.checkLocal()
-        try await validToken(entry.lease.token, platform: session.platform, own: entry.epoch, revision: entry.revision)
-        let observed = try await accounts.credentialUpdateLease(for: entry.lease.token)
-        defer { observed.revoke() }
-        try entry.authorization.checkLocal()
-        try check(entry.epoch)
-        guard observed.revision == entry.lease.revision, observed.credential == entry.lease.credential,
-              librarySyncBindings[session.id]?.session == session else { throw MusicServiceError.staleResult }
+        do {
+            guard let entry = librarySyncBindings[session.id], entry.session == session, entry.expires > now() else {
+                throw MusicServiceError.staleResult
+            }
+            try entry.authorization.checkLocal()
+            try await validToken(entry.lease.token, platform: session.platform, own: entry.epoch, revision: entry.revision)
+            let observed = try await accounts.credentialUpdateLease(for: entry.lease.token)
+            defer { observed.revoke() }
+            try entry.authorization.checkLocal()
+            try check(entry.epoch)
+            guard observed.revision == entry.lease.revision, observed.credential == entry.lease.credential,
+                  librarySyncBindings[session.id]?.session == session else { throw MusicServiceError.staleResult }
+        } catch { throw safe(error) }
     }
 
     public func readLibrarySync(_ session: MusicLibrarySyncSession, kinds: [MusicLibrarySyncKind]) async throws -> MusicLibrarySyncSnapshot {
@@ -175,7 +177,7 @@ extension NativeMusicAccountService: MusicNativeLibrarySyncProviding {
             }
         } catch {
             if dispatch.stopBeforeDispatch() { return .notDispatched(safe(error)) }
-            throw MusicServiceError.commitUnconfirmed
+            throw MusicServiceError.upstreamFailed
         }
     }
 
@@ -185,7 +187,7 @@ extension NativeMusicAccountService: MusicNativeLibrarySyncProviding {
     }
 }
 
-extension NativeMusicAccountService: MusicNativeHomeActionQueueProviding {
+extension NativeMusicAccountService {
     func homeActionArgument(_ action: MusicHomeAction) throws -> String {
         let (operation, parameters) = MusicPlatformDTO.action(action)
         let descriptor = RuntimeValue.object(["operation": .string(operation),
@@ -216,11 +218,11 @@ extension NativeMusicAccountService: MusicNativeHomeActionQueueProviding {
                           saved.platform == lease.platform, saved.token == token,
                           saved.revision == entry.revision, saved.revision == revisions[lease.platform, default: 0],
                           saved.operation == "homeAction", saved.argument == argument,
-                          saved.expires > now(), saved.nextPage == nil, offset < saved.rows.count,
-                          case .object(let result) = try slice(saved, key: key, offset: offset) else {
+                          saved.expires > now(), saved.nextPage == nil, offset < saved.rows.count else {
                         throw MusicServiceError.staleResult
                     }
-                    return try nativePage(result, platform: lease.platform)
+                    let slice = try slicePage(saved, key: key, offset: offset)
+                    return try nativeTrackPage(slice, platform: lease.platform)
                 }
             }
             let value = try await authenticated(lease.platform, token: token, own: entry.epoch, revision: entry.revision) {
@@ -236,11 +238,11 @@ extension NativeMusicAccountService: MusicNativeHomeActionQueueProviding {
             return try lease.authorization.perform {
                 try check(entry.epoch)
                 guard accountQueueBindings[lease.id]?.lease === lease,
-                      revisions[lease.platform, default: 0] == entry.revision,
-                      case .object(let result) = try page(value.rows, platform: lease.platform, token: token,
-                        operation: "homeAction", argument: argument, expiresAt: value.expiresAt,
-                        queueLeaseID: lease.id) else { throw MusicServiceError.staleResult }
-                return try nativePage(result, platform: lease.platform, dailyStyle: value.dailyStyle)
+                      revisions[lease.platform, default: 0] == entry.revision else { throw MusicServiceError.staleResult }
+                let slice = try storePage(value.rows, platform: lease.platform, token: token,
+                                          operation: "homeAction", argument: argument, expiresAt: value.expiresAt,
+                                          queueLeaseID: lease.id)
+                return try nativeTrackPage(slice, platform: lease.platform, dailyStyle: value.dailyStyle)
             }
         } catch {
             let failure = safe(error)
@@ -252,7 +254,7 @@ extension NativeMusicAccountService: MusicNativeHomeActionQueueProviding {
     }
 }
 
-extension NativeMusicAccountService: MusicNativeDailyStyleProviding {
+extension NativeMusicAccountService {
     public func dailyStyleScope(_ lease: MusicAccountQueueLease) async throws -> String {
         do {
             guard lease.platform == .netease else { throw MusicServiceError.unsupported }
@@ -261,11 +263,7 @@ extension NativeMusicAccountService: MusicNativeDailyStyleProviding {
                 guard let entry = accountQueueBindings[lease.id], entry.lease === lease else {
                     throw MusicServiceError.staleResult
                 }
-                struct Scope: Encodable {
-                    let identity: AccountIdentity
-                    let nativeID: String
-                }
-                return try musicSHA256Hex(encoding: Scope(identity: entry.credential.token.identity, nativeID: entry.nativeID))
+                return musicSHA256Hex("\(Self.identityKey(entry.credential.token.identity)):\(entry.nativeID)")
             }
         } catch { throw safe(error) }
     }
@@ -319,10 +317,10 @@ extension NativeMusicAccountService: MusicNativeDailyStyleProviding {
                     guard accountQueueBindings[lease.id]?.lease === lease,
                           entry.revision == revisions[.netease, default: 0] else { throw MusicServiceError.staleResult }
                     pages = pages.filter { $0.value.queueLeaseID != lease.id }
-                    guard case .object(let result) = try page(value.songs.rows, platform: .netease,
+                    let slice = try storePage(value.songs.rows, platform: .netease,
                         token: entry.credential.token, operation: "homeAction", argument: argument,
-                        expiresAt: value.songs.expiresAt, queueLeaseID: lease.id) else { throw MusicServiceError.invalidResponse }
-                    return .init(page: try nativePage(result, platform: .netease, dailyStyle: value.songs.dailyStyle),
+                        expiresAt: value.songs.expiresAt, queueLeaseID: lease.id)
+                    return .init(page: try nativeTrackPage(slice, platform: .netease, dailyStyle: value.songs.dailyStyle),
                         saveConfirmed: value.saveConfirmed, selectionChanged: value.selectionChanged)
                 }
             } catch { return try receipt() }
@@ -330,7 +328,7 @@ extension NativeMusicAccountService: MusicNativeDailyStyleProviding {
     }
 }
 
-extension NativeMusicAccountService: MusicNativeSimilarModeProviding {
+extension NativeMusicAccountService {
     private func similarModeBinding(_ lease: MusicAccountQueueLease) throws -> MusicAccountQueueBinding {
         try check(); try lease.authorization.check()
         guard lease.platform == .netease else { throw MusicServiceError.unsupported }

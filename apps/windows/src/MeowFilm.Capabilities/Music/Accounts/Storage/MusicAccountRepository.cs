@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Accounts;
 
-// Current account value. Generation is the per-account logical revision.
 internal sealed class StoredAccount
 {
     internal long Generation { get; init; }
@@ -14,7 +10,6 @@ internal sealed class StoredAccount
     internal MusicAccountProfile? Profile { get; init; }
     internal string? Scope { get; init; }
     internal long? ValidatedAt { get; init; }
-    internal string? ValueFingerprint { get; init; }
     public override string ToString() => "StoredAccount (redacted)";
 }
 
@@ -62,11 +57,12 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
                 throw new StorageException(StorageError.Conflict);
 
             var current = ReadPlatform(db, target) ?? new StoredAccount();
-            if (current.Generation != expected.Generation || current.ValueFingerprint != expected.ValueFingerprint)
+            if (current.Generation != expected.Generation ||
+                current.Scope != expected.Scope ||
+                current.Profile?.UserId != expected.Profile?.UserId)
                 throw new StorageException(StorageError.Conflict);
             AccountRules.Require(next.Generation == current.Generation + 1 && next.Generation <= AccountRules.MaxInteger, "LIMIT");
 
-            var committed = WithFingerprint(target, next);
             db.Execute("""
                 INSERT INTO windows_music_accounts(
                     platform,generation,cookie,scope,validated_at_ms,
@@ -83,18 +79,18 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
                     profile_avatar=excluded.profile_avatar
                 """,
                 ("$plat", target),
-                ("$gen", committed.Generation),
-                ("$cookie", committed.Cookie),
-                ("$scope", committed.Scope),
-                ("$valAt", committed.ValidatedAt),
-                ("$pPlat", committed.Profile?.Platform),
-                ("$pUid", committed.Profile?.UserId),
-                ("$pName", committed.Profile?.DisplayName),
-                ("$pAvatar", committed.Profile?.Avatar));
+                ("$gen", next.Generation),
+                ("$cookie", next.Cookie),
+                ("$scope", next.Scope),
+                ("$valAt", next.ValidatedAt),
+                ("$pPlat", next.Profile?.Platform),
+                ("$pUid", next.Profile?.UserId),
+                ("$pName", next.Profile?.DisplayName),
+                ("$pAvatar", next.Profile?.Avatar));
 
             var actual = db.CommitRevision(MusicAccountOwner.StorageOwner, expectedRevision);
-            return (committed, actual);
-        }, token, (next.Cookie?.Length ?? 0) * 2 + 256);
+            return (next, actual);
+        }, token);
     }
 
     private static StoredAccount? ReadPlatform(DatabaseSession db, string platform)
@@ -115,65 +111,21 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
                 string? pUserId = row.GetNullableString(5);
                 string? pDisplayName = row.GetNullableString(6);
                 string? pAvatar = row.GetNullableString(7);
-                AccountRules.Require(generation is > 0 and <= AccountRules.MaxInteger, "CORRUPT_STORAGE");
-                MusicAccountProfile? profile = null;
-                if (cookie is null)
-                {
-                    AccountRules.Require(scope is null && validatedAt is null &&
-                        pPlatform is null && pUserId is null && pDisplayName is null && pAvatar is null,
-                        "CORRUPT_STORAGE");
-                }
-                else
-                {
-                    AccountRules.Require(cookie.Length > 0 && scope is not null &&
-                        scope.Length > 0 && scope.Length <= 128 && scope.Trim() == scope &&
-                        validatedAt is >= 0 and <= AccountRules.MaxInteger &&
-                        pPlatform == platform && !string.IsNullOrEmpty(pUserId) && pDisplayName is not null,
-                        "CORRUPT_STORAGE");
-                    profile = new MusicAccountProfile(pPlatform!, pUserId!, pDisplayName!, pAvatar);
-                }
-                return WithFingerprint(platform, new StoredAccount
+                var profile = cookie is not null && pPlatform is not null && pUserId is not null && pDisplayName is not null
+                    ? new MusicAccountProfile(pPlatform, pUserId, pDisplayName, pAvatar)
+                    : null;
+                return new StoredAccount
                 {
                     Generation = generation,
                     Cookie = cookie,
                     Profile = profile,
                     Scope = scope,
                     ValidatedAt = validatedAt
-                });
+                };
             },
             out var account,
             ("$plat", platform)))
             return null;
         return account;
-    }
-
-    internal static StoredAccount WithFingerprint(string platform, StoredAccount account)
-    {
-        var sb = new StringBuilder(256);
-        sb.Append("v1|").Append(platform).Append('|').Append(account.Generation.ToString(CultureInfo.InvariantCulture));
-        AppendField(sb, account.Cookie);
-        AppendField(sb, account.Scope);
-        AppendField(sb, account.ValidatedAt?.ToString(CultureInfo.InvariantCulture));
-        AppendField(sb, account.Profile?.Platform);
-        AppendField(sb, account.Profile?.UserId);
-        AppendField(sb, account.Profile?.DisplayName);
-        AppendField(sb, account.Profile?.Avatar);
-        byte[] bytes = Encoding.UTF8.GetBytes(sb.ToString());
-        string fingerprint = Convert.ToHexStringLower(SHA256.HashData(bytes));
-        return new StoredAccount
-        {
-            Generation = account.Generation,
-            Cookie = account.Cookie,
-            Profile = account.Profile,
-            Scope = account.Scope,
-            ValidatedAt = account.ValidatedAt,
-            ValueFingerprint = fingerprint
-        };
-    }
-
-    private static void AppendField(StringBuilder sb, string? value)
-    {
-        if (value is null) sb.Append("|-");
-        else sb.Append('|').Append(value.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(value);
     }
 }

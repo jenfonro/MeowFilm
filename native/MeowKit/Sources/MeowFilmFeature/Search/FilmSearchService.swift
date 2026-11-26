@@ -136,17 +136,11 @@ public final class FilmSearchService {
         sourceObservation?.cancel()
         let live = sessions.compactMap(\.value)
         guard !live.isEmpty else { return }
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                for session in live { _ = session.release() }
-            }
-        } else {
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    for session in live { _ = session.release() }
-                }
-            }
+        let cleanup: @MainActor @Sendable () -> Void = {
+            for session in live { _ = session.release() }
         }
+        if Thread.isMainThread { MainActor.assumeIsolated(cleanup) }
+        else { DispatchQueue.main.async { MainActor.assumeIsolated(cleanup) } }
     }
 }
 #endif

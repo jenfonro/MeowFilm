@@ -83,8 +83,6 @@ public sealed record MusicRecommendationSnapshot(
     int Batch,
     bool CanRetry,
     bool CanReturn,
-    bool RequiresReconcile,
-    string[] ReconcileIds,
     long QueueVersion,
     string CurrentId,
     string AnchorId,

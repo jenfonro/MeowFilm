@@ -5,9 +5,9 @@ using MeowFilm.Capabilities.Accounts;
 namespace MeowFilm.Capabilities;
 
 /// <summary>Display-only account consumer. Activation reads local state; only Refresh contacts a platform.</summary>
-public sealed class MusicAccountDetailsViewModel(MusicNativeApplication source) : INotifyPropertyChanged, IAsyncDisposable
+public sealed class MusicAccountDetailsViewModel(MusicAccountOwner source) : INotifyPropertyChanged, IAsyncDisposable
 {
-    private readonly MusicNativeApplication source = source ?? throw new ArgumentNullException(nameof(source));
+    private readonly MusicAccountOwner source = source ?? throw new ArgumentNullException(nameof(source));
     private MusicPlatformAccount? account;
     private MusicAccountDetails? snapshot;
     private CancellationTokenSource? visible, request, expiration;
@@ -135,16 +135,10 @@ public sealed class MusicAccountDetailsViewModel(MusicNativeApplication source) 
             catch (Exception error)
             {
                 if (!Current()) return;
-                string code = error switch
-                {
-                    MusicAccountException e => e.Code,
-                    MusicOperationException e => e.Code,
-                    _ => "INVALID_RESPONSE"
-                };
-                // Never retain another account's display after a generation/credential fence.
+                string code = MusicRuntimeContext.ErrorCode(error) ?? "INVALID_RESPONSE";
                 if (code is "STALE_SESSION" or "SESSION_CHANGED" or "IDENTITY_MISMATCH" or
                     "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or
-                    "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" or "CLOSED")
+                    "HANDOFF_UNCONFIRMED" or "CLOSED")
                     snapshot = null;
                 status = Error(code);
             }
@@ -223,7 +217,7 @@ public sealed class MusicAccountDetailsViewModel(MusicNativeApplication source) 
     {
         "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" => "账号会话无效或已过期",
         "STALE_SESSION" or "SESSION_CHANGED" or "IDENTITY_MISMATCH" => "账号会话已变更",
-        "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" => "账号写入待核对",
+        "HANDOFF_UNCONFIRMED" => "账号写入待核对",
         "RATE_LIMITED" => "请求过于频繁",
         "VERIFICATION_REQUIRED" or "DEVICE_CONTEXT_REQUIRED" => "等待平台验证",
         "CANCELLED" => "已取消",

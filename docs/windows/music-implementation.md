@@ -93,8 +93,7 @@ music.online.lyrics
 
 ## 曲库、队列和播放
 
-- `MusicLibraryOwner` 是曲库、队列、历史和设置的唯一 writer。
-- `MusicRecommendationQueuePort` 串行所有最终 queue mutation。
+- `MusicLibraryOwner` 是曲库、队列、历史和设置的唯一 writer，推荐队列切换与追加直接在其串行写边界按 `expectedVersion` CAS 完成。
 - `MusicLibraryDatabase` 的逐记录 `music_songs`／`music_song_sources` 为唯一永久资料仓库；队列、收藏和历史保存 songId 引用及独立 occurrence，不持久歌曲副本、短期媒体 URL 或账号凭据。匹配与来源归属见[共同歌曲仓库](../common/music/smart-playback.md)。
 - 内置源与网络源是类型区别，已启用源均可按需参与统一选择。关闭内置平台只关闭该平台的官方音频能力，不限制已启用脚本提供同平台录音；禁用脚本不参与。
 - 按设置从首选档向后，逐档缓存优先并穷尽所有可参与来源；候选耗尽才一次补搜缺失映射。已有低档缓存不抢过高档来源。详见[统一选源](music-official-selection.md)。
@@ -121,8 +120,7 @@ music.online.lyrics
 - 歌曲搜索和歌单搜索使用独立当前策略。
 - 音质、外观、歌词／封面平台顺序和播放设备设置分别由其 owner 保存。
 - 音源页直接管理导入、独立启停、更新、回退和删除；管理条目选择不保存全局播放目标，内置／网络可同时启用。
-- CAS 失败时 UI 读取当前权威结果用于恢复显示，不重放用户操作。
-- `Music/Settings/MusicSettingReceiptTracker.cs`（由 `MusicCapability` 通过 `IDesktopOwnedNoticeSource` 暴露）稳定结算已提交工作并管理同项未知提示；页面关闭不取消真实提交，详见[设置呈现](music-settings-presentation.md)与[共同回执](../common/music/settings-receipts.md)。
+- CAS 失败时 UI 读取当前权威结果用于恢复显示，不重放用户操作；本地 SQLite WAL 事务原子提交或回滚，页面关闭不取消已进入 owner 的真实提交，详见[设置呈现](music-settings-presentation.md)。
 
 ## 请求生命周期
 

@@ -12,12 +12,11 @@ public final class PlaybackPreparedReplacement {
     let admission: UUID
     let autoplay: Bool
     var synchronizationDeadline: ContinuousClock.Instant?
-    private nonisolated let lifetime: Lifetime
-    var media: PlaybackAudioMedia { lifetime.media }
-    var committed: Bool {
-        get { lifetime.committed }
-        set { lifetime.committed = newValue }
-    }
+    let media: PlaybackAudioMedia
+    private let retire: @MainActor (PlaybackAudioMedia) -> Task<Void, Error>
+    nonisolated(unsafe) var committed = false
+    nonisolated(unsafe) var cancelled = false
+    private var closing: Task<Void, Error>?
     public var duration: Double? { media.duration }
     var position: Double { media.position }
 
@@ -25,7 +24,7 @@ public final class PlaybackPreparedReplacement {
          media: PlaybackAudioMedia, retire: @escaping @MainActor (PlaybackAudioMedia) -> Task<Void, Error>) {
         self.resource = resource; self.replacing = replacing; self.owner = owner
         self.admission = admission; self.autoplay = autoplay
-        self.lifetime = Lifetime(media: media, retire: retire)
+        self.media = media; self.retire = retire
     }
 
     func prepare() async throws {
@@ -56,46 +55,30 @@ public final class PlaybackPreparedReplacement {
 
     func check() throws {
         try Task.checkCancellation()
-        if lifetime.cancelled { throw CancellationError() }
+        if cancelled { throw CancellationError() }
         try media.check()
     }
 
     public func cancel() {
-        lifetime.cancel()
+        guard !committed, !cancelled else { return }
+        cancelled = true
+        closing = retire(media)
     }
 
     public func close() async throws {
-        lifetime.cancel()
-        try await lifetime.closing?.value
+        cancel()
+        try await closing?.value
     }
 
     nonisolated deinit {
-        let holder = lifetime
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { if !holder.committed { holder.cancel() } }
-        } else {
-            DispatchQueue.main.async { MainActor.assumeIsolated { if !holder.committed { holder.cancel() } } }
+        guard !committed, !cancelled else { return }
+        let media = media
+        let cleanup: @MainActor @Sendable () -> Void = {
+            media.cancel()
+            Task { try? await media.close() }
         }
-    }
-
-    @MainActor
-    private final class Lifetime {
-        let media: PlaybackAudioMedia
-        private let retire: @MainActor (PlaybackAudioMedia) -> Task<Void, Error>
-        var committed = false
-        var cancelled = false
-        var closing: Task<Void, Error>?
-
-        init(media: PlaybackAudioMedia, retire: @escaping @MainActor (PlaybackAudioMedia) -> Task<Void, Error>) {
-            self.media = media
-            self.retire = retire
-        }
-
-        func cancel() {
-            guard !committed, !cancelled else { return }
-            cancelled = true
-            closing = retire(media)
-        }
+        if Thread.isMainThread { MainActor.assumeIsolated(cleanup) }
+        else { DispatchQueue.main.async { MainActor.assumeIsolated(cleanup) } }
     }
 }
 #endif

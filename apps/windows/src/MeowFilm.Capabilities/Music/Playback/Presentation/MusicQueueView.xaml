@@ -26,10 +26,9 @@
    </DataTemplate></ListView.ItemTemplate>
   </ListView>
  <Grid Grid.Row="2" Margin="0,2,12,0" RowSpacing="8" Visibility="{x:Bind Queue.HasRecommendationPanel,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-   <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+   <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <TextBlock Text="{x:Bind Queue.RecommendationTitle,Mode=OneWay}" FontSize="18" VerticalAlignment="Center"/>
    <Button x:Name="RetryRecommendationButton" Grid.Column="1" Content="重试推荐" Click="RetryRecommendation_Click" Visibility="{x:Bind Queue.CanRetryRecommendation,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind Queue.CanRetryRecommendation,Mode=OneWay}" Margin="8,0,0,0"/>
-   <Button Grid.Column="2" Content="核对保存结果" Click="ReconcileRecommendation_Click" Visibility="{x:Bind Queue.CanReconcileRecommendation,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"/>
    </Grid>
   <ListView x:Name="RecommendationList" Grid.Row="1" ItemsSource="{x:Bind Queue.RecommendationCandidates,Mode=OneWay}" MaxHeight="232" SelectionMode="None" IsEnabled="{x:Bind Queue.CanChooseRecommendation,Mode=OneWay}" AutomationProperties.Name="为你推荐候选">
     <ListView.ItemContainerTransitions><TransitionCollection/></ListView.ItemContainerTransitions>

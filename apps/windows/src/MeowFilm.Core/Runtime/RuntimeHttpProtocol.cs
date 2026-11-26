@@ -22,17 +22,12 @@ public static partial class RuntimeHttpProtocol
         ["film"] = new("0.1.0", "film.playback.v1", "film."),
     };
 
-    [GeneratedRegex(@"\A[a-zA-Z][a-zA-Z0-9_.-]{0,127}\z", RegexOptions.CultureInvariant)]
-    private static partial Regex MethodPattern();
-    [GeneratedRegex(@"\A[a-z]+(?:\.[a-z][a-zA-Z]*)*\z", RegexOptions.CultureInvariant)]
-    private static partial Regex OperationPattern();
     [GeneratedRegex(@"\A/v1/tmdb/images/(?:original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+\z",
         RegexOptions.CultureInvariant)]
     private static partial Regex ImagePattern();
     [GeneratedRegex(@"\A/v1/douban/images/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+(?:/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+)*\z",
         RegexOptions.CultureInvariant)]
     private static partial Regex DoubanImagePattern();
-
     [GeneratedRegex(@"\A/v1/source/images/[A-Za-z0-9-]+\z", RegexOptions.CultureInvariant)]
     private static partial Regex SourceImagePattern();
 
@@ -42,8 +37,7 @@ public static partial class RuntimeHttpProtocol
         ImagePattern().IsMatch(reference) ? "tmdb" : DoubanImagePattern().IsMatch(reference) ? "douban" :
         SourceImagePattern().IsMatch(reference) ? "source" : null;
 
-    public static bool ValidMethod(string? method) => method is not null && MethodPattern().IsMatch(method);
-    internal static bool ValidOperation(string operation) => OperationPattern().IsMatch(operation);
+    public static bool ValidMethod(string? method) => !string.IsNullOrEmpty(method);
 
     public static Uri ValidateEndpoint(string baseUrl)
     {
@@ -66,11 +60,11 @@ public static partial class RuntimeHttpProtocol
             var identities = new HashSet<string>(StringComparer.Ordinal);
             foreach (var module in declaredModules.EnumerateArray())
             {
-                if (module.ValueKind != JsonValueKind.Object) continue;
-                var expected = expectedModules.SingleOrDefault(item => module.EnumerateObject().Any(field =>
-                    field.NameEquals("id") && field.Value.ValueKind == JsonValueKind.String && field.Value.ValueEquals(item.Id)));
+                if (module.ValueKind != JsonValueKind.Object || !module.TryGetProperty("id", out var idProp) ||
+                    idProp.ValueKind != JsonValueKind.String) continue;
+                var id = idProp.GetString()!;
+                var expected = expectedModules.SingleOrDefault(item => item.Id == id);
                 if (expected is null) continue;
-                var id = BridgeCodec.RequiredProperty(module, "id").GetString()!;
                 if (!identities.Add(id) || !Modules.TryGetValue(id, out var contract) || expected.Version != contract.Version
                     || BridgeCodec.RequiredProperty(module, "version").GetString() != expected.Version
                     || BridgeCodec.RequiredProperty(module, "contract").GetString() != contract.Name)

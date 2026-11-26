@@ -10,8 +10,7 @@ extension MusicPublicBrowseViewModel {
         case .discovery(.home), .discovery(.featured), .discovery(.channels), .discovery(.channel): break
         default: return
         }
-        guard let home = service as? any MusicHomeBrowsing else { return }
-        let stream = await home.homeChanges()
+        let stream = await service.homeChanges()
         for await _ in stream {
             guard !Task.isCancelled, !closed else { return }
             let scoped: Bool
@@ -25,7 +24,7 @@ extension MusicPublicBrowseViewModel {
             guard scoped else { continue }
             if isHome {
                 do {
-                    let source = try await home.homeSourceSelection()
+                    let source = try await service.homeSourceSelection()
                     guard !Task.isCancelled, !closed else { return }
                     if let displayedHomeSource, displayedHomeSource != source {
                         invalidate(clear: true)
@@ -48,12 +47,11 @@ extension MusicPublicBrowseViewModel {
     }
 
     public func restoreHomeIfNeeded() async {
-        guard !closed, visible, displayVisible, !loaded, !isLoading, case .discovery(.home) = request,
-              let home = service as? any MusicHomeBrowsing else { return }
+        guard !closed, visible, displayVisible, !loaded, !isLoading, case .discovery(.home) = request else { return }
         let own = pageEpoch
         do {
-            let source = try await home.homeSourceSelection()
-            let value = try await home.restoredHome()
+            let source = try await service.homeSourceSelection()
+            let value = try await service.restoredHome()
             guard !Task.isCancelled, !closed, visible, !loaded, !isLoading,
                   pageEpoch == own, let value else { return }
             // The snapshot may contain several successful response batches,
@@ -82,18 +80,16 @@ extension MusicPublicBrowseViewModel {
         invalidate(clear: false)
         loadedPages = [:]
         contentIsCurrent = false
-        if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
+        if let remoteSource { release(remoteSource) }; remoteSource = nil
         currentCursor = nil; nextCursor = nil; back = []
         cursorOffsets = ["": 0]; trackOffset = 0
         detailSourcePositions = [:]
         pageNumber = 1; requiresExplicitNext = false; usesPageNavigation = false
         if case .detail(let collection) = request {
             playlistNeedsRefresh = false
-            if let refreshing = service as? any MusicPublicBrowseRefreshing {
-                let own = pageEpoch
-                await refreshing.refreshPublicCollection(collection)
-                guard own == pageEpoch, !closed, visible, !Task.isCancelled else { return }
-            }
+            let own = pageEpoch
+            await service.refreshPublicCollection(collection)
+            guard own == pageEpoch, !closed, visible, !Task.isCancelled else { return }
         }
         await load(cursor: nil, direction: 0, refresh: true)
     }
@@ -105,13 +101,10 @@ extension MusicPublicBrowseViewModel {
             return
         }
         if isHome, !isLoading, !closed, visible, displayVisible,
-           let displayed = displayedHomeSource, let home = service as? any MusicHomeBrowsing {
+           let displayed = displayedHomeSource {
             let page = pageEpoch
             do {
-                // Source changes during the initial read can precede the
-                // subscription. Reconcile locally on return, without reloading
-                // an unchanged home or mistaking account changes for navigation.
-                let current = try await home.homeSourceSelection()
+                let current = try await service.homeSourceSelection()
                 guard !Task.isCancelled, !closed, visible, displayVisible,
                       pageEpoch == page, !isLoading else { return }
                 if current != displayed {
@@ -204,14 +197,13 @@ extension MusicPublicBrowseViewModel {
         if isDaily, cursor == nil, remoteSource == nil { contentDay = day }
         let savedSource = remoteSource
         let cached = direction != 0 && requestOverride == nil ? loadedPages[cursor ?? ""] : nil
-        let queuePage = queuePage, releaseSource = releaseSource
         let trace = MusicRequestTrace(.browse, platform: requestPlatform)
         trace.record(.started)
         tabTask?.cancel(); tabTask = nil
         loadEpoch = own
         if !isHome { pageEpoch = own }
         isLoading = true; error = nil; errorDiagnosticID = nil
-        let newTask = Task<Loaded, Error> {
+        let newTask = Task<Loaded, Error> { @MainActor in
             try await MusicRequestTrace.$current.withValue(trace) {
                 if var cached {
                     if let savedSource { try await savedSource.validate(); cached.source = savedSource }
@@ -219,15 +211,12 @@ extension MusicPublicBrowseViewModel {
                 }
                 switch request {
                 case .accountRecommendation(let platform, let kind, let title):
-                    guard let provider = service as? any MusicRemoteQueueServing, let queuePage else {
-                        throw MusicServiceError.unsupported
-                    }
                     let source: MusicRemoteQueueSource
                     if let savedSource { source = savedSource }
-                    else { source = try await provider.openAccountQueue(platform: platform,
+                    else { source = try await service.openAccountQueue(platform: platform,
                         kind: .recommendation(kind: kind), title: title) }
                     do {
-                        let result = try await queuePage(source, cursor)
+                        let result = try await self.remotePage(source, cursor: cursor)
                         try Task.checkCancellation()
                         let items = result.items.enumerated().map { index, track in
                             MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
@@ -236,17 +225,14 @@ extension MusicPublicBrowseViewModel {
                         return .init(page: .init(sections: [.init(id: source.context.id, title: title, items: items)],
                             cursor: result.cursor), source: source)
                     } catch {
-                        if savedSource == nil { releaseSource(source) }; throw error
+                        if savedSource == nil { self.release(source) }; throw error
                     }
                 case .homeAction(let action, let title):
-                    guard let provider = service as? any MusicHomeActionQueueServing, let queuePage else {
-                        throw MusicServiceError.unsupported
-                    }
                     let source: MusicRemoteQueueSource
                     if let savedSource { source = savedSource }
-                    else { source = try await provider.openHomeActionQueue(action, title: title) }
+                    else { source = try await service.openHomeActionQueue(action, title: title) }
                     do {
-                        let result = try await queuePage(source, cursor)
+                        let result = try await self.remotePage(source, cursor: cursor)
                         try Task.checkCancellation()
                         let items = result.items.enumerated().map { index, track in
                             MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
@@ -256,7 +242,7 @@ extension MusicPublicBrowseViewModel {
                                                 cursor: result.cursor), source: source,
                                      dailyStyle: result.dailyStyle)
                     } catch {
-                        if savedSource == nil { releaseSource(source) }; throw error
+                        if savedSource == nil { self.release(source) }; throw error
                     }
                 case .playlists(let platform, let query):
                     let result = try await service.publicPlaylists(platform: platform, query: query, cursor: cursor)
@@ -279,18 +265,17 @@ extension MusicPublicBrowseViewModel {
                                  collection: result.collection, total: result.total, source: savedSource,
                                  consumed: result.consumed, detailMembers: result.members)
                 case .discovery(let destination):
-                    if destination == .home, let home = service as? any MusicHomeBrowsing {
-                        let source = try await home.homeSourceSelection()
-                        let page = try await home.homePage(cursor: cursor, refresh: refresh)
+                    if destination == .home {
+                        let source = try await service.homeSourceSelection()
+                        let page = try await service.homePage(cursor: cursor, refresh: refresh)
                         return .init(page: page, consumed: page.consumed, homeSource: source)
                     }
-                    if case .daily(let platform) = destination, let queuePage,
-                       let provider = service as? any MusicRemoteQueueServing {
+                    if case .daily(let platform) = destination {
                         let source: MusicRemoteQueueSource
                         if let savedSource { source = savedSource }
-                        else { source = try await provider.openAccountQueue(platform: platform, kind: .recommendation(kind: "daily"), title: "每日推荐") }
+                        else { source = try await service.openAccountQueue(platform: platform, kind: .recommendation(kind: "daily"), title: "每日推荐") }
                         do {
-                            let result = try await queuePage(source, cursor)
+                            let result = try await self.remotePage(source, cursor: cursor)
                             try Task.checkCancellation()
                             let items = result.items.enumerated().map { index, track in
                                 MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
@@ -299,7 +284,7 @@ extension MusicPublicBrowseViewModel {
                             return .init(page: .init(sections: [.init(id: "daily", title: "每日推荐", items: items)], cursor: result.cursor),
                                          source: source)
                         } catch {
-                            if savedSource == nil { releaseSource(source) }; throw error
+                            if savedSource == nil { self.release(source) }; throw error
                         }
                     }
                     let page = try await service.publicDiscovery(destination, cursor: cursor)
@@ -310,7 +295,7 @@ extension MusicPublicBrowseViewModel {
         task = newTask
         var unpublished: MusicRemoteQueueSource?
         defer {
-            if let unpublished, unpublished.id != remoteSource?.id { releaseSource(unpublished) }
+            if let unpublished, unpublished.id != remoteSource?.id { release(unpublished) }
             if own == loadEpoch { task = nil; isLoading = false; publishArtwork(); loadArtworkDemand() }
         }
         do {
@@ -408,9 +393,7 @@ extension MusicPublicBrowseViewModel {
             if cursor == nil || result.dailyStyle != nil { dailyStyle = result.dailyStyle }
             failedPage = nil; failedRequest = nil
             watchSource()
-            if let repository = service as? any MusicSongRepositoryReading {
-                await refreshSongProjections(repository)
-            }
+            await refreshSongProjections(service)
             trace.record(.completed)
             return true
         } catch {
@@ -423,7 +406,7 @@ extension MusicPublicBrowseViewModel {
             }
             if !isHome, safe.isAuthenticationFailure || [.accessUnavailable, .staleAccess, .staleResult, .notFound].contains(safe) {
                 loadedPages = [:]
-                if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
+                if let remoteSource { release(remoteSource) }; remoteSource = nil
                 sections = []; notice = nil; nextCursor = nil; loaded = false
                 collection = nil; total = nil; currentCursor = nil; back = []; pageNumber = 1; failedPage = nil; failedRequest = nil
                 cursorOffsets = ["": 0]; trackOffset = 0

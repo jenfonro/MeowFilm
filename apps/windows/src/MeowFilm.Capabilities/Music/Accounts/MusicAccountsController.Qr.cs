@@ -47,7 +47,7 @@ public sealed partial class MusicAccountsController
 
     public WriteableBitmap? AccountQrImage => accountQrImage;
     public bool HasAccountQr => accountQr is not null && accountQrImage is not null;
-    public bool CanBeginAccountQr => CanManageAccount && !accountSaveUncertain && selectedAccount?.Platform is "wy" or "tx" or "kg";
+    public bool CanBeginAccountQr => CanManageAccount && selectedAccount?.Platform is "wy" or "tx" or "kg";
     public bool CanCheckAccountQr => CanManageAccount && accountQr?.Platform == selectedAccount?.Platform;
     public bool CanCancelAccount => !stopping && (AccountBusy || HasAccountQr || HasAccountSms);
     public string AccountQrAccessibleName => (selectedAccount?.Name ?? "") + "登录二维码";
@@ -90,7 +90,7 @@ public sealed partial class MusicAccountsController
         if (!CanBeginAccountQr) return Task.CompletedTask;
         string platform = selectedAccount!.Platform;
         return ChangeAccountAsync(platform, "qr.begin",
-            token => application.BeginAccountQrAsync(platform, token),
+            token => application.Accounts.BeginQrAsync(platform, token),
             challenge => { ReadAccountQr(challenge, platform); return null; });
     }
 
@@ -99,7 +99,7 @@ public sealed partial class MusicAccountsController
         var challenge = accountQr;
         if (!CanCheckAccountQr || challenge is null) return Task.CompletedTask;
         return ChangeAccountAsync(challenge.Platform, "qr.poll",
-            inner => application.PollAccountQrAsync(challenge.Platform, challenge.Id, inner),
+            inner => application.Accounts.PollQrAsync(challenge.Platform, challenge.Id, inner),
             poll => PublishQrPoll(poll, challenge.Platform), token: token);
     }
 

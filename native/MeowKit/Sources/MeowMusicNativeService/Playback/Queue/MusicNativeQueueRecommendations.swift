@@ -1,8 +1,8 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 
-extension NativeMusicService: MusicQueueRecommendationServing {
+extension NativeMusicService {
     public func queueRecommendationSnapshot() async throws -> MusicQueueRecommendationSnapshot? {
         guard let item = try await prepareQueueRecommendations() else { return nil }
         item.currentEntryID = try read().queue.currentID ?? ""
@@ -38,7 +38,7 @@ extension NativeMusicService: MusicQueueRecommendationServing {
               queueRecommendationsAreCurrent(item, try read()) else { throw MusicServiceError.targetChanged }
         try item.lease?.authorization.check()
         if enabled {
-            try similarQueueTransaction([.playback]) { selectContinuationMode(&$0) }
+            try transaction([.playback]) { selectContinuationMode(&$0) }
         }
         item.continueEnabled = enabled
         emitSimilar()
@@ -70,7 +70,7 @@ extension NativeMusicService {
             guard item.lease?.authorization.isActive != false else { discardQueueRecommendations(); return nil }
             return item
         }
-        guard platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding,
+        guard platformEnabled("wy"), accounts != nil,
               similarMode.active == nil, fmPlayback == nil, d.queue.similar == nil,
               d.queue.source?.sourceType == "search-song",
               let seedEntryID = d.queue.source?.seedEntryId,
@@ -229,7 +229,7 @@ extension NativeMusicService {
         if let selectedIndex { try musicRequire(item.songs.indices.contains(selectedIndex)) }
         var live: [String: MusicRecommendationMetadata] = [:]
         let state = try lease.authorization.perform {
-            try similarQueueTransaction(selectedIndex == nil ? [.queue] : [.queue, .playback]) { draft in
+            try transaction(selectedIndex == nil ? [.queue] : [.queue, .playback]) { draft in
                 try musicRequire(queueRecommendationsAreCurrent(item, draft), .targetChanged)
                 let rows = try makeEntries(
                     item.songs,

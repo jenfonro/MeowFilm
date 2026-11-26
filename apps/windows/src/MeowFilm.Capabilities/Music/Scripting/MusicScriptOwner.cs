@@ -83,6 +83,17 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         this.runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
     }
 
+    internal event Action? SourcesChanged;
+
+    private void NotifySourcesChanged()
+    {
+        if (SourcesChanged is not { } handlers) return;
+        foreach (Action listener in handlers.GetInvocationList())
+        {
+            try { listener(); } catch { }
+        }
+    }
+
     private static TaskCompletionSource Complete() { var result = new TaskCompletionSource(); result.SetResult(); return result; }
 
     private string Code(Exception error) => error switch
@@ -148,7 +159,9 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         RunAdmittedAsync(async token =>
         {
             MusicRules.Require(MusicRules.IsValidId(url, null));
-            return ReadDetail(await ScriptAsync("sources.download", new { url }, token).ConfigureAwait(false));
+            NotifySourcesChanged();
+            try { return ReadDetail(await ScriptAsync("sources.download", new { url }, token).ConfigureAwait(false)); }
+            finally { NotifySourcesChanged(); }
         }, cancellationToken);
 
     public Task<MusicScriptSourceDetail> EditSourceAsync(string installationId, string? name = null, string? url = null,
@@ -166,29 +179,40 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         RunAdmittedAsync(async token =>
         {
             MusicRules.Require(MusicRules.IsValidId(installationId, 128));
-            return ReadDetail(await ScriptAsync("sources.update", new { installationId }, token).ConfigureAwait(false));
+            NotifySourcesChanged();
+            try { return ReadDetail(await ScriptAsync("sources.update", new { installationId }, token).ConfigureAwait(false)); }
+            finally { NotifySourcesChanged(); }
         }, cancellationToken);
 
     public Task<MusicScriptSourceDetail> RollbackSourceAsync(string installationId, CancellationToken cancellationToken = default) =>
         RunAdmittedAsync(async token =>
         {
             MusicRules.Require(MusicRules.IsValidId(installationId, 128));
-            return ReadDetail(await ScriptAsync("sources.rollback", new { installationId }, token).ConfigureAwait(false));
+            NotifySourcesChanged();
+            try { return ReadDetail(await ScriptAsync("sources.rollback", new { installationId }, token).ConfigureAwait(false)); }
+            finally { NotifySourcesChanged(); }
         }, cancellationToken);
 
     public Task<MusicScriptSourceDetail> SetSourceEnabledAsync(string installationId, bool enabled, CancellationToken cancellationToken = default) =>
         RunAdmittedAsync(async token =>
         {
             MusicRules.Require(MusicRules.IsValidId(installationId, 128));
-            return ReadDetail(await ScriptAsync(enabled ? "sources.enable" : "sources.disable", new { installationId }, token).ConfigureAwait(false));
+            NotifySourcesChanged();
+            try { return ReadDetail(await ScriptAsync(enabled ? "sources.enable" : "sources.disable", new { installationId }, token).ConfigureAwait(false)); }
+            finally { NotifySourcesChanged(); }
         }, cancellationToken);
 
     public Task<bool> RemoveSourceAsync(string installationId, CancellationToken cancellationToken = default) =>
         RunAdmittedAsync(async token =>
         {
             MusicRules.Require(MusicRules.IsValidId(installationId, 128));
-            var result = await ScriptAsync("sources.remove", new { installationId }, token).ConfigureAwait(false);
-            return result.TryGetProperty("removed", out var removed) && removed.ValueKind == JsonValueKind.True;
+            NotifySourcesChanged();
+            try
+            {
+                var result = await ScriptAsync("sources.remove", new { installationId }, token).ConfigureAwait(false);
+                return result.TryGetProperty("removed", out var removed) && removed.ValueKind == JsonValueKind.True;
+            }
+            finally { NotifySourcesChanged(); }
         }, cancellationToken);
 
     public Task<MusicScriptCheckResult> CheckSourceAsync(string installationId, CancellationToken cancellationToken = default) =>
@@ -209,11 +233,16 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         {
             string id = installationId ?? Guid.NewGuid().ToString("D");
             long sourceRevision = RuntimeSourceRevision.Next();
-            ScriptValue(await runtime.UploadSourceAsync("music", id, sourceRevision, source, basename, token)
-                .ConfigureAwait(false));
-            token.ThrowIfCancellationRequested();
-            return ReadDetail(await ScriptAsync(installationId is null ? "sources.add" : "sources.update",
-                new { installationId = id, sourceRevision }, token).ConfigureAwait(false));
+            NotifySourcesChanged();
+            try
+            {
+                ScriptValue(await runtime.UploadSourceAsync("music", id, sourceRevision, source, basename, token)
+                    .ConfigureAwait(false));
+                token.ThrowIfCancellationRequested();
+                return ReadDetail(await ScriptAsync(installationId is null ? "sources.add" : "sources.update",
+                    new { installationId = id, sourceRevision }, token).ConfigureAwait(false));
+            }
+            finally { NotifySourcesChanged(); }
         }, cancellationToken);
 
     /// <summary>One musicUrl request for one exact quality. Ordering, fallback and
@@ -233,7 +262,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
             string id = MusicRules.RequireId(installationId, 128);
             MusicRules.Require(NativeMusicSong.Platforms.Contains(platform));
             MusicRules.Require(MusicQualityPolicy.LxTypes.Contains(quality), "QUALITY_UNAVAILABLE");
-            var song = NativeMusicSong.Normalize(songRecord);
+            var song = songRecord;
             using var policy = await library.AcquireQualityAsync(external).ConfigureAwait(false);
             if (qualityPolicySignature is not null)
                 MusicRules.Require(MusicRules.RequireId(qualityPolicySignature, 64) == policy.Signature, "QUALITY_POLICY_CHANGED");
@@ -257,7 +286,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
                     ReadString(result, "platform") == platform &&
                     ReadString(result, "quality") == quality, "TARGET_CHANGED");
                 long generation = ReadInt64(result, "generation", 1);
-                string signature = MusicRules.CanonicalDigest(MusicNodeSongCodec.BuildObject(w =>
+                string signature = MusicNodeSongCodec.HashJsonObject(w =>
                 {
                     w.WriteString("contract", "music.quality.cache.v1");
                     w.WriteString("policy", policy.Signature);
@@ -271,7 +300,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
                     w.WriteString("songId", song.SongId);
                     if (song.Duration is { } dur) w.WriteNumber("duration", dur); else w.WriteNull("duration");
                     w.WriteString("quality", quality);
-                }));
+                });
                 if (qualityCacheSignature is not null)
                     MusicRules.Require(MusicRules.RequireId(qualityCacheSignature, 64) == signature, "QUALITY_CACHE_CHANGED");
                 string rawUrl = ReadString(result, "url");
@@ -341,7 +370,6 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         {
             string id = MusicRules.RequireId(installationId, 128);
             MusicRules.Require(NativeMusicSong.Platforms.Append("local").Contains(platform));
-            song = NativeMusicSong.Normalize(song);
             var setting = await library.GetOnlineSettingsAsync(external).ConfigureAwait(false);
             if (!setting.LyricsEnabled)
                 return new MusicLyricLookupResult("disabled", []);

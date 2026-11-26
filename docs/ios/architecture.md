@@ -58,9 +58,9 @@ App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/`
 | `MeowPlaybackVideo` | 显式注入共享协调器的视频解码／原生视图输出、候选内核选择与有界能力回退 | Contracts、Debug、Playback、MeowVideoKernel、MeowAetherKernel |
 | `MeowUI` | 纯 UIKit 中性主题、窗口渐变、页面生命周期、自绘页头、导航栈与转场、统一设置底座、三层弹层、搜索页与图片加载基建 | Debug、Storage |
 | `MeowRuntime` | runtime.http.v1 客户端、精确 JSON 值、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | Debug、JSON、Storage |
-| `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Debug、Storage、Playback、UI |
-| `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Audio、Contracts、Debug、JSON、Accounts、Storage、Runtime、UI |
-| `MeowMusicNativeService` | SQLite 强类型音乐持久化（`Persistence/{Core,Songs,Library,Queue,History,Discovery,Home}`）、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、Debug、JSON、Feature、Platform、Runtime、Storage |
+| `MeowMusicPlatform` | 音乐领域公开模型／错误契约、网易／QQ／酷狗协议、账号、HTTP 与文件缓存 | Audio、Contracts、Debug、JSON、Accounts、Storage、Runtime、UI |
+| `MeowMusicNativeService` | SQLite 强类型音乐持久化（`Persistence/{Core,Songs,Library,Queue,History,Discovery,Home}`）、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、Debug、JSON、Platform、Runtime、Storage |
+| `MeowMusicFeature` | 音乐界面、交互、视图模型与音乐外观策略（直接消费 `NativeMusicService`／`NativeMusicAccountService`／`NativeMusicScriptService` 具体类型，仅保留 `MusicUIRouting` 解耦 App 导航） | Contracts、Debug、Storage、Playback、UI、Platform、NativeService |
 | `MeowFilmFeature` | 影视页面、播放器偏好、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | Contracts、Debug、UI、Storage、Runtime |
 | `MeowNovelFeature` | 小说发现、搜索、书架／历史、CoreText 原生阅读器、书源与净化管理，见[小说](novel.md) | Debug、UI、Storage、Runtime |
 | `native/VideoKernel` | iOS 自有 Swift 主视频内核：FFmpeg 8.1.2 解复用、异步 VideoToolbox、`AVSampleBufferDisplayLayer`、SPSC 实时音频、按需字幕、轨道／章节与诊断 | 锁定静态 FFmpeg 8.1.2 与 Apple 系统媒体框架，无业务或系统媒体会话 owner |

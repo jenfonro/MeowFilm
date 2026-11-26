@@ -357,26 +357,21 @@ export class CatSession {
       task = new Promise((resolve, reject) => {
       let settled = false, stop = () => {};
       const cleanup = () => {
-        let failure;
         for (const [target, event, listener] of [
           [request, 'error', requestFailed], [request, 'close', requestClosed],
           [response, 'data', data], [response, 'error', responseFailed],
           [response, 'end', ended], [response, 'aborted', aborted],
           [response, 'close', responseClosed],
-        ]) {
-          try { target?.off(event, listener); } catch (error) { failure ??= error; }
-        }
-        return failure;
+        ]) target?.off(event, listener);
       };
       const finish = (success, value) => {
         if (settled) return;
         settled = true;
-        let cleanupFailure = cleanup();
-        try { stop(); } catch (error) { cleanupFailure ??= error; }
+        cleanup();
+        stop();
         chunks = [];
         length = 0;
-        if (success && cleanupFailure) reject(safeError(cleanupFailure, 'SERVICE_ERROR'));
-        else (success ? resolve : reject)(value);
+        (success ? resolve : reject)(value);
       };
       const requestFailed = error => finish(false,
         scope.signal.aborted ? scope.reason : safeError(error, 'NETWORK_ERROR'));
@@ -511,26 +506,21 @@ export class CatSession {
         const chunks = [];
         let length = 0, settled = false, release = () => {};
         const cleanup = () => {
-          let failure;
           for (const [target, event, listener] of [
             [client, 'response', responded], [client, 'error', clientFailed],
             [client, 'close', clientClosed], [response, 'data', data],
             [response, 'error', responseFailed], [response, 'aborted', aborted],
             [response, 'end', ended], [response, 'close', responseClosed],
-          ]) {
-            try { target?.off(event, listener); } catch (error) { failure ??= error; }
-          }
-          return failure;
+          ]) target?.off(event, listener);
         };
         const finish = (success, value) => {
           if (settled) return;
           settled = true;
-          let cleanupFailure = cleanup();
-          try { release(); } catch (error) { cleanupFailure ??= error; }
+          cleanup();
+          release();
           chunks.length = 0;
           length = 0;
-          if (success && cleanupFailure) reject(safeError(cleanupFailure, 'SERVICE_ERROR'));
-          else (success ? resolve : reject)(value);
+          (success ? resolve : reject)(value);
         };
         const clientFailed = error => finish(false, safeError(error, 'NETWORK_ERROR'));
         const clientClosed = () => {

@@ -87,6 +87,7 @@ public sealed record MusicQueueRecommendationsRequest(string Platform,
     string SeedSongId, int Offset = 0);
 public sealed record MusicAlbumRequest(string Platform, string Id, bool Refresh = false);
 public sealed record MusicArtistRequest(string Platform, string Id, bool Refresh = false);
+public sealed record MusicChartRequest(string Platform, string Kind, string Period = "daily", int? Year = null, bool Refresh = false);
 
 public sealed class MusicPlatformException : Exception
 {

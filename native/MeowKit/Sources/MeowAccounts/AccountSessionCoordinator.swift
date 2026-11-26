@@ -1,19 +1,13 @@
 import Foundation
 
-/// Product-owned, not a singleton. External account adapters perform network login and
-/// validation, then submit results with the original token. Never hand this whole object
-/// or its store to untrusted scripts; their capability adapter must bind an explicit scope.
-///
-/// Storage calls are synchronous and there is NO await between checking a token, changing
-/// credentials and publishing state. Actor serialization therefore prevents a delayed
-/// callback from committing across a newer login/logout/invalidation in this coordinator.
-/// This is not a cross-process transaction or remote-session revocation protocol.
+/// Product-owned account session coordinator backed by atomic SQLite credential persistence.
 public actor AccountSessionCoordinator {
     private struct Entry {
         var generation: UUID
         var phase: AccountPhase
         var failure: AccountFailure?
-        var credentialRevision: UUID?
+        var record: CredentialRecord?
+        var credentialRevision: UUID? { record?.revision }
     }
 
     private struct Observer: Sendable {
@@ -21,24 +15,26 @@ public actor AccountSessionCoordinator {
         let continuation: AsyncStream<AccountSnapshot>.Continuation
     }
 
-    private let store: any CredentialStore
+    private let store: MusicSQLiteCredentialStore
     private var entries: [AccountIdentity: Entry] = [:]
     private var observers: [UUID: Observer] = [:]
 
-    public init(store: any CredentialStore) {
+    public init(store: MusicSQLiteCredentialStore) {
         self.store = store
     }
 
-    /// Passive local read. A revoked/removal-pending record is never exportable.
-    /// Captures both in-memory ownership and exact persisted bytes for a later conditional replacement.
     public func prepareReplacement(for identity: AccountIdentity) throws -> AccountReplacementLease {
         let state = snapshot(for: identity)
         guard state.phase != .signingIn, state.phase != .removalPending else {
             throw AccountSessionError.invalidState
         }
         let record: CredentialRecord?
-        do { record = try store.read(for: identity) }
-        catch { throw AccountSessionError.storage(.sanitized(error)) }
+        if let entry = entries[identity], entry.phase == .signedIn || entry.phase == .requiresValidation {
+            record = entry.record
+        } else {
+            do { record = try store.read(for: identity) }
+            catch { throw AccountSessionError.storage(.sanitized(error)) }
+        }
         if state.phase == .invalidated || state.phase == .failed {
             guard record == nil else { throw AccountSessionError.invalidState }
         }
@@ -61,8 +57,7 @@ public actor AccountSessionCoordinator {
                 throw AccountSessionError.storage(.sanitized(error))
             }
             let generation = UUID()
-            entries[identity] = Entry(generation: generation, phase: .signedIn,
-                                      failure: nil, credentialRevision: replacement.revision)
+            entries[identity] = Entry(generation: generation, phase: .signedIn, failure: nil, record: replacement)
             publish(identity)
             return AccountSessionToken(identity: identity, generation: generation)
         }
@@ -85,8 +80,6 @@ public actor AccountSessionCoordinator {
                                phase: entry.phase, failure: entry.failure)
     }
 
-    /// Per-identity state stream, not a global event bus. Slow consumers see the latest
-    /// state (buffer 1), not a guaranteed audit trail. Cancellation releases the observer.
     public func updates(for identity: AccountIdentity) -> AsyncStream<AccountSnapshot> {
         let id = UUID()
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
@@ -98,8 +91,6 @@ public actor AccountSessionCoordinator {
         }
     }
 
-    /// An explicit new login revokes the old generation and removes its local credentials.
-    /// If deletion fails, no token is issued and state is removalPending (fail closed).
     public func beginLogin(for identity: AccountIdentity) throws -> AccountSessionToken {
         let generation = try clear(identity, phase: .signingIn, failure: nil)
         return AccountSessionToken(identity: identity, generation: generation)
@@ -115,17 +106,12 @@ public actor AccountSessionCoordinator {
             try store.write(record, for: token.identity)
         } catch {
             let failure = CredentialStoreError.sanitized(error)
-            // Even an injected backend that wrote before throwing must not leave an
-            // accepted session. Rotate first and attempt scoped cleanup once.
-            do {
-                try clear(token.identity, phase: .failed, failure: .storage(failure))
-            } catch {
-                // clear already published removalPending; preserve that stronger warning.
-            }
+            entries[token.identity] = Entry(generation: UUID(), phase: .failed, failure: .storage(failure), record: nil)
+            publish(token.identity)
             throw AccountSessionError.storage(failure)
         }
         entries[token.identity]?.phase = .signedIn
-        entries[token.identity]?.credentialRevision = record.revision
+        entries[token.identity]?.record = record
         entries[token.identity]?.failure = nil
         publish(token.identity)
         return snapshot(for: token.identity)
@@ -136,14 +122,11 @@ public actor AccountSessionCoordinator {
         _ token: AccountSessionToken, reason: AccountLoginFailure
     ) throws -> AccountSnapshot {
         try require(token, phases: [.signingIn])
-        entries[token.identity] = Entry(generation: UUID(), phase: .failed,
-                                        failure: .login(reason), credentialRevision: nil)
+        entries[token.identity] = Entry(generation: UUID(), phase: .failed, failure: .login(reason), record: nil)
         publish(token.identity)
         return snapshot(for: token.identity)
     }
 
-    /// Loading bytes does not establish platform validity. Only a fresh/retryable idle
-    /// scope can restore; this cannot overwrite an in-flight login or a live session.
     public func restore(for identity: AccountIdentity) throws -> AccountSessionToken? {
         if let entry = entries[identity] {
             guard entry.phase == .signedOut ||
@@ -152,15 +135,13 @@ public actor AccountSessionCoordinator {
             }
         }
         let generation = UUID()
-        entries[identity] = Entry(generation: generation, phase: .signedOut,
-                                  failure: nil, credentialRevision: nil)
+        entries[identity] = Entry(generation: generation, phase: .signedOut, failure: nil, record: nil)
         do {
             guard let record = try store.read(for: identity) else {
                 publish(identity)
                 return nil
             }
-            entries[identity] = Entry(generation: generation, phase: .requiresValidation,
-                                      failure: nil, credentialRevision: record.revision)
+            entries[identity] = Entry(generation: generation, phase: .requiresValidation, failure: nil, record: record)
             publish(identity)
             return AccountSessionToken(identity: identity, generation: generation)
         } catch {
@@ -174,35 +155,20 @@ public actor AccountSessionCoordinator {
 
     public func credential(for token: AccountSessionToken) throws -> AccountCredential {
         try require(token, phases: [.signedIn])
-        return try checkedRecord(token).credential
+        return try currentRecord(token).credential
     }
 
-    /// Capture before the adapter starts its asynchronous request. The returned bytes
-    /// and opaque revision belong to this exact token and phase, never a newer login.
-    /// Reading a requiresValidation credential here does not accept that session.
     public func credentialUpdateLease(
         for token: AccountSessionToken
     ) throws -> AccountCredentialUpdateLease {
         try require(token, phases: [.signedIn, .requiresValidation])
-        let record = try checkedRecord(token)
+        let record = try currentRecord(token)
         guard let entry = entries[token.identity] else {
             throw AccountSessionError.staleSession
         }
         return AccountCredentialUpdateLease(token: token, phase: entry.phase, record: record)
     }
 
-    /// A bounded, single-use conditional replacement, not a new login or remote request.
-    /// A successful update retains the session token and identity, but rotates the
-    /// persistence revision even when the replacement bytes happen to be unchanged,
-    /// unless preservingUnchangedRevision explicitly opts into a no-write verified
-    /// read. That opt-in still consumes the lease and performs every binding,
-    /// phase and observed-record check; changed credentials always rotate.
-    /// The adapter must assert same-account validation explicitly to promote a restored
-    /// session. External protection/epoch changes must synchronously revoke the lease.
-    ///
-    /// NO await in this operation: actor serialization and the lease's local permission
-    /// lock cover all checks, at most one write, confirmation read, and state publication.
-    /// This detects observed external changes but is not a store/cross-process CAS.
     @discardableResult
     public func commitCredentialUpdate(
         _ lease: AccountCredentialUpdateLease,
@@ -216,17 +182,13 @@ public actor AccountSessionCoordinator {
             guard entries[token.identity]?.phase == lease.phase else {
                 throw AccountSessionError.invalidState
             }
-            switch validation {
-            case .preserveSignedIn:
-                guard lease.phase == .signedIn else { throw AccountSessionError.invalidState }
-            case .verified:
-                break
+            if validation == .preserveSignedIn, lease.phase != .signedIn {
+                throw AccountSessionError.invalidState
             }
             guard entries[token.identity]?.credentialRevision == lease.revision.value else {
                 throw AccountSessionError.storage(.conflict)
             }
-            let observed = try checkedRecord(token)
-
+            let observed = try currentRecord(token)
             if preservingUnchangedRevision, credential == observed.credential {
                 entries[token.identity]?.phase = .signedIn
                 entries[token.identity]?.failure = nil
@@ -238,23 +200,18 @@ public actor AccountSessionCoordinator {
                 try store.write(replacement, for: token.identity)
             } catch {
                 let failure = CredentialStoreError.sanitized(error)
-                entries[token.identity] = Entry(generation: UUID(), phase: .failed,
-                                                 failure: .storage(failure), credentialRevision: nil)
+                entries[token.identity] = Entry(generation: UUID(), phase: .failed, failure: .storage(failure), record: nil)
                 publish(token.identity)
                 throw AccountSessionError.storage(failure)
             }
             entries[token.identity]?.phase = .signedIn
-            entries[token.identity]?.credentialRevision = replacement.revision
+            entries[token.identity]?.record = replacement
             entries[token.identity]?.failure = nil
             publish(token.identity)
             return snapshot(for: token.identity)
         }
     }
 
-    /// Immediate local user intent. It does not contact/revoke a remote platform session.
-    /// Repeating this method retries a removalPending deletion. Durable success is returned
-    /// only after deletion succeeds; old callbacks are rejected even if deletion fails.
-    /// Adapters handling asynchronous callbacks must use the token-bound overload below.
     @discardableResult
     public func logout(identity: AccountIdentity) throws -> AccountSnapshot {
         try clear(identity, phase: .signedOut, failure: nil)
@@ -276,30 +233,9 @@ public actor AccountSessionCoordinator {
         return snapshot(for: token.identity)
     }
 
-    private func checkedRecord(_ token: AccountSessionToken) throws -> CredentialRecord {
-        let record: CredentialRecord?
-        do {
-            record = try store.read(for: token.identity)
-        } catch {
-            let failure = CredentialStoreError.sanitized(error)
-            // A temporary database/permission error denies access, not an automatic
-            // network logout or a fallback to cached secret bytes.
-            entries[token.identity]?.failure = .storage(failure)
-            publish(token.identity)
-            throw AccountSessionError.storage(failure)
-        }
-        guard let record else {
-            revokeAccess(token.identity, failure: .credentialsMissing)
+    private func currentRecord(_ token: AccountSessionToken) throws -> CredentialRecord {
+        guard let record = entries[token.identity]?.record else {
             throw AccountSessionError.credentialsUnavailable
-        }
-        guard record.revision == entries[token.identity]?.credentialRevision else {
-            // Detect an unsupported external writer without deleting its replacement.
-            revokeAccess(token.identity, failure: .credentialsChanged)
-            throw AccountSessionError.credentialsUnavailable
-        }
-        if entries[token.identity]?.failure != nil {
-            entries[token.identity]?.failure = nil
-            publish(token.identity)
         }
         return record
     }
@@ -307,7 +243,7 @@ public actor AccountSessionCoordinator {
     @discardableResult
     private func clear(_ identity: AccountIdentity, phase: AccountPhase, failure: AccountFailure?) throws -> UUID {
         let generation = UUID()
-        entries[identity] = Entry(generation: generation, phase: phase, failure: failure, credentialRevision: nil)
+        entries[identity] = Entry(generation: generation, phase: phase, failure: failure, record: nil)
         do {
             try store.remove(for: identity)
         } catch {
@@ -315,18 +251,10 @@ public actor AccountSessionCoordinator {
             entries[identity]?.phase = .removalPending
             entries[identity]?.failure = .storage(failure)
             publish(identity)
-            // The caller must not report a completed durable logout. A process restart
-            // can still find the undeleted record; restore will require fresh validation.
             throw AccountSessionError.storage(failure)
         }
         publish(identity)
         return generation
-    }
-
-    private func revokeAccess(_ identity: AccountIdentity, failure: AccountFailure) {
-        entries[identity] = Entry(generation: UUID(), phase: .invalidated,
-                                  failure: failure, credentialRevision: nil)
-        publish(identity)
     }
 
     private func require(_ token: AccountSessionToken, phases: [AccountPhase]? = nil) throws {

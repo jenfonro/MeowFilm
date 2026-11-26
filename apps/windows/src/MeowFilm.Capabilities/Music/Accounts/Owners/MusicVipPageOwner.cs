@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+using System.Text.Json;
 using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Accounts;
@@ -7,19 +8,19 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
 {
     private const string Platform = "wy";
     private readonly MusicAccountOwner accounts;
-    private readonly MusicVipPageProtocol protocol;
+    private readonly MusicPlatformClient client;
     private readonly object gate = new();
     private Operation? active;
     private Task<MusicVipPageSnapshot>? read;
     private Task? preparation, disposal;
-    private long epoch, currentGeneration, signedGeneration, signAttemptedGeneration;
+    private long epoch, currentGeneration, signedGeneration;
     private MusicVipSignCardData? currentSign;
     private bool stopping, closed;
 
-    internal MusicVipPageOwner(MusicAccountOwner accounts, MusicVipPageProtocol protocol)
+    internal MusicVipPageOwner(MusicAccountOwner accounts, MusicPlatformClient client)
     {
         this.accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
-        this.protocol = protocol ?? throw new ArgumentNullException(nameof(protocol));
+        this.client = client ?? throw new ArgumentNullException(nameof(client));
         accounts.SessionChanged += AccountChanged;
     }
 
@@ -70,9 +71,6 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
             if (signedGeneration == expectedGeneration || currentSign?.SignedToday == true)
                 return Task.FromException<MusicVipSignReceipt>(
                     new MusicOperationException("ALREADY_SIGNED"));
-            if (signAttemptedGeneration == expectedGeneration)
-                return Task.FromException<MusicVipSignReceipt>(
-                    new MusicOperationException("COMMIT_UNKNOWN"));
             operation = active = new(++epoch, token);
         }
         return SignCoreAsync(operation, expectedGeneration);
@@ -105,7 +103,7 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
                 account.Value.Generation != network.Session.Generation)
                 throw new MusicOperationException("STALE_SESSION");
             Guard(operation, network.Session);
-            bool signConfirmed, signUnconfirmed;
+            bool signConfirmed;
             lock (gate)
             {
                 GuardLocked(operation);
@@ -114,20 +112,15 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
                 if (generation > 0)
                 {
                     if (network.Sign.Value?.SignedToday == true)
-                        signedGeneration = signAttemptedGeneration = generation;
-                    else
-                    {
-                        if (signedGeneration != generation) signedGeneration = 0;
-                        if (signAttemptedGeneration != generation) signAttemptedGeneration = 0;
-                    }
+                        signedGeneration = generation;
+                    else if (signedGeneration != generation)
+                        signedGeneration = 0;
                 }
                 signConfirmed = generation > 0 && signedGeneration == generation;
-                signUnconfirmed = generation > 0 && signAttemptedGeneration == generation &&
-                    signedGeneration != generation;
             }
             return new(generation, account.Value, network.Sign.Value, network.Banner.Value,
                 account.Error, network.Sign.Error, network.Banner.Error,
-                SignConfirmed: signConfirmed, SignUnconfirmed: signUnconfirmed);
+                SignConfirmed: signConfirmed);
         }
         finally { Finish(operation); }
     }
@@ -135,7 +128,6 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
     private async Task<MusicVipSignReceipt> SignCoreAsync(Operation operation, long expectedGeneration)
     {
         MusicPlatformSession? session = null;
-        bool admitted = false, acknowledged = false;
         try
         {
             session = await accounts.AcquireSettledAsync(Platform, operation.Token).ConfigureAwait(false);
@@ -143,44 +135,27 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
             if (session is null || session.Generation != expectedGeneration)
                 throw new MusicOperationException("STALE_SESSION");
             Guard(operation, session);
-            lock (gate)
-            {
-                GuardLocked(operation);
-                signAttemptedGeneration = expectedGeneration;
-                admitted = true;
-            }
-            // Once the remote mutation is admitted, route/caller cancellation cannot
-            // recall it. The transport still owns its fixed deadline and App disposal
-            // waits this operation, so an accepted sign is never retried after a lost ACK.
-            var receipt = await protocol.SignAsync(session, CancellationToken.None, () => GuardAccount(session)).ConfigureAwait(false);
+            var receipt = await client.RequestAsync(Platform, "vip.checkIn", new { }, session, CancellationToken.None, () => GuardAccount(session)).ConfigureAwait(false);
             var status = receipt.GetProperty("status").GetString();
             if (status != "confirmed")
             {
-                if (status is "notSent" or "rejected")
-                {
-                    lock (gate) if (signAttemptedGeneration == expectedGeneration) signAttemptedGeneration = 0;
-                    admitted = false;
-                    var code = receipt.GetProperty("errorCode").GetString() ?? "UPSTREAM_ERROR";
-                    if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH")
-                        accounts.Revoke(session);
-                    throw new MusicOperationException(code);
-                }
-                throw new MusicOperationException("COMMIT_UNKNOWN");
+                var code = receipt.TryGetProperty("errorCode", out var err) && err.ValueKind == JsonValueKind.String
+                    ? err.GetString() ?? "UPSTREAM_ERROR" : "UPSTREAM_ERROR";
+                if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH")
+                    accounts.Revoke(session);
+                throw new MusicOperationException(code);
             }
-            acknowledged = true;
             if (!ConfirmSign(operation, session, expectedGeneration))
-                return new(expectedGeneration, null); // A retired page cannot erase the confirmed remote receipt.
+                return new(expectedGeneration, null);
 
             MusicVipSignCardData? sign;
             if (operation.Token.IsCancellationRequested)
                 sign = null;
-            else try { sign = await protocol.ReadSignAsync(session, operation.Token, () => GuardAccount(session)).ConfigureAwait(false); }
+            else try { sign = await ReadSignCardAsync(session, operation.Token).ConfigureAwait(false); }
             catch (Exception error)
             {
                 if (Code(error) is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH")
                     accounts.Revoke(session);
-                // A failed readback cannot replace an acknowledged sign with
-                // failure/unknown, including after exact-account revocation.
                 sign = null;
             }
             PublishRefreshedSign(operation, session, sign);
@@ -193,10 +168,6 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
                 accounts.Revoke(session);
             throw new MusicOperationException(error.Code);
         }
-        catch (Exception) when (admitted && !acknowledged)
-        {
-            throw new MusicOperationException("COMMIT_UNKNOWN");
-        }
         finally { Finish(operation); }
     }
 
@@ -208,8 +179,7 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
             if (!ReferenceEquals(active, operation) ||
                 currentGeneration != expectedGeneration || !accounts.IsCurrent(session))
                 return false;
-            signedGeneration = signAttemptedGeneration = expectedGeneration;
-            // Page retirement fences optional readback, not the confirmed account receipt.
+            signedGeneration = expectedGeneration;
             return operation.Epoch == epoch;
         }
     }
@@ -250,8 +220,8 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
         }
         token.ThrowIfCancellationRequested();
         if (session is null) return new(null, new(null, ""), new(null, ""));
-        var sign = ReadBranchAsync(() => protocol.ReadSignAsync(session, token, () => GuardAccount(session)), token);
-        var banner = ReadBranchAsync(() => protocol.ReadBannerAsync(session, token, () => GuardAccount(session)), token);
+        var sign = ReadBranchAsync(() => ReadSignCardAsync(session, token), token);
+        var banner = ReadBranchAsync(() => ReadBannerCardAsync(session, token), token);
         await Task.WhenAll(sign, banner).ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
         if (!accounts.IsCurrent(session)) throw new MusicOperationException("STALE_SESSION");
@@ -264,6 +234,25 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
             throw new MusicOperationException("STALE_SESSION");
         }
         return new(session, signResult, bannerResult);
+    }
+
+    private async Task<MusicVipSignCardData?> ReadSignCardAsync(MusicPlatformSession session, CancellationToken token)
+    {
+        var value = await client.RequestAsync(Platform, "vip.signCard", new { }, session, token, () => GuardAccount(session)).ConfigureAwait(false);
+        if (value.ValueKind == JsonValueKind.Null) return null;
+        var days = value.GetProperty("days").EnumerateArray().Select(day => new MusicVipSignDay(
+            day.GetProperty("text").GetString()!, day.GetProperty("signed").GetBoolean(), day.GetProperty("cover").GetString()!,
+            day.GetProperty("signedAt").GetInt64(), day.GetProperty("today").GetBoolean())).ToArray();
+        return new(value.GetProperty("text").GetString()!, value.GetProperty("subText").GetString()!,
+            value.GetProperty("redPrize").GetBoolean(), value.GetProperty("redDay").GetBoolean(), value.GetProperty("buttonText").GetString()!,
+            value.GetProperty("background").GetString()!, days);
+    }
+
+    private async Task<MusicVipBannerData?> ReadBannerCardAsync(MusicPlatformSession session, CancellationToken token)
+    {
+        var value = await client.RequestAsync(Platform, "vip.banner", new { }, session, token, () => GuardAccount(session)).ConfigureAwait(false);
+        return value.ValueKind == JsonValueKind.Null ? null : new(value.GetProperty("image").GetString()!,
+            value.GetProperty("resourceType").GetString()!, value.GetProperty("resourceId").GetString()!);
     }
 
     private static async Task<Branch<T>> ReadBranchAsync<T>(
@@ -347,7 +336,7 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
         lock (gate)
         {
             epoch++;
-            currentGeneration = signedGeneration = signAttemptedGeneration = 0;
+            currentGeneration = signedGeneration = 0;
             currentSign = null;
             operation = active;
         }
@@ -378,7 +367,7 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
             closed = true;
             stopping = true;
             epoch++;
-            currentGeneration = signedGeneration = signAttemptedGeneration = 0;
+            currentGeneration = signedGeneration = 0;
             currentSign = null;
             active?.Cancel();
             accounts.SessionChanged -= AccountChanged;

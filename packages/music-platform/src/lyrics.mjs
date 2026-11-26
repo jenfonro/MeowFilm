@@ -8,15 +8,8 @@ import { entities } from './literal.mjs';
 import { decryptQRC } from './qrc.mjs';
 
 const timed = value => /\[(?:\d+:\d+(?:\.\d+)?|\d+,\d+)\]/.test(value);
-function inflate(bytes, padding = false) {
-  try {
-    const result = inflateSync(bytes, { info: true });
-    const tail = bytes.subarray(result.engine.bytesWritten);
-    // QRC encrypts complete eight-byte blocks with up to seven zero bytes.
-    // KRC/Kuwo have no block padding and consume exactly one zlib document.
-    if (tail.length && (!padding || tail.length > 7 || tail.some(value => value !== 0))) fail('INVALID_RESPONSE');
-    return result.buffer;
-  }
+function inflate(bytes) {
+  try { return inflateSync(bytes); }
   catch (error) { fail(error.code === 'ERR_BUFFER_TOO_LARGE' ? 'LIMIT' : 'INVALID_RESPONSE'); }
 }
 export async function lyricTracks(main, optional, signal) {
@@ -54,7 +47,7 @@ export async function qrcLyrics(encoded, signal) {
   if (timed(encoded) || encoded.trimStart().startsWith('<')) return lyricXML(encoded);
   encoded = encoded.replace(/\s/g, '');
   if (encoded.length % 2 || !/^[\da-f]+$/i.test(encoded)) fail('INVALID_RESPONSE');
-  return lyricXML(utf8(inflate(await decryptQRC(Buffer.from(encoded, 'hex'), signal), true)));
+  return lyricXML(utf8(inflate(await decryptQRC(Buffer.from(encoded, 'hex'), signal))));
 }
 export function krcLyrics(encoded) {
   const bytes = base64(encoded);
@@ -69,19 +62,18 @@ export function krcLyrics(encoded) {
     const meta = /^\[language:([^\]]+)\]$/.exec(row);
     if (meta) { languages.push(meta[1]); continue; }
     const match = /^\[(\d+),(\d+)\](.*)$/.exec(row);
-    if (!match) { if (/^\[\d+,/.test(row)) fail('INVALID_RESPONSE'); continue; }
+    if (!match) continue;
     const start = integer(match[1]), duration = integer(match[2]), body = match[3];
     integer(start + duration);
     const words = [...body.matchAll(/<(\d+),(\d+),(\d+)>(.*?)(?=<\d+,\d+,\d+>|$)/g)];
-    if (words.length ? words[0].index !== 0 : /<\d+,/.test(body)) fail('INVALID_RESPONSE');
-    const converted = words.map(word => {
+    const validWords = words.length > 0 && words[0].index === 0;
+    const converted = validWords ? words.map(word => {
       const at = integer(start + integer(word[1])), length = integer(word[2]);
       integer(at + length);
-      if (/\(\d+,\d+,\d+\)|<\d+,/.test(word[4])) fail('INVALID_RESPONSE');
       return `(${at},${length},${word[3]})${word[4]}`;
-    }).join('');
-    lines.push({ start, plain: words.length ? words.map(word => word[4]).join('') : body,
-      value: `[${start},${duration}]` + (words.length ? converted : body) });
+    }).join('') : body;
+    lines.push({ start, plain: validWords ? words.map(word => word[4]).join('') : body,
+      value: `[${start},${duration}]` + converted });
   }
   const prefix = offsets.length ? `[offset:${offsets[0]}]\n` : '';
   let translation = '';
@@ -112,10 +104,7 @@ function integer(value) {
   if (!Number.isSafeInteger(result)) fail('INVALID_RESPONSE');
   return result;
 }
-function literal(value) {
-  if (/\0|\(\d+,\d+(?:,\d+)?\)|<-?\d+,|\[\d+:\d+|\[offset:/i.test(value)) fail('INVALID_RESPONSE');
-  return value;
-}
+const literal = value => value.replaceAll('\0', '');
 export function kuwoLyrics(bytes) {
   const split = bytes.indexOf(Buffer.from('\r\n\r\n'));
   if (bytes.subarray(0, 10).toString('ascii').toLowerCase() !== 'tp=content' || split < 0) fail('INVALID_RESPONSE');
@@ -123,23 +112,22 @@ export function kuwoLyrics(bytes) {
   const key = Buffer.from('yeelion');
   for (let index = 0; index < encrypted.length; index++) encrypted[index] ^= key[index % key.length];
   const value = utf8(encrypted), lines = [], translations = [], seen = new Set();
-  let factor = 1, factor2 = 1, offset = '', hasFactor = false;
+  let factor = 1, factor2 = 1, offset = '';
   for (const raw of value.replace(/^\uFEFF/, '').split(/\r\n?|\n/)) {
     const row = raw.trim();
     const codec = /^\[kuwo:([0-7]+)\]$/.exec(row);
     if (codec) {
-      const number = integer(Number.parseInt(codec[1], 8)); factor = Math.floor(number / 10); factor2 = number % 10;
-      if (!factor || !factor2 || hasFactor) fail('INVALID_RESPONSE');
-      hasFactor = true;
-    } else if (/^\[kuwo:/i.test(row)) fail('INVALID_RESPONSE');
-    else if (/^\[offset:/i.test(row)) {
-      const match = /^\[offset:([+-]?\d+)\]$/i.exec(row);
-      if (offset || !match) fail('INVALID_RESPONSE');
-      offset = `[offset:${integer(match[1])}]\n`;
+      const number = integer(Number.parseInt(codec[1], 8)), f1 = Math.floor(number / 10), f2 = number % 10;
+      if (f1 && f2) { factor = f1; factor2 = f2; }
+      continue;
+    }
+    const offsetMatch = /^\[offset:([+-]?\d+)\]$/i.exec(row);
+    if (offsetMatch) {
+      if (!offset) offset = `[offset:${integer(offsetMatch[1])}]\n`;
+      continue;
     }
     const match = /^\[(\d+):(\d+(?:\.\d+)?)\](.*)$/.exec(row);
     if (!match) continue;
-    if (Number(match[2]) >= 60) fail('INVALID_RESPONSE');
     const at = integer(integer(match[1]) * 60000 + Math.round(Number(match[2]) * 1000));
     if (seen.has(at)) {
       if (lines.length < 2) continue;
@@ -150,8 +138,7 @@ export function kuwoLyrics(bytes) {
   }
   const converted = lines.map(line => {
     const markers = [...line.text.matchAll(/<(-?\d+),(-?\d+)(?:,-?\d+)?>/g)];
-    if (!markers.length) return stamp(line.at) + literal(entities(line.text));
-    if (markers[0].index !== 0) fail('INVALID_RESPONSE');
+    if (!markers.length || markers[0].index !== 0) return stamp(line.at) + literal(entities(line.text));
     const words = markers.map((match, index) => {
       const a = integer(match[1]), b = integer(match[2]);
       return { start: integer(Math.floor(Math.abs(integer(a + b)) / (factor * 2))),
@@ -194,32 +181,21 @@ export async function miguLyrics(bytes, signal) {
   values.forEach((value, index) => buffer.writeBigInt64LE(value, index * 8));
   let end = buffer.length;
   while (end && buffer.readUInt16LE(end - 2) === 0) end -= 2;
-  if (end % 2 !== 0) fail('INVALID_RESPONSE');
-  for (let offset = 0; offset < end; offset += 2) {
-    const unit = buffer.readUInt16LE(offset);
-    if (unit >= 0xd800 && unit <= 0xdbff) {
-      offset += 2;
-      if (offset >= end) fail('INVALID_RESPONSE');
-      const low = buffer.readUInt16LE(offset);
-      if (low < 0xdc00 || low > 0xdfff) fail('INVALID_RESPONSE');
-    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
-      fail('INVALID_RESPONSE');
-    }
-  }
   const value = buffer.subarray(0, end).toString('utf16le');
   if (!value || value.includes('\0')) fail('INVALID_RESPONSE');
   const lines = value.replace(/^\uFEFF/, '').split(/\r\n?|\n/).map(raw => {
     const row = raw.trim();
     const head = /^\[(\d+),(\d+)\](.*)$/.exec(row);
-    if (!head) { if (/^\[\d+,/.test(row)) fail('INVALID_RESPONSE'); return ''; }
+    if (!head) return '';
     const start = integer(head[1]), duration = integer(head[2]), limit = integer(start + duration), body = head[3];
     const words = [...body.matchAll(/\((\d+),(\d+)\)/g)];
-    if (!words.length) return `[${start},${duration}]` + literal(body);
-    if (words.at(-1).index + words.at(-1)[0].length !== body.length) fail('INVALID_RESPONSE');
+    if (!words.length || words.at(-1).index + words.at(-1)[0].length !== body.length) {
+      return `[${start},${duration}]` + literal(body);
+    }
     let from = 0, previous = start;
     return `[${start},${duration}]` + words.map(word => {
-      const at = integer(word[1]), length = integer(word[2]);
-      if (at < previous || integer(at + length) > limit) fail('INVALID_RESPONSE');
+      const at = Math.max(previous, integer(word[1]));
+      const length = Math.max(0, Math.min(integer(word[2]), limit - at));
       const text = literal(body.slice(from, word.index));
       from = word.index + word[0].length; previous = at;
       return `(${at},${length},0)` + text;

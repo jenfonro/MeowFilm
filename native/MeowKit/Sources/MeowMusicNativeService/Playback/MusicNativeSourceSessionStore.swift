@@ -1,5 +1,5 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 /// Dedicated actor owning the active source-inspection session and bounded
 /// resolved-source LRU cache off NativeMusicService's main transaction mailbox.

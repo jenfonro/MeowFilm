@@ -11,95 +11,98 @@ extension MusicViewModel {
         let values = try await requireService().tracks(in: collection); try check(epoch); return values
     }
 
-    // Page admissions are captured synchronously by MusicCollectionViewModel.
-    // Keep the original public collection APIs for non-page callers.
     func observeCollectionPage(_ page: MusicCollectionViewModel, id: UUID) {
         collectionConsumers[id] = WeakMusicCollectionConsumer(page)
     }
     func removeCollectionPage(id: UUID) { collectionConsumers.removeValue(forKey: id) }
-    func notifyCollectionPages(_ change: MusicCollectionOwnerChange, origin: UUID? = nil) {
+    func notifyCollectionPagesClosed() {
         collectionConsumers = collectionConsumers.filter { $0.value.value != nil }
-        for observer in Array(collectionConsumers.values) { observer.value?.ownerChanged(change, origin: origin) }
+        for observer in Array(collectionConsumers.values) { observer.value?.ownerClosed() }
     }
     func publishCollections(_ values: [MusicCollection], origin: UUID? = nil) {
         collectionCatalogueID = UUID()
-        libraryState.collections = values; notifyCollectionPages(.catalogue(values), origin: origin)
+        libraryState.collections = values
+        collectionConsumers = collectionConsumers.filter { $0.value.value != nil }
+        for observer in Array(collectionConsumers.values) { observer.value?.catalogueChanged(values, origin: origin) }
     }
-    func readCollectionPage(id: String, binding: MusicCollectionPageBinding) async throws -> MusicCollectionPageSnapshot? {
-        try binding.check(self)
+    func readCollectionPage(id: String, origin: UUID) async throws -> MusicCollectionPageSnapshot? {
         let epoch = try enter()
         let service = try requireService()
         if let current = collections.first(where: { $0.id.utf8.elementsEqual(id.utf8) }) {
             do {
                 let tracks = try await service.tracks(in: current)
-                try check(epoch); try binding.check(self)
+                try check(epoch)
                 return .init(collection: current, tracks: tracks)
             } catch {
-                try check(epoch); try binding.check(self)
+                try check(epoch)
                 guard [.notFound, .staleRevision].contains(MusicServiceError.sanitized(error)) else { throw error }
             }
         }
         let catalogueID = collectionCatalogueID
         let values = try await service.collections()
-        try check(epoch); try binding.check(self)
+        try check(epoch)
         guard let collection = values.first(where: { $0.id.utf8.elementsEqual(id.utf8) }) else {
-            if collectionCatalogueID == catalogueID { publishCollections(values, origin: binding.id) }
+            if collectionCatalogueID == catalogueID { publishCollections(values, origin: origin) }
             return nil
         }
         let tracks = try await service.tracks(in: collection)
-        try check(epoch); try binding.check(self)
-        if collectionCatalogueID == catalogueID { publishCollections(values, origin: binding.id) }
+        try check(epoch)
+        if collectionCatalogueID == catalogueID { publishCollections(values, origin: origin) }
         return .init(collection: collection, tracks: tracks)
     }
-    func editCollectionPage(_ ticket: MusicCollectionEditTicket, name: String?,
+    func editCollectionPage(_ collection: MusicCollection, name: String?,
                             refs: [MusicReference]?, order: [String]?) async throws {
-        try ticket.check(self)
         let epoch = try enter()
-        // Do not let an earlier root load overwrite the post-edit catalogue.
         loadID = UUID(); libraryState.isLoading = false
         let service = try requireService()
-        let changed = try await service.editPlaylist(ticket.collection, name: name, refs: refs, order: order)
-        try check(epoch); try ticket.check(self)
-        guard changed.id.utf8.elementsEqual(ticket.collection.id.utf8),
-              changed.revision > ticket.collection.revision else { throw MusicServiceError.invalidResponse }
+        _ = try await service.editPlaylist(collection, name: name, refs: refs, order: order)
+        try check(epoch)
         let values = try await service.collections()
-        try check(epoch); try ticket.check(self); publishCollections(values)
+        try check(epoch); publishCollections(values)
     }
-    func readCollectionReferences(_ collection: MusicCollection, binding: MusicCollectionPageBinding) async throws -> [MusicReference] {
-        try binding.check(self)
+    func readCollectionReferences(_ collection: MusicCollection) async throws -> [MusicReference] {
         let epoch = try enter()
-        guard let membership = try requireService() as? any MusicCollectionMembershipServing else { throw MusicServiceError.unsupported }
-        let refs = try await membership.collectionReferences(in: collection)
-        try check(epoch); try binding.check(self)
-        guard refs.count == collection.count, Set(refs).count == refs.count,
-              refs.allSatisfy({ $0.kind == .library && $0.occurrence == nil }) else { throw MusicServiceError.invalidResponse }
+        let refs = try await requireService().collectionReferences(in: collection)
+        try check(epoch)
         return refs
     }
-    func changeCollectionPageMembership(_ ticket: MusicCollectionEditTicket, adding: [MusicReference], removing: [MusicReference]) async throws {
-        try ticket.check(self)
+    func changeCollectionPageMembership(_ collection: MusicCollection, adding: [MusicReference], removing: [MusicReference]) async throws {
         let epoch = try enter()
-        guard let membership = try requireService() as? any MusicCollectionMembershipServing else { throw MusicServiceError.unsupported }
+        let service = try requireService()
         loadID = UUID(); libraryState.isLoading = false
-        let changed = try await membership.changeCollectionMembership(ticket.collection, adding: adding, removing: removing)
-        try check(epoch); try ticket.check(self)
-        guard changed.id.utf8.elementsEqual(ticket.collection.id.utf8),
-              (changed.revision == ticket.collection.revision || changed.revision == ticket.collection.revision + 1) else { throw MusicServiceError.invalidResponse }
-        let values = try await requireService().collections()
-        try check(epoch); try ticket.check(self); publishCollections(values)
-    }
-    func addCollectionPage(_ ticket: MusicCollectionEditTicket, ref: MusicReference, to target: MusicCollection) async throws {
-        try ticket.check(self)
-        let destination = MusicCollectionEditTicket(binding: ticket.binding, collection: target)
-        try await changeCollectionPageMembership(destination, adding: [ref], removing: [])
-        try ticket.check(self)
-    }
-    func queueCollectionPage(_ ticket: MusicCollectionEditTicket, change: MusicQueueChange, startPlayback: Bool) async throws {
-        try ticket.check(self)
-        await queueAction(change, startPlayback: startPlayback, collectionTicket: ticket)
-        try ticket.check(self)
+        _ = try await service.changeCollectionMembership(collection, adding: adding, removing: removing)
+        try check(epoch)
+        let values = try await service.collections()
+        try check(epoch); publishCollections(values)
     }
 
-    func refreshQueue(_ service: any MusicServing, epoch: UUID, selection: UUID? = nil) async throws {
+    public func saveNetworkPlaylist(_ collection: MusicPublicBrowseCollection) async throws {
+        let epoch = try enter()
+        let service = try requireService()
+        let intent = MusicQueueAuthorization()
+        defer { intent.revoke() }
+        _ = try await withTaskCancellationHandler {
+            try await service.saveNetworkPlaylist(collection, intent: intent)
+        } onCancel: { intent.revoke() }
+        try check(epoch); try intent.check()
+        let values = try await service.collections()
+        try check(epoch); publishCollections(values)
+    }
+
+    public func removeNetworkPlaylist(_ collection: MusicCollection) async {
+        await updateLibrary(operation: "取消收藏歌单") {
+            let service = try self.requireService()
+            let intent = MusicQueueAuthorization()
+            defer { intent.revoke() }
+            try await withTaskCancellationHandler {
+                try await service.removeNetworkPlaylist(collection, intent: intent)
+            } onCancel: { intent.revoke() }
+            try intent.check()
+            return try await service.collections()
+        }
+    }
+
+    func refreshQueue(_ service: NativeMusicService, epoch: UUID, selection: UUID? = nil) async throws {
         let snapshot = try await service.queue(); try check(epoch)
         if let selection, selection != selectionID { throw MusicServiceError.staleResult }
         guard snapshot.revision == state.revision, snapshot.currentId == state.currentId else { throw MusicServiceError.staleRevision }
@@ -108,9 +111,8 @@ extension MusicViewModel {
         if queue.isEmpty { notices.queueNotice = nil }
     }
     func queueAction(_ change: MusicQueueChange, startPlayback: Bool,
-                             collectionTicket: MusicCollectionEditTicket? = nil,
-                             expectedQueueRevision: Int? = nil) async {
-        do { try collectionTicket?.check(self) } catch { return }
+                     collection: MusicCollection? = nil,
+                     expectedQueueRevision: Int? = nil) async {
         cancelRemoteQueuePreparation()
         cancelFMNavigation()
         let epoch: UUID
@@ -128,11 +130,11 @@ extension MusicViewModel {
             }
         }
         func checkRequest() throws {
-            try check(epoch); try collectionTicket?.check(self)
+            try check(epoch)
             guard navigationID == navigation, selectionID == token else { throw MusicServiceError.cancelled }
         }
         do {
-            await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
+            await service?.pauseSimilarNavigation()
             try checkRequest()
             await flushPlaybackFacts(); try checkRequest()
             let service = try requireService(), before = try await service.state()
@@ -149,9 +151,8 @@ extension MusicViewModel {
                 throw MusicServiceError.revisionConflict
             }
             let next: MusicPlaybackState
-            if let ticket = collectionTicket, case .replace(let refs, let index) = change,
-               let provider = service as? any MusicCollectionQueueServing {
-                next = try await provider.changeCollectionQueue(collection: ticket.collection, refs: refs,
+            if let collection, case .replace(let refs, let index) = change {
+                next = try await service.changeCollectionQueue(collection: collection, refs: refs,
                     index: index, expectedRevision: before.revision)
             } else { next = try await service.changeQueue(change, expectedRevision: before.revision) }
             try checkRequest()
@@ -166,7 +167,6 @@ extension MusicViewModel {
             if startPlayback { await prepareCurrent() }
         } catch {
             guard lifecycle == epoch, navigationID == navigation, selectionID == token else { return }
-            if let collectionTicket, !collectionTicket.binding.matches(self) { return }
             report(error, epoch: epoch, operation: "更新播放队列", kind: startPlayback ? .playback : .queue)
         }
     }

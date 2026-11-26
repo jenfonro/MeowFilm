@@ -18,10 +18,10 @@ final class MusicSourcePlaybackCoordinator {
     var sourceIntent = MusicSourceIntent.automatic
     var sourceCommittedSettingsRevision: Int?
     nonisolated(unsafe) var pendingSourceSelection: (id: UUID, intent: MusicSourceIntent, lifetime: MusicQueueAuthorization)?
-    var pendingSourceFailure: (id: UUID, fact: MusicPlaybackFact, invalidDuration: Bool)?
+    var pendingSourceFailure: (id: UUID, fact: MusicPlaybackFact)?
     // Synchronous native commit can publish a failure before returning. Defer
     // its recovery until the successful commit publishes the new intent.
-    var sourceCommit: (attemptID: String, failure: MusicPlaybackFact?, invalidDuration: Bool)?
+    var sourceCommit: (attemptID: String, failure: MusicPlaybackFact?)?
     var sourceRenewed = Set<String>()
     var sourceRecoveryID = UUID()
     nonisolated(unsafe) var sourceRecoveryTask: Task<Void, Never>?

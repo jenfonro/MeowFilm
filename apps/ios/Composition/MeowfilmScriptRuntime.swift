@@ -8,7 +8,7 @@ import MeowRuntime
 /// merely starting the host does not execute music scripts.
 enum MeowfilmScriptRuntime {
     static func launcher(dataRoot: URL, settings: RuntimeSettingsAccess,
-                         debugHandshake: DebugNodeHandshake? = nil) -> any RuntimeLaunching {
+                         debugHandshake: DebugNodeHandshake? = nil) -> RuntimeEmbeddedLauncher {
         RuntimeEmbeddedLauncher(
             payload: {
                 guard let resources = Bundle.main.resourceURL else { throw RuntimeLaunchError.payloadUnavailable }

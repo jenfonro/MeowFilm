@@ -90,23 +90,8 @@ export function createMetadataCache({ dataRoot, cache, owner, normalizeError, de
     const work = (async () => {
       try {
         const saved = await storage.read(key);
-        if (!saved) return undefined;
+        if (!saved || !object(saved.components)) return undefined;
         const state = { ...saved, request: canonicalMetadataRequest(request) };
-        // These are the fields consumed by metadata policy, not a separate
-        // format/version probe. An unusable decoded object is simply a miss.
-        requireValue(object(state.components) &&
-          Object.values(state.components).every(row =>
-            object(row) && ['ready', 'empty', 'missing', 'failed'].includes(row.status) &&
-            (row.fetchedAt === undefined ? ['missing', 'failed'].includes(row.status)
-              : Number.isFinite(row.fetchedAt) && Number.isFinite(row.expiresAt))));
-        decodeValue(request.provider, request.path, state.value, 'partial');
-        if (state.summaryValue !== undefined) decodeValue(request.provider, request.path, state.summaryValue, 'partial');
-        const available = Object.entries(state.components)
-          .filter(([, row]) => ['ready', 'empty'].includes(row.status)).map(([name]) => name);
-        // Decode claimed components through the same receipt rules as an
-        // upstream response; persisted readiness cannot replace their bodies.
-        const decoded = mergeMetadata(undefined, request, state.value, available, Date.now(), 'complete');
-        requireValue(available.every(name => ['ready', 'empty'].includes(decoded.components[name]?.status)));
         if (!accepting(request.provider, epoch)) return undefined;
         // A producer/seed may have completed while the read was in flight.
         const memory = readMemory(request);

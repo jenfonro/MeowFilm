@@ -52,7 +52,6 @@ public final class MusicPlayerViewController: MusicPageViewController {
         playerView.onMore = { [weak self] in self?.showMore() }
         playerView.onFMSettings = { [weak self] in self?.openFMSettings() }
         playerView.onSources = { [weak self] in self?.requestSources() }
-        observe(content.accessChanges) { [weak self] in self?.reconcileAccess() }
     }
 
     public override func pageDidBecomeActive() { reconcileAccess() }

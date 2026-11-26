@@ -38,28 +38,6 @@ public sealed partial class MusicSettingsController : MusicController
 
     internal MusicSettingsController(MusicRuntimeContext ctx) : base(ctx) { }
 
-    // Explicit cross-domain lifecycle & state events (wired at MusicCapability composition root).
-    internal event Func<CancellationToken, Task>? PlatformSettingsActivating;
-    internal event Func<Task>? AccountTransferRetiring;
-    internal event Func<Task>? LibrarySyncDeactivating;
-    internal event Func<Task>? AccountDetailsDeactivating;
-    internal event Action<string>? FeedbackPlatformChanged;
-    internal event Action? CatalogSourceInvalidated;
-    internal event Action? DesktopLyricLayoutChanged;
-    internal event Action<bool>? OnlineLyricsEnabledChanged;
-    internal event Action? MetadataPolicyChanging;
-    internal event Func<Task>? MetadataPolicyApplied;
-    internal event Func<CancellationToken, Task>? MetadataArtworkRefreshRequested;
-    internal event Action? VolumeSynced;
-    internal event Action<string, bool>? QualityPolicyAccepted;
-    internal event Action? SourcesListUpdated;
-    internal event Action? PreloadInvalidated;
-    internal event Func<string?, Task>? SourceRevoking;
-    internal event Action<string, string, string>? SourceExclusionAdmitted;
-    internal event Action<string, string, string>? SourceExclusionAdded;
-    internal event Func<string, CancellationToken, Task>? SourceExclusionRemoved;
-    internal event Func<Task>? SearchPolicyChanging;
-
     internal static void ReconcilePriorityRows<T>(ObservableCollection<T> destination, IReadOnlyList<string> keys,
         Func<T, string> keyOf, Func<string, T> create, Action<T, string> apply)
     {
@@ -119,15 +97,11 @@ public sealed partial class MusicSettingsController : MusicController
     internal async Task ReadDeviceSettings(CancellationToken token)
     {
         long edit = volumeEdit;
-        var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.DeviceSettings,
-            ct => application.GetDeviceSettingsAsync(ct), token);
+        var settings = await application.Library.GetDeviceSettingsAsync(token);
         token.ThrowIfCancellationRequested();
         AcceptDeviceSettings(settings);
         if (edit == volumeEdit && (playback.OwnerId is null || playback.OwnerId == Id))
-        {
             playback.Volume = savedVolume;
-            VolumeSynced?.Invoke();
-        }
     }
 
     public Task SaveVolumeAsync() => RunAsync(() => SaveVolumeCore(lifetime.Token));
@@ -135,8 +109,7 @@ public sealed partial class MusicSettingsController : MusicController
     internal async Task SaveVolumeCore(CancellationToken token)
     {
         if (!deviceSettingsLoaded || volumeEdit == 0 || savedVolume == playback.Volume) return;
-        AcceptDeviceSettings(await RunSettingReceiptAsync(MusicSettingReceiptKeys.DeviceSettings,
-            ct => application.SaveDeviceSettingsAsync(deviceSettingsRevision, playback.Volume, ct), token));
+        AcceptDeviceSettings(await application.Library.SaveDeviceSettingsAsync(deviceSettingsRevision, playback.Volume, token));
     }
 
     public Task ActivateSettingsAsync() => SetSettingsActive(true);
@@ -213,8 +186,7 @@ public sealed partial class MusicSettingsController : MusicController
     {
         token.ThrowIfCancellationRequested();
         var searchHistory = ActivateSearchHistoryAsync(SearchHistorySurface.Settings);
-        if (PlatformSettingsActivating is { } activatePlatforms)
-            await activatePlatforms(token);
+        await ctx.ActivatePlatformSettingsAsync(token);
         token.ThrowIfCancellationRequested();
 
         try { await ReadSearchPreferences(token); }
@@ -245,13 +217,13 @@ public sealed partial class MusicSettingsController : MusicController
         Exception? failure = null;
         foreach (var retire in new Func<Task>[]
         {
-            () => AccountTransferRetiring?.Invoke() ?? Task.CompletedTask,
+            ctx.RetireAccountTransferAsync,
             () => DeactivateSearchHistoryAsync(SearchHistorySurface.Settings),
             () => metadataWork,
             () => searchPreferencesWork,
             () => qualityWork,
-            () => LibrarySyncDeactivating?.Invoke() ?? Task.CompletedTask,
-            () => AccountDetailsDeactivating?.Invoke() ?? Task.CompletedTask
+            ctx.DeactivatePlatformSyncAsync,
+            ctx.DeactivateAccountDetailsAsync
         })
         {
             try { await retire(); }

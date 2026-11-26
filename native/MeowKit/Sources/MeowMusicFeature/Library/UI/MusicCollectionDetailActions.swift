@@ -34,8 +34,7 @@ extension MusicCollectionViewController {
     func openDailyStyle() {
         guard canPresentPageAlert, let page = remotePage, canActRemotely(page),
               let source = page.remoteSource, source.dailyStyle != nil else { return }
-        let editor = MusicDailyStyleViewController(page: page, source: source,
-                                                  receipts: model.settingsReceipts, appearance: appearance)
+        let editor = MusicDailyStyleViewController(page: page, source: source, appearance: appearance)
         presentPageSheet(editor, prefersGrabberVisible: false)
     }
 
@@ -275,16 +274,12 @@ extension MusicCollectionViewController {
     }
 
     func saveRemoteCollection() {
-        guard let page = remotePage, let collection = page.networkSaveCollection,
-              let intent = page.makeActionIntent() else { return }
+        guard let page = remotePage, let collection = page.networkSaveCollection else { return }
+        let pageID = page.actionPageID
         presentPageConfirmation(title: "收藏歌单", confirmTitle: "收藏", onConfirm: { [weak self, weak page] in
-            guard let self, let page, page === self.remotePage else { return }
+            guard let self, let page, page === self.remotePage, page.actionPageID == pageID else { return }
             self.runPageTask {
-                await page.perform(
-                    intent: intent,
-                    operation: "收藏歌单",
-                    kind: .library
-                ) {
+                await page.perform(operation: "收藏歌单", kind: .library) {
                     try await self.model.saveNetworkPlaylist(collection)
                 }
             }
@@ -297,10 +292,10 @@ extension MusicCollectionViewController {
         kind: MusicRequestTrace.Operation = .playback,
         _ action: @escaping @MainActor () async throws -> Void
     ) {
-        guard page === remotePage, let intent = page.makeActionIntent() else { return }
+        guard page === remotePage else { return }
         runPageTask { [weak self, weak page] in
             guard let self, let page, page === self.remotePage else { return }
-            await page.perform(intent: intent, operation: operation, kind: kind, action)
+            await page.perform(operation: operation, kind: kind, action)
         }
     }
 
@@ -403,24 +398,17 @@ extension MusicCollectionViewController {
     }
 
     func rename() {
-        guard let page = localPage,
-              let ticket = page.requestRename(presentationID: page.presentationID) else { return }
+        guard let page = localPage, page.canRename, let collection = page.collection else { return }
+        let presentationID = page.presentationID
         view.endEditing(true)
         presentPageInputAlert(
             title: "重命名歌单",
-            fields: [PageAlertTextField(text: page.collection?.title)],
+            fields: [PageAlertTextField(text: collection.title)],
             confirmTitle: "保存",
             onConfirm: { [weak page] values in
                 let value = (values.first ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let page else { return }
-                guard !value.isEmpty else {
-                    page.cancelRename(ticket)
-                    return
-                }
-                page.rename(value, ticket: ticket)
-            },
-            onCancel: { [weak page] in
-                page?.cancelRename(ticket)
+                guard !value.isEmpty else { return }
+                page?.rename(value, collection: collection, presentationID: presentationID)
             }
         )
     }

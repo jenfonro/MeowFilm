@@ -1,6 +1,5 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
 import MeowRuntime
 
 /// Borrows the App's existing runtime. Account publication follows the native
@@ -83,7 +82,7 @@ public actor MusicPlatformClient {
                 "platform": .string(platform), "session": session ?? .null
             ]), onDispatch: { try authorization.perform { try authorize?() } })
             guard receipt[music: "published"].musicBool else {
-                throw MusicServiceError.commitUnconfirmed
+                throw MusicServiceError.upstreamFailed
             }
             try authorization.check()
             guard publicationOrder[platform] == order, !closed else { throw MusicServiceError.staleResult }
@@ -170,7 +169,7 @@ public actor MusicPlatformClient {
                 }
                 let status = dispatch.hasStarted ? "unknown" : "notSent"
                 return .object(["status": .string(status), "errorCode": .string(
-                    dispatch.hasStarted ? "COMMIT_UNKNOWN" : Self.error(error).rawValue)])
+                    dispatch.hasStarted ? "UPSTREAM_HTTP" : Self.error(error).rawValue)])
             }
             if let remote = error as? RuntimeHTTPError, case .remote(let code) = remote {
                 if code == "INVALID_CODE" {
@@ -182,13 +181,11 @@ public actor MusicPlatformClient {
                 if code == "ACCOUNT_SELECTION_REQUIRED" {
                     throw MusicSMSFailure(reason: .verificationRequired, detail: .accountSelectionRequired)
                 }
-                if code == "SMS_SEND_UNCONFIRMED" || operation == "sms.send" && code == "COMMIT_UNKNOWN" {
-                    throw MusicSMSFailure(reason: .commitUnconfirmed)
+                if code == "SMS_SEND_UNCONFIRMED" {
+                    throw MusicSMSFailure(reason: .upstreamFailed, retryAt: Date().addingTimeInterval(60))
                 }
             } else if operation == "sms.send", dispatch.hasStarted {
-                // The bridge lost a send receipt after dispatch. Only Node
-                // can prove an upstream rejection; a transport failure cannot.
-                throw MusicSMSFailure(reason: .commitUnconfirmed)
+                throw MusicSMSFailure(reason: .upstreamFailed, retryAt: Date().addingTimeInterval(60))
             }
             throw Self.error(error)
         }
@@ -290,7 +287,6 @@ public actor MusicPlatformClient {
                 case "QUALITY_UNAVAILABLE": return .qualityDisabled
                 case "FORBIDDEN": return .permissionDenied
                 case "TRIAL_ONLY": return .previewOnly
-                case "COMMIT_UNKNOWN": return .commitUnconfirmed
                 case "STORAGE_ERROR": return .storageFailed
                 case "STORAGE_CONFLICT": return .storageConflict
                 case "VERIFICATION_REQUIRED", "SIGNATURE_REQUIRED": return .verificationRequired

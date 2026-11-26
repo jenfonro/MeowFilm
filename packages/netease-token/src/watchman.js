@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Watchman Web protocol: NeteaseCloudMusicApiEnhanced v4.41.1 register_checktoken_v2 (MIT).
 import { JSDOM, VirtualConsole } from 'jsdom';
+import http from 'node:http';
 import https from 'node:https';
 import { validToken } from './token.js';
 
@@ -9,11 +10,18 @@ const productNumber = 'YD00000558929251';
 const businessId = 'bd5d2f973ef74cd2a61325a412ae54d9';
 const failure = code => Object.assign(new Error(code), { code });
 
-// Use Node native HTTPS with a fixed 10-second budget and no redirect following.
-function downloadTool() {
+function downloadTool(target = toolURL, signal = AbortSignal.timeout(10_000), redirects = 0) {
   return new Promise((resolve, reject) => {
-    const request = https.get(toolURL, { signal: AbortSignal.timeout(10_000) }, response => {
+    const url = new URL(target);
+    const transport = url.protocol === 'http:' ? http : https;
+    const request = transport.get(url, { signal }, response => {
       response.on('error', reject);
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location && redirects < 5) {
+        const next = new URL(response.headers.location, url).href;
+        response.resume();
+        resolve(downloadTool(next, signal, redirects + 1));
+        return;
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         response.resume(); reject(failure('UPSTREAM_HTTP')); return;
       }

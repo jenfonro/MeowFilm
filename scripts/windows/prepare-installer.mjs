@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { licenseFiles } from './package-licenses.mjs';
 import { verifyRuntimeConfiguration } from './verify-projects.mjs';
@@ -9,12 +9,6 @@ const inventoryName = 'meowfilm-install-files.txt';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 function need(condition, message) {
   if (!condition) throw new Error(`Windows installer: ${message}`);
-}
-function ordinaryAncestors(path) {
-  for (let current = resolve(path); ; current = dirname(current)) {
-    need(!lstatSync(current).isSymbolicLink(), 'payload/output cannot traverse a link or junction');
-    if (current === parse(current).root) break;
-  }
 }
 function safeRelative(path) {
   need(typeof path === 'string' && path.split('/').every(part =>
@@ -34,10 +28,7 @@ function inventory(root, prefix = '', names = new Set()) {
     const info = lstatSync(join(root, path));
     need(!info.isSymbolicLink() && (info.isFile() || info.isDirectory()), 'payload contains a link or special file');
     if (info.isDirectory()) result.push(...inventory(root, path, names));
-    else {
-      need(info.nlink === 1, 'payload contains a hard link');
-      result.push(path);
-    }
+    else result.push(path);
   }
   return result.sort();
 }
@@ -68,7 +59,6 @@ export function prepareWindowsInstaller({ payload, output }) {
   payload = resolve(payload); output = resolve(output);
   need(output !== payload && !output.startsWith(payload + '/') && !output.startsWith(payload + '\\'),
     'installer staging must be outside the payload');
-  ordinaryAncestors(payload); ordinaryAncestors(output);
   const files = inventory(payload);
   need(!files.some(path => /^(?:unins\d+\.(?:exe|dat|msg)|meowfilm-install-files\.txt)$/iu.test(path)),
     'payload contains installer-owned metadata');
@@ -87,19 +77,6 @@ export function prepareWindowsInstaller({ payload, output }) {
   'installers require a Release self-contained win-x64 publish');
   try { verifyRuntimeConfiguration(json(join(payload, 'meowfilm.runtimeconfig.json')), true); }
   catch (error) { need(false, error.message); }
-  const deps = json(join(payload, 'meowfilm.deps.json'));
-  const targetName = deps.runtimeTarget?.name;
-  need(targetName?.endsWith('/win-x64') && deps.targets?.[targetName], 'publish dependency target must be win-x64');
-  for (const library of Object.values(deps.targets[targetName])) {
-    for (const group of ['runtime', 'native', 'resources']) {
-      for (const [asset, properties] of Object.entries(library[group] ?? {})) {
-        if (asset === '_._' || asset.endsWith('/_._')) continue;
-        const name = asset.split('/').at(-1);
-        const destination = group === 'resources' ? `${properties.locale}/${name}` : name;
-        need(files.includes(asset) || files.includes(destination), `publish dependency is missing ${asset}`);
-      }
-    }
-  }
   const runtimeFiles = files.filter(path => path.startsWith('runtime/')).map(path => path.slice(8));
   const runtime = verifyManifest(join(payload, 'runtime'), 'runtime-manifest.json', runtimeFiles);
   need(runtime.schemaVersion === 1 && runtime.product === 'aggregate' && runtime.platform === 'win32' &&

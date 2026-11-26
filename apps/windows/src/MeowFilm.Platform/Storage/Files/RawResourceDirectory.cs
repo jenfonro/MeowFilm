@@ -1,9 +1,8 @@
 using System.IO;
-using System.Security.Cryptography;
 
 namespace MeowFilm.Platform.Storage;
 
-/// <summary>Content-addressed local resource file directory with atomic staged writes.</summary>
+/// <summary>Local resource file directory with UUID naming and atomic staged writes.</summary>
 public sealed class RawResourceDirectory
 {
     private readonly string directory;
@@ -18,17 +17,15 @@ public sealed class RawResourceDirectory
 
     public string DirectoryPath => directory;
 
-    private string PathFor(string id)
-    {
-        if (id.Length != 64 || id.Any(c => c is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
-            throw new StorageException(StorageError.InvalidRequest);
-        return Path.Combine(directory, id + ".resource");
-    }
+    private static bool IsValidId(string id) =>
+        id.Length == 32 && id.AsSpan().IndexOfAnyExcept("0123456789abcdef") < 0;
 
-    /// <summary>Reads a committed resource file. Missing, empty, or size-mismatched files self-heal and return null.</summary>
+    private string PathFor(string id) => Path.Combine(directory, id + ".resource");
+
+    /// <summary>Reads a committed resource file. Missing, invalid, empty, or size-mismatched files self-heal and return null.</summary>
     public byte[]? Read(string id, int expectedBytes)
     {
-        if (expectedBytes <= 0) return null;
+        if (expectedBytes <= 0 || !IsValidId(id)) return null;
         var path = PathFor(id);
         if (!File.Exists(path)) return null;
         try
@@ -53,18 +50,14 @@ public sealed class RawResourceDirectory
         }
     }
 
-    /// <summary>Atomically stages and commits bytes under their SHA-256 content ID.</summary>
+    /// <summary>Atomically stages and commits bytes under a fresh UUID hex ID.</summary>
     public (string Id, bool Created) Write(byte[] bytes)
     {
         if (bytes.Length == 0) throw new StorageException(StorageError.InvalidRequest);
         Directory.CreateDirectory(directory);
-        var id = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var id = Guid.NewGuid().ToString("N");
         var target = PathFor(id);
-
-        if (TryVerifyExisting(target, bytes.Length))
-            return (id, false);
-
-        var stage = Path.Combine(directory, $".{id}.{Guid.NewGuid():N}.stage");
+        var stage = Path.Combine(directory, $".{id}.stage");
         try
         {
             using (var stream = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, useAsync: false))
@@ -82,7 +75,11 @@ public sealed class RawResourceDirectory
         }
     }
 
-    public void Delete(string id) => TryDeletePath(PathFor(id));
+    public void Delete(string id)
+    {
+        if (id.Length is 32 or 64 && id.AsSpan().IndexOfAnyExcept("0123456789abcdef") < 0)
+            TryDeletePath(PathFor(id));
+    }
 
     /// <summary>Deletes unreferenced resource files and any stray or interrupted stage files.</summary>
     public void RemoveUnreferenced(IReadOnlySet<string> ids, bool throwOnError = false)
@@ -93,7 +90,7 @@ public sealed class RawResourceDirectory
             var name = Path.GetFileName(entry);
             if (IsValidResourceName(name))
             {
-                var id = name[..64];
+                var id = name[..32];
                 if (!ids.Contains(id))
                 {
                     if (throwOnError) DeletePathStrict(entry);
@@ -101,7 +98,6 @@ public sealed class RawResourceDirectory
                 }
                 continue;
             }
-            // Sweep interrupted .stage files or stray leftovers instead of failing recovery.
             if (throwOnError) DeleteEntryStrict(entry);
             else TryDeleteEntry(entry);
         }
@@ -135,20 +131,9 @@ public sealed class RawResourceDirectory
     }
 
     private static bool IsValidResourceName(string name) =>
-        name.Length == 73 &&
+        name.Length == 41 &&
         name.EndsWith(".resource", StringComparison.Ordinal) &&
-        name.AsSpan(0, 64).IndexOfAnyExcept("0123456789abcdef") < 0;
-
-    private static bool TryVerifyExisting(string path, int expectedLength)
-    {
-        try
-        {
-            var info = new FileInfo(path);
-            return info.Exists && info.Length > 0 && info.Length == expectedLength;
-        }
-        catch (IOException) { return false; }
-        catch (UnauthorizedAccessException) { return false; }
-    }
+        name.AsSpan(0, 32).IndexOfAnyExcept("0123456789abcdef") < 0;
 
     private static void DeletePathStrict(string path)
     {

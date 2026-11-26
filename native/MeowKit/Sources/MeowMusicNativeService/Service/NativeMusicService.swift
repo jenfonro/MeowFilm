@@ -1,8 +1,7 @@
 import Foundation
 import MeowContracts
 import MeowDebug
-import MeowMusicFeature
-import MeowMusicPlatform
+@_exported import MeowMusicPlatform
 
 enum MusicDomainSection: Hashable, Sendable {
     case library, queue, history, playback, catalogSource
@@ -16,9 +15,9 @@ struct MusicDomainState: Sendable {
     var history: MusicHistoryState
     var catalogSource: MusicCatalogSourceState
     var persistedSections: Set<MusicDomainSection>
-    let songRows: any MusicNativeLibraryReading
+    let songRows: MusicNativeLibraryDatabase
 
-    init(snapshot: MusicLibrarySnapshot, runID: String, songs: any MusicNativeLibraryReading) {
+    init(snapshot: MusicLibrarySnapshot, runID: String, songs: MusicNativeLibraryDatabase) {
         revision = snapshot.revision
         songRows = songs
         var persisted = Set<MusicDomainSection>()
@@ -108,80 +107,19 @@ struct MusicDomainState: Sendable {
         }
         return try referenceSongs(ids)
     }
-
-    func referencedSongIDs(in sections: Set<MusicDomainSection>) -> Set<String> {
-        var ids = Set<String>()
-        if sections.contains(.library) {
-            for collection in library.collections {
-                ids.formUnion(collection.order)
-                ids.formUnion(collection.intents.map(\.intentKey))
-                for binding in collection.bindings {
-                    ids.formUnion(binding.map.map(\.songID))
-                }
-            }
-        }
-        if sections.contains(.queue) {
-            ids.formUnion(queue.entries.map(\.songID))
-            if let similar = queue.similar {
-                if let ret = similar.returnQueue { ids.formUnion(ret.entries.map(\.songID)) }
-                if let seedID = similar.seedSongID { ids.insert(seedID) }
-                ids.formUnion(similar.batches.compactMap(\.basedOnSongID))
-            }
-        }
-        ids.remove("")
-        return ids
-    }
-
-    func requireRevision(_ section: MusicDomainSection) throws {
-        switch section {
-        case .library:
-            try musicRequire((0...musicMaxSafeInteger).contains(library.revision) &&
-                library.ownerID == "device" &&
-                (0...musicMaxSafeInteger).contains(library.libraryRevision), .corruptStorage)
-        case .queue:
-            try musicRequire((0...musicMaxSafeInteger).contains(queue.revision), .corruptStorage)
-        case .playback:
-            try musicRequire((0...musicMaxSafeInteger).contains(playback.revision), .corruptStorage)
-        case .catalogSource:
-            try musicRequire((0...musicMaxSafeInteger).contains(catalogSource.revision), .corruptStorage)
-        case .history:
-            return
-        }
-    }
-
-    func requireQueue(knownSongIDs: Set<String> = []) throws {
-        try musicRequire((0...musicMaxSafeInteger).contains(queue.revision) &&
-                         (0...musicMaxSafeInteger).contains(queue.serial), .corruptStorage)
-        let missingSongIDs = Set(queue.entries.map(\.songID)).subtracting(knownSongIDs)
-        let existingSongIDs = missingSongIDs.isEmpty ? Set<String>() : try songRows.containsSongs(ids: missingSongIDs)
-        var seen = Set<String>()
-        var serial = queue.serial
-        for entry in queue.entries {
-            try musicRequire(!entry.id.isEmpty && seen.insert(entry.id).inserted &&
-                (knownSongIDs.contains(entry.songID) || existingSongIDs.contains(entry.songID)), .corruptStorage)
-            if let number = Int(entry.id.dropFirst(6)) { serial = max(serial, number) }
-        }
-        try musicRequire(serial <= musicMaxSafeInteger && queue.serial >= serial &&
-            (queue.currentID == nil || seen.contains(queue.currentID!)), .corruptStorage)
-        try musicRequire(queue.priority.allSatisfy { seen.contains($0) && $0 != queue.currentID }, .corruptStorage)
-        try musicRequire(queue.history.allSatisfy { seen.contains($0) }, .corruptStorage)
-        try musicRequire(queue.failed.allSatisfy { seen.contains($0) }, .corruptStorage)
-    }
 }
 
 /// Product-lifetime business owner. It is passive and locked at construction.
 /// It borrows the application's platform client; it never owns a runtime session.
-public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
-    nonisolated let access = MusicNativeAccess()
+public actor NativeMusicService {
     /// Product-scoped request policy, not an identity or persistence schema.
     /// Omission preserves the existing five-platform behavior. Disabling a
     /// platform does not rewrite or hide previously stored songs and sources.
     public nonisolated let enabledPlatforms: Set<MusicPublicBrowsePlatform>
     let database: MusicNativeLibraryDatabase
-    var repositoryReader: any MusicNativeLibraryReading { database }
-    var activeSongWriter: (any MusicNativeLibraryWriting)?
-    let scripts: (any MusicScriptResolving)?
-    let accounts: (any MusicNativeAccountProviding)?
+    var activeSongWriter: MusicNativeLibraryDatabase.Writer?
+    public nonisolated let scripts: NativeMusicScriptService?
+    public nonisolated let accounts: NativeMusicAccountService?
     let publicPlatforms: MusicNativePlatforms
     let sourceSessionStore = MusicNativeSourceSessionStore()
     let sourceDiscovery: MusicNativePersistentSourceDiscoveryCache
@@ -190,8 +128,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var sourceDiscoveryObservationOrder: UInt64 = 0
     var sourceDiscoveryLatest: [String: [String: MusicSearchObservation]] = [:]
     let homeSnapshot: MusicNativeHomeSnapshotStorage?
-    let audioFileCache: (any MusicAudioFileCaching)?
-    let presentationCache: (any MusicPresentationCaching)?
+    public nonisolated let audioFileCache: NativeMusicAudioFileCache?
+    public nonisolated let presentationCache: MusicNativePresentationCache?
     var audioCacheAttempt: MusicNativeAudioCacheAttempt?
     var audioCacheTask: Task<Void, Never>?
     var audioCacheCaptures: [UUID: Task<Void, Never>] = [:]
@@ -259,13 +197,13 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
 
     nonisolated func now() -> Date { Date() }
 
-    public init(database: MusicNativeLibraryDatabase, scripts: (any MusicScriptResolving)? = nil,
-                accounts: (any MusicNativeAccountProviding)? = nil, platformClient: MusicPlatformClient,
+    public init(database: MusicNativeLibraryDatabase, scripts: NativeMusicScriptService? = nil,
+                accounts: NativeMusicAccountService? = nil, platformClient: MusicPlatformClient,
                 sourceDiscovery: MusicNativePersistentSourceDiscoveryCache,
                 enabledPlatforms: Set<MusicPublicBrowsePlatform> = Set(MusicPublicBrowsePlatform.allCases),
                 homeSnapshot: MusicNativeHomeSnapshotStorage? = nil,
-                audioFileCache: (any MusicAudioFileCaching)? = nil,
-                presentationCache: (any MusicPresentationCaching)? = nil) {
+                audioFileCache: NativeMusicAudioFileCache? = nil,
+                presentationCache: MusicNativePresentationCache? = nil) {
         self.database = database
         self.scripts = scripts; self.accounts = accounts; self.homeSnapshot = homeSnapshot
         self.audioFileCache = audioFileCache
@@ -274,8 +212,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         playbackFeedback = MusicNativeFeedbackController()
         self.enabledPlatforms = enabledPlatforms
         publicPlatforms = MusicNativePlatforms(client: platformClient)
-        let feedback = playbackFeedback
-        access.register(UUID()) { feedback.invalidate() }
     }
 
     public func prepareForClose() async {
@@ -285,7 +221,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
             stopPlaybackFeedbackDispatchForClose()
             playbackFeedback.finishCurrent(reason: .interrupt)
             playbackFeedback.invalidate(preservingEnds: true)
-            let feedback = playbackFeedback, owner = accounts as? any MusicNativeFeedbackLifecycleProviding
+            let feedback = playbackFeedback, owner = accounts
             feedbackCloseTask = Task {
                 await feedback.flushRegistrations()
                 await owner?.preparePlaybackFeedbackForClose()
@@ -303,7 +239,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         await prepareForClose()
         await flushSourceDiscoveryPersist()
         if closed { return }
-        access.close()
         closed = true; epoch = UUID(); clearTransient()
         if let previousSession = await sourceSessionStore.resetAll() {
             await previousSession.close()
@@ -315,7 +250,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         if let run = librarySyncRun { await run.drain() }
         await drainSimilarWork()
         await playbackFeedback.flush()
-        await (accounts as? any MusicNativeFeedbackLifecycleProviding)?.flushPendingPlaybackFeedback()
+        await accounts?.flushPendingPlaybackFeedback()
         if let task = automaticLibrarySyncRuntime.task { _ = await task.result }
         if let sync = automaticLibrarySyncRuntime.settingsSync { _ = await sync.task.value }
         // audioFileCache is closed by MeowfilmAssembly after service/image owners drain.
@@ -328,14 +263,14 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
 
     func clearTransient() {
         publicCollectionRevision = UUID()
-        for (id, entry) in publicQueueSources {
-            access.remove(id); entry.authorization.revoke()
+        for entry in publicQueueSources.values {
+            entry.authorization.revoke()
             retainSimilarDrain(Task { await entry.reader.close() })
         }
         publicQueueSources.removeAll()
         clearFMPlayback()
-        for (id, value) in fmQueues {
-            access.remove(id); value.1.revoke()
+        for value in fmQueues.values {
+            value.1.revoke()
             retainSimilarDrain(Task { await value.2.close() })
         }
         fmQueues.removeAll()
@@ -392,7 +327,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
 
     func check(_ expected: UUID? = nil) throws {
         try musicRequire(!closed, .closed)
-        try access.check()
         if let expected { try musicRequire(epoch == expected, .staleAccess) }
         if Task.isCancelled { throw MusicServiceError.cancelled }
     }
@@ -414,13 +348,13 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     func read() throws -> MusicDomainState {
         try check()
         do {
-            let currentRevision = try repositoryReader.readRevision()
+            let currentRevision = try database.readRevision()
             var state: MusicDomainState
             if let cached = cachedState, cached.revision == currentRevision {
                 state = cached.state
             } else {
-                let snapshot = try repositoryReader.readSnapshot()
-                state = MusicDomainState(snapshot: snapshot, runID: runID, songs: repositoryReader)
+                let snapshot = try database.readSnapshot()
+                state = MusicDomainState(snapshot: snapshot, runID: runID, songs: database)
                 cachedState = (snapshot.revision, state)
             }
             if sessionPosition.occurrenceID == state.queue.currentID {
@@ -434,21 +368,18 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         catch { throw MusicServiceError.storageFailed }
     }
 
-    func transaction<T>(_ sections: Set<MusicDomainSection>, reportingCancellationAfterCommit: Bool = true,
+    func transaction<T>(_ sections: Set<MusicDomainSection>,
                         _ change: (inout MusicDomainState) throws -> T) throws -> T {
         try check()
         let original = try read()
         guard let originalRevision = cachedState?.revision else { throw MusicServiceError.storageConflict }
         var draft = original
-        for section in sections { try draft.requireRevision(section) }
         var changedSongs = Set<String>()
         var persistedChanged = Set<MusicDomainSection>()
         let value: T = try withUnsafeCurrentTask { task in
             try database.withTransaction(commit: { action in
-                try access.perform {
-                    if task?.isCancelled == true { throw MusicServiceError.cancelled }
-                    try action()
-                }
+                if task?.isCancelled == true { throw MusicServiceError.cancelled }
+                try action()
             }) { writer in
                 try musicRequire(try writer.readRevision() == originalRevision, .storageConflict)
                 activeSongWriter = writer
@@ -463,17 +394,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                     case .catalogSource: return draft.catalogSource != original.catalogSource
                     }
                 }
-                for section in persistedChanged { try draft.requireRevision(section) }
-                let retained = original.referencedSongIDs(in: persistedChanged)
-                let addedSongIDs = draft.referencedSongIDs(in: persistedChanged).subtracting(retained)
-                if !addedSongIDs.isEmpty {
-                    for id in addedSongIDs {
-                        try musicRequire(UUID(uuidString: id) != nil, .corruptStorage)
-                    }
-                    let existing = try writer.containsSongs(ids: addedSongIDs)
-                    try musicRequire(existing.count == addedSongIDs.count, .corruptStorage)
-                }
-                if persistedChanged.contains(.queue) { try draft.requireQueue(knownSongIDs: retained) }
                 if task?.isCancelled == true { throw MusicServiceError.cancelled }
                 if persistedChanged.contains(.library) {
                     try writer.applyLibraryChanges(
@@ -518,7 +438,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         draft.revision = nextRevision
         draft.persistedSections.formUnion(persistedChanged)
         publishTransaction(draft, revision: nextRevision, sections: sections, changed: persistedChanged, songs: changedSongs)
-        if reportingCancellationAfterCommit && Task.isCancelled { throw MusicServiceError.commitUnconfirmed }
         return value
     }
 
@@ -556,14 +475,12 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
             operations.removeValue(forKey: id)
             operationTasks.removeValue(forKey: id)
             operationLabels.removeValue(forKey: id)
-            access.remove(id)
             if draining { similarMode.workers.removeValue(forKey: id) }
         }
         let cancel: @Sendable () -> Void = { task.cancel(); gate.finish(.failure(MusicServiceError.cancelled)) }
         operations[id] = cancel
         operationTasks[id] = task
         operationLabels[id] = label
-        access.register(id, cancel: cancel)
         if draining { similarMode.workers[id] = task }
         let timer = Task {
             do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
@@ -585,9 +502,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         switch ref.kind {
         case .library: return try repositorySong(ref.id, state)
         case .queue:
-            let rows = state.queue.entries.filter { $0.id == ref.id }
-            guard let row = rows.first else { throw MusicServiceError.notFound }
-            try musicRequire(rows.count == 1, .corruptStorage)
+            guard let row = state.queue.entries.first(where: { $0.id == ref.id }) else { throw MusicServiceError.notFound }
             return try entrySong(row, state)
         }
     }

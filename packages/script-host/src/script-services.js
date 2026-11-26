@@ -305,10 +305,10 @@ export class ScriptServices {
         const detachClosed = state.detachClosed;
         state.detachClosed = null;
         try { detachClosed?.(); } catch (error) { failures.error ??= error; }
-        try { socket.off('error', ignoreError); } catch (error) { failures.error ??= error; }
+        socket.off('error', ignoreError);
         try { detach?.(); } catch (error) { failures.error ??= error; }
-        try { delete socket[ownerScope]; } catch (error) { failures.error ??= error; }
-        try { delete socket[resourceOwner]; } catch (error) { failures.error ??= error; }
+        delete socket[ownerScope];
+        delete socket[resourceOwner];
         connections.delete(socket);
         cleanups.delete(socket);
         if (!ownedScope.signal.aborted) {
@@ -352,17 +352,17 @@ export class ScriptServices {
       server.meowReleased = true;
       for (const [event, listener] of [
         ['connection', connected], ['secureConnection', secured], ['error', failed],
-      ]) try { server.off(event, listener); } catch (error) { if (owner) owner.cleanupState.error ??= error; }
+      ]) server.off(event, listener);
       try { server[scopeCleanup]?.(); } catch (error) { if (owner) owner.cleanupState.error ??= error; }
-      try { server[scopeCleanup] = null; } catch (error) { if (owner) owner.cleanupState.error ??= error; }
+      server[scopeCleanup] = null;
       owner?.listeners.delete(server);
       if (owner) {
         for (const [port, target] of owner.aliases) if (target === server) owner.aliases.delete(port);
         if (owner.main === server) owner.main = null;
         owner.serverCleanup.delete(server);
       }
-      try { server.removeAllListeners?.(); } catch (error) { if (owner) owner.cleanupState.error ??= error; }
-      try { delete server[resourceOwner]; } catch (error) { if (owner) owner.cleanupState.error ??= error; }
+      server.removeAllListeners?.();
+      delete server[resourceOwner];
       owner?.session?.endpointsChanged?.();
     };
     this.serverCleanup.set(server, closed);
@@ -508,16 +508,12 @@ export class ScriptServices {
         const current = state.owner, detach = state.detach;
         state.owner = null;
         state.detach = null;
-        let failure;
-        try { detach?.(); } catch (error) { failure = error; }
+        detach?.();
         current?.agents.delete(agent);
-        try { delete agent[agentOwner]; } catch (error) { failure ??= error; }
-        try {
-          Object.defineProperty(agent, 'destroy', {
-            configurable: true, writable: true, value: destroy,
-          });
-        } catch (error) { failure ??= error; }
-        if (failure) throw failure;
+        delete agent[agentOwner];
+        Object.defineProperty(agent, 'destroy', {
+          configurable: true, writable: true, value: destroy,
+        });
       };
       state.release = releaseOwnership;
       let tracked = false;
@@ -678,7 +674,7 @@ export class ScriptServices {
       for (const [event, listener] of [
         ['response', responded], ['socket', connected],
         ['error', failed], ['error', ignoreError],
-      ]) try { client.off?.(event, listener); } catch (error) { failures.error ??= error; }
+      ]) client.off?.(event, listener);
       const detach = state.detach;
       const token = state.scopeToken;
       const context = state.context;
@@ -692,7 +688,7 @@ export class ScriptServices {
       try { context?.close(); } catch (error) { failures.error ??= error; }
       requests.delete(client);
       cleanups.delete(client);
-      try { delete client[resourceOwner]; } catch (error) { failures.error ??= error; }
+      delete client[resourceOwner];
     };
     const responded = response => {
       const session = state.owner?.session;
@@ -853,19 +849,14 @@ export class ScriptServices {
       let failure;
       for (const listener of listeners) {
         if (!listener.attached) continue;
-        try {
-          listener.target?.off?.(listener.event, listener.callback);
-          listener.attached = false;
-        } catch (error) { failure ??= error; }
+        listener.target?.off?.(listener.event, listener.callback);
+        listener.attached = false;
       }
-      try {
-        if (request[ownerScope] === scope) delete request[ownerScope];
-      } catch (error) { failure ??= error; }
+      if (request[ownerScope] === scope) delete request[ownerScope];
       try { detachCompleted?.(); } catch (error) { failure ??= error; }
       detachCompleted = null;
       if (parentAttached) {
-        try { transferScope.signal.removeEventListener('abort', terminate); }
-        catch (error) { failure ??= error; }
+        transferScope.signal.removeEventListener('abort', terminate);
         parentAttached = false;
       }
       // The response belongs to the transport scope and may still be writing.

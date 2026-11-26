@@ -550,22 +550,16 @@ final class PlaybackSystemSession {
 
     nonisolated deinit {
         artworkDecodeTask?.cancel()
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { invalidate() }
-        } else {
-            let scopes = [notificationObservers, outputObservers, commandObservers, navigationObservers, playPauseObservers]
-            let clearNowPlaying = generation != nil || hasPublishedNowPlaying
-            let ops = audioOperations
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    for scope in scopes { scope.cancel() }
-                    if clearNowPlaying {
-                        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-                    }
-                    _ = ops.enqueue(active: false)
-                }
-            }
+        let scopes = [notificationObservers, outputObservers, commandObservers, navigationObservers, playPauseObservers]
+        let clearNowPlaying = generation != nil || hasPublishedNowPlaying
+        let ops = audioOperations
+        let cleanup: @MainActor @Sendable () -> Void = {
+            for scope in scopes { scope.cancel() }
+            if clearNowPlaying { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil }
+            _ = ops.enqueue(active: false)
         }
+        if Thread.isMainThread { MainActor.assumeIsolated(cleanup) }
+        else { DispatchQueue.main.async { MainActor.assumeIsolated(cleanup) } }
     }
 }
 #endif

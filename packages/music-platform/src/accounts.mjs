@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed api-enhanced, QQMusicApi and KuGouMusicApi account recipes.
-import { constants, createHmac, publicEncrypt, randomBytes, randomUUID } from 'node:crypto';
+import { constants, publicEncrypt, randomUUID } from 'node:crypto';
 import { aes, cookieFields, cookieHeader, decrypt, form, hex, kgPublicKey, kgSalt, md5, responseCookies as setCookies, wySuccess } from './protocols.mjs';
 import { decodeJSON, encodeProtocolJSON, first, image, input, object, protocolInteger, required, scalar, text, utf8 } from './model.mjs';
 import { fail, MusicPlatformError } from './errors.mjs';
@@ -118,10 +118,6 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
     } else if (c.platform === 'kg') {
       const fields = cookieFields(cookie), userId = credentialID('kg', cookie), time = Math.floor(Date.now() / 1000);
       expectedIdentity(expected, userId);
-      // Imported account devices are distinct from the installation identity.
-      // The supplied seed must actually produce the MID used by this recipe.
-      if (authenticate && fields.KUGOU_API_GUID != null &&
-          BigInt('0x' + md5(fields.KUGOU_API_GUID)).toString() !== fields.KUGOU_API_MID) fail('DEVICE_CONTEXT_REQUIRED');
       const p = kgRaw({ clienttime: time, token: required(fields.token, 'INVALID_CREDENTIALS') });
       const data = await c.kg('/v3/get_my_info', { plat: 1 }, 'usercenter.kugou.com',
         { visit_time: time, usertype: 1, p, userid: protocolInteger(userId) });
@@ -185,8 +181,8 @@ async function observation(c, { expectedUserId } = {}, authenticate = true, incl
 function qqURL(address, host, path) {
   let url;
   try { url = new URL(address); } catch { fail('REDIRECT_DENIED'); }
-  if (url.protocol !== 'https:' || url.hostname !== host || url.pathname !== path || url.port ||
-    url.username || url.password || url.hash) fail('REDIRECT_DENIED');
+  if (url.protocol !== 'https:' || url.hostname !== host || url.pathname !== path ||
+    url.username || url.password) fail('REDIRECT_DENIED');
   return url.searchParams;
 }
 function qqGet(host, path, data, cookie) {
@@ -210,13 +206,11 @@ function callback(bytes) {
   return args;
 }
 export function createAccountOperations() {
-  const qr = new Map(), lastCreate = new Map(), sms = new Map(), ledgerKey = randomBytes(32);
+  const qr = new Map(), lastCreate = new Map(), sms = new Map();
   function pruneSms(now) {
     for (const [key, value] of sms) if (!value.busy && now >= value.until) sms.delete(key);
   }
-  function smsKey(platform, phone, countryCode) {
-    return createHmac('sha256', ledgerKey).update(platform + ':' + countryCode + ':' + phone).digest('hex');
-  }
+  const smsKey = (platform, phone, countryCode) => `${platform}:${countryCode}:${phone}`;
   function smsResponse(raw, sending = false) {
     let code = raw.code;
     if (!Number.isInteger(code)) fail('INVALID_RESPONSE');

@@ -1,8 +1,6 @@
 import Foundation
 import Combine
 
-/// A confirmation belongs to one displayed settings snapshot and one access
-/// epoch. It is not a reusable grant to send a request or enable the platform.
 struct MusicPlaybackFeedbackConfirmation: Equatable {
     let id: UUID
     let epoch: UUID
@@ -15,46 +13,34 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     @Published private(set) var error: String?
     @Published private(set) var busy = false
     @Published private(set) var confirmation: MusicPlaybackFeedbackConfirmation?
-    private let service: any MusicPlaybackFeedbackSettingsServing
-    private let receipts: MusicSettingsReceiptOwner
+    private let service: NativeMusicService
     private let onChanged: @MainActor () async throws -> Void
     private var active = false
     private var epoch = UUID()
     private var work: Task<Void, Never>?
-    private var reread = false
-    private var requestedRevision: Int?
-    private var writing = false
 
-    init(service: any MusicPlaybackFeedbackSettingsServing,
-         receipts: MusicSettingsReceiptOwner,
-         onChanged: @escaping @MainActor () async throws -> Void = {}) {
-        self.service = service; self.receipts = receipts; self.onChanged = onChanged
+    init(service: NativeMusicService, onChanged: @escaping @MainActor () async throws -> Void = {}) {
+        self.service = service; self.onChanged = onChanged
     }
 
     func activate() {
         guard !active else { return }
-        cancel()
-        active = true
+        cancel(); active = true
     }
 
     func deactivate() {
         guard active else { return }
-        active = false
-        cancel()
+        active = false; cancel()
     }
 
     func cancel() {
-        epoch = UUID(); if !writing { work?.cancel() }; busy = false; confirmation = nil
-        value = nil; error = nil; reread = false; requestedRevision = nil
-        // Cancellation does not free the physical request slot.
+        epoch = UUID(); work?.cancel(); work = nil
+        busy = false; confirmation = nil; value = nil; error = nil
     }
 
     func load() async {
-        let revision = requestedRevision
         cancel()
-        requestedRevision = revision
-        guard active else { value = nil; return }
-        if work != nil { reread = true; busy = true; return }
+        guard active else { return }
         startRead()
         await work?.value
     }
@@ -63,27 +49,21 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
         guard active else { return }
         confirmation = nil
         if let value, value.revision >= revision { return }
-        // A pending read version, not inferred platform settings.
-        if let requestedRevision, requestedRevision >= revision { return }
-        requestedRevision = revision
-        guard work == nil else { busy = true; return }
+        guard work == nil else { return }
         startRead()
     }
 
     private func startRead() {
         guard work == nil, active else { return }
-        let own = epoch, readError = error, revision = requestedRevision
+        let own = epoch, readError = error
         busy = true
         work = Task { [weak self, service] in
             do {
                 let result = try await service.playbackFeedbackSettings()
-                if let self, own == self.epoch, self.active, !Task.isCancelled {
-                    try await self.onChanged()
-                }
-                self?.finish(result, error: readError, epoch: own, requestedAtStart: revision)
+                if let self, own == self.epoch, self.active, !Task.isCancelled { try await self.onChanged() }
+                self?.finish(result, error: readError, epoch: own)
             } catch {
-                self?.finish(nil, error: MusicServiceError.sanitized(error).localizedDescription,
-                             epoch: own, requestedAtStart: revision)
+                self?.finish(nil, error: MusicServiceError.sanitized(error).localizedDescription, epoch: own)
             }
         }
     }
@@ -109,34 +89,21 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
 
     private func save(_ platform: MusicAccountPlatform, _ enabled: Bool, expected: MusicPlaybackFeedbackSettings) {
         guard !busy, work == nil, active else { return }
-        // Consumes any dialog before suspension. CAS/unknown results are never
-        // automatically replayed, even if the next read has the same revision.
         confirmation = nil; busy = true; error = nil
-        let own = epoch, revision = requestedRevision
-        writing = true
-        let submitted = receipts.submit(settings: ["playback/feedback/" + platform.rawValue],
-                                        operation: "保存播放反馈设置") { [service] in
-            try await service.setPlaybackFeedback(platform: platform, enabled: enabled,
-                                                   expectedRevision: expected.revision)
-        }
+        let own = epoch, service = service
         work = Task {
             var result: MusicPlaybackFeedbackSettings?
             var failure: MusicServiceError?
             do {
-                result = try await submitted.value
+                result = try await service.setPlaybackFeedback(platform: platform, enabled: enabled, expectedRevision: expected.revision)
             } catch {
-                // Preserve an unconfirmed commit even when its UI task was cancelled.
                 let problem = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
                 failure = problem
-                if [MusicServiceError.staleRevision, .storageConflict, .commitUnconfirmed].contains(problem) {
-                    do {
-                        result = try await Task { [service] in
-                            try await service.playbackFeedbackSettings()
-                        }.value
-                    } catch { failure = MusicServiceError.sanitized(error) }
+                if [MusicServiceError.staleRevision, .storageConflict].contains(problem) {
+                    do { result = try await service.playbackFeedbackSettings() }
+                    catch { failure = MusicServiceError.sanitized(error) }
                 } else {
-                    finish(expected, error: problem.localizedDescription,
-                           epoch: own, requestedAtStart: revision)
+                    finish(expected, error: problem.localizedDescription, epoch: own)
                     return
                 }
             }
@@ -144,35 +111,15 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
                 do { try await onChanged() }
                 catch { result = nil; failure = MusicServiceError.sanitized(error) }
             }
-            finish(result, error: failure == .commitUnconfirmed ? nil : failure?.localizedDescription,
-                   epoch: own, requestedAtStart: revision)
+            finish(result, error: failure?.localizedDescription, epoch: own)
         }
     }
 
-    private func finish(_ value: MusicPlaybackFeedbackSettings?, error: String?,
-                        epoch own: UUID, requestedAtStart revision: Int?) {
-        work = nil; writing = false
-        guard own == epoch, active, !Task.isCancelled else {
-            if active, reread || requestedRevision != nil { reread = false; startRead() }
-            return
-        }
-        if let requestedRevision, value.map({ $0.revision >= requestedRevision }) != true {
-            self.value = nil
-            // Only a newer target arriving during this request justifies a
-            // follow-up. An insufficient read itself waits for explicit retry.
-            if requestedRevision != revision {
-                self.error = error
-                startRead()
-                return
-            }
-            self.error = error ?? MusicServiceError.staleRevision.localizedDescription
-            busy = false
-        } else {
-            requestedRevision = nil
-            self.value = value; self.error = error; busy = false
-        }
-        if reread, active { reread = false; startRead() }
+    private func finish(_ value: MusicPlaybackFeedbackSettings?, error: String?, epoch own: UUID) {
+        work = nil
+        guard own == epoch, active, !Task.isCancelled else { return }
+        self.value = value; self.error = error; busy = false
     }
 
-    deinit { if !writing { work?.cancel() } }
+    deinit { work?.cancel() }
 }

@@ -6,32 +6,21 @@ namespace MeowFilm.Capabilities.Feedback;
 internal static class MusicFeedbackSettingsStore
 {
     internal const string Owner = MusicFeedbackSettingsOwner.StorageOwner;
-    private const long MaximumRevision = 9007199254740991;
 
     internal static Task<(MusicFeedbackSettings Settings, StorageRevision StorageRevision)> ReadAsync(
         IStorageDatabase database, CancellationToken token) =>
         database.ReadSnapshotAsync(db =>
         {
             var storageRevision = db.Revision(Owner);
+            if (storageRevision == StorageRevision.Empty)
+                return (new MusicFeedbackSettings(0, Array.Empty<string>()), storageRevision);
+
             var enabled = db.Query("""
                 SELECT platform
                 FROM windows_music_feedback_platforms
                 ORDER BY platform
                 """,
                 row => row.GetString(0)).ToArray();
-
-            if (storageRevision == StorageRevision.Empty)
-            {
-                if (enabled.Length > 0)
-                    throw new MusicFeedbackException("CORRUPT_STORAGE");
-                return (new MusicFeedbackSettings(0, Array.Empty<string>()), storageRevision);
-            }
-
-            if (storageRevision.Revision is < 1 or > MaximumRevision ||
-                enabled.Length > 3 ||
-                enabled.Distinct(StringComparer.Ordinal).Count() != enabled.Length ||
-                enabled.Any(v => v is not ("wy" or "tx" or "kg")))
-                throw new MusicFeedbackException("CORRUPT_STORAGE");
 
             return (new MusicFeedbackSettings(storageRevision.Revision, new ReadOnlyCollection<string>(enabled)), storageRevision);
         }, token);

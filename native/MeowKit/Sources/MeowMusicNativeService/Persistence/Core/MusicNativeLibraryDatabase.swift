@@ -1,60 +1,11 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 import MeowStorage
-
-protocol MusicNativeLibraryReading: Sendable {
-    func readRevision() throws -> Int
-    func readSnapshot() throws -> MusicLibrarySnapshot
-    func song(id: String) throws -> MusicSongRecord?
-    func songs(ids: Set<String>) throws -> [String: MusicSongRecord]
-    func containsSong(id: String) throws -> Bool
-    func containsSongs(ids: Set<String>) throws -> Set<String>
-    func sourceOwner(key: String) throws -> String?
-    func sourceOwners(keys: Set<String>) throws -> [String: String]
-    func candidateIDs(matchKey: String) throws -> [String]
-    func candidateIDs(matchKeys: Set<String>) throws -> [String: [String]]
-    func querySongIDs(query: String) throws -> [String]
-    func allSongIDs() throws -> [String]
-}
-
-extension MusicNativeLibraryReading {
-    func readRevision() throws -> Int { try readSnapshot().revision }
-    func songs(ids: Set<String>) throws -> [String: MusicSongRecord] {
-        var result: [String: MusicSongRecord] = [:]
-        for id in ids { if let value = try song(id: id) { result[id] = value } }
-        return result
-    }
-    func containsSongs(ids: Set<String>) throws -> Set<String> {
-        var result: Set<String> = []
-        for id in ids where try containsSong(id: id) { result.insert(id) }
-        return result
-    }
-    func sourceOwners(keys: Set<String>) throws -> [String: String] {
-        var result: [String: String] = [:]
-        for key in keys { if let owner = try sourceOwner(key: key) { result[key] = owner } }
-        return result
-    }
-    func candidateIDs(matchKeys: Set<String>) throws -> [String: [String]] {
-        var result: [String: [String]] = [:]
-        for key in matchKeys { result[key] = try candidateIDs(matchKey: key) }
-        return result
-    }
-}
-
-protocol MusicNativeLibraryWriting: MusicNativeLibraryReading {
-    var changedSongIDs: Set<String> { get }
-    func saveSong(_ song: MusicSongRecord, matchKey: String?, searchQuery: String) throws
-    func applyLibraryChanges(from previous: MusicLibraryState?, to next: MusicLibraryState) throws
-    func applyQueueChanges(from previous: MusicQueueState?, to next: MusicQueueState) throws
-    func applyHistoryChanges(from previous: MusicHistoryState?, to next: MusicHistoryState) throws
-    func applyPlaybackChanges(from previous: MusicPlaybackSettingsState?, to next: MusicPlaybackSettingsState) throws
-    func saveCatalogSource(_ value: MusicCatalogSourceState) throws
-}
 
 /// The music owner borrows the App permanent data database's off-main lane. It never
 /// opens a second SQLite file or closes the shared connection. Songs, relationships,
 /// and domain changes settle in the same transaction as `owner_revisions`.
-public final class MusicNativeLibraryDatabase: MusicNativeLibraryReading, @unchecked Sendable {
+public final class MusicNativeLibraryDatabase: @unchecked Sendable {
     private let database: SQLiteDatabase
     private let scope: String
     private let ownerKey: String
@@ -154,32 +105,6 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryReading, @unche
         }
     }
 
-    func candidateIDs(matchKey: String) throws -> [String] {
-        try read { try $0.query("SELECT song_id FROM music_songs WHERE match_key=? ORDER BY song_id", [.text(matchKey)]) { try $0.text(0) } }
-    }
-
-    func candidateIDs(matchKeys: Set<String>) throws -> [String: [String]] {
-        try read { db in
-            let values = Array(matchKeys)
-            guard !values.isEmpty else { return [:] }
-            let queryBatches: (SQLiteConnection) throws -> [String: [String]] = { conn in
-                var result: [String: [String]] = [:]
-                for start in stride(from: 0, to: values.count, by: 500) {
-                    let batch = Array(values[start..<min(start + 500, values.count)])
-                    let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
-                    try conn.scan(
-                        "SELECT match_key,song_id FROM music_songs WHERE match_key IN (\(placeholders)) ORDER BY match_key,song_id",
-                        batch.map(SQLiteValue.text)
-                    ) { row in
-                        result[try row.text(0), default: []].append(try row.text(1))
-                    }
-                }
-                return result
-            }
-            return values.count > 500 ? try SQLiteDatabase.readSnapshot(db, queryBatches) : try queryBatches(db)
-        }
-    }
-
     func querySongIDs(query: String) throws -> [String] {
         try read { try $0.query("SELECT song_id FROM music_songs WHERE search_query=? ORDER BY song_id", [.text(query)]) { try $0.text(0) } }
     }
@@ -189,7 +114,7 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryReading, @unche
     }
 
     func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void,
-                            _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
+                            _ body: (Writer) throws -> T) throws -> T {
         try database.writeSync { db in
             try stateLock.withLock {
                 try musicRequire(!closed && !active, .storageConflict)
@@ -217,7 +142,7 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryReading, @unche
         stateLock.withLock { closed = true }
     }
 
-    private final class Writer: MusicNativeLibraryWriting, @unchecked Sendable {
+    final class Writer: @unchecked Sendable {
         let database: MusicNativeLibraryDatabase
         let connection: SQLiteConnection
         var active = true
@@ -243,18 +168,6 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryReading, @unche
 
         func readRevision() throws -> Int { try database.revision(connection) }
 
-        func readSnapshot() throws -> MusicLibrarySnapshot {
-            let current = try database.revision(connection)
-            return MusicLibrarySnapshot(
-                revision: current,
-                library: try MusicLibraryRepository.read(connection, scope: database.scope),
-                queue: try MusicQueueRepository.read(connection, scope: database.scope),
-                history: try MusicHistoryRepository.read(connection, scope: database.scope),
-                playback: try MusicPlaybackSettingsRepository.read(connection, scope: database.scope),
-                catalogSource: try MusicCatalogSourceRepository.read(connection, scope: database.scope)
-            )
-        }
-
         func song(id: String) throws -> MusicSongRecord? {
             if let cached = loadedSongs[id] { return cached }
             if missingSongs.contains(id) { return nil }
@@ -262,19 +175,6 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryReading, @unche
             if let record { loadedSongs[id] = record }
             else { missingSongs.insert(id) }
             return record
-        }
-
-        func songs(ids: Set<String>) throws -> [String: MusicSongRecord] {
-            let unresolved = ids.subtracting(loadedSongs.keys).subtracting(missingSongs)
-            if !unresolved.isEmpty {
-                let fetched = try MusicSongRepository.readBatch(connection, ids: unresolved)
-                for (id, record) in fetched { loadedSongs[id] = record }
-                missingSongs.formUnion(unresolved.subtracting(fetched.keys))
-            }
-            var result: [String: MusicSongRecord] = [:]
-            result.reserveCapacity(ids.count)
-            for id in ids { if let value = loadedSongs[id] { result[id] = value } }
-            return result
         }
 
         func containsSong(id: String) throws -> Bool {
@@ -334,17 +234,6 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryReading, @unche
             return resolvedSourceOwners.filter { keys.contains($0.key) }
         }
 
-        func candidateIDs(matchKey: String) throws -> [String] {
-            if resolvedCandidateKeys.contains(matchKey) { return candidateRows[matchKey] ?? [] }
-            let rows = try connection.query(
-                "SELECT song_id FROM music_songs WHERE match_key=? ORDER BY song_id",
-                [.text(matchKey)]
-            ) { try $0.text(0) }
-            resolvedCandidateKeys.insert(matchKey)
-            candidateRows[matchKey] = rows
-            return rows
-        }
-
         func candidateIDs(matchKeys: Set<String>) throws -> [String: [String]] {
             let unresolved = matchKeys.subtracting(resolvedCandidateKeys)
             let values = Array(unresolved)
@@ -360,17 +249,6 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryReading, @unche
             }
             resolvedCandidateKeys.formUnion(unresolved)
             return Dictionary(uniqueKeysWithValues: matchKeys.map { ($0, candidateRows[$0] ?? []) })
-        }
-
-        func querySongIDs(query: String) throws -> [String] {
-            try connection.query(
-                "SELECT song_id FROM music_songs WHERE search_query=? ORDER BY song_id",
-                [.text(query)]
-            ) { try $0.text(0) }
-        }
-
-        func allSongIDs() throws -> [String] {
-            try connection.query("SELECT song_id FROM music_songs ORDER BY song_id") { try $0.text(0) }
         }
 
         func applyLibraryChanges(from previous: MusicLibraryState?, to next: MusicLibraryState) throws {

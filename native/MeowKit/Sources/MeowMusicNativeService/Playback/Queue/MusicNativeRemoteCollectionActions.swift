@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Native remote playlist detail actions.
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
-extension NativeMusicService: MusicRemoteCollectionServing {
+extension NativeMusicService {
     public func saveRemoteCollection(source: MusicRemoteQueueSource, name: String,
                                      intent: MusicQueueAuthorization) async throws -> MusicCollection {
         try check(); try intent.check(); try source.authorization.check()
@@ -53,9 +53,8 @@ extension NativeMusicService: MusicRemoteCollectionServing {
         let child = try source.authorization.perform {
             try intent.perform {
                 try check(own)
-                let reader = MusicNativeFilteredCollectionRows(rows: filtered, access: access,
+                let reader = MusicNativeFilteredCollectionRows(rows: filtered,
                     authorization: MusicQueueAuthorization(parent: source.authorization))
-                reader.observeAccess()
                 try reader.authorization.check()
                 let parent = source.context
                 // A filtered FM preview is a finite queue, not an FM generator.
@@ -80,23 +79,13 @@ extension NativeMusicService: MusicRemoteCollectionServing {
     }
 }
 
-/// Only owns the derived rows and its access registration. There is no account
-/// lease, parent close, background observer task, global registry or media work.
-/// Weak registration + deinit also releases resources if a prepared result is
-/// discarded before the UI accepts it, rather than requiring close to prevent
-/// the access fence from retaining an abandoned snapshot.
 private final class MusicNativeFilteredCollectionRows: @unchecked Sendable {
     let authorization: MusicQueueAuthorization
     private let lock = NSLock()
-    private let access: MusicNativeAccess
-    private let registration = UUID()
     private var rows: [MusicQueueTrackReference]?
 
-    init(rows: [MusicQueueTrackReference], access: MusicNativeAccess, authorization: MusicQueueAuthorization) {
-        self.rows = rows; self.access = access; self.authorization = authorization
-    }
-    func observeAccess() {
-        access.register(registration) { [weak self] in self?.close() }
+    init(rows: [MusicQueueTrackReference], authorization: MusicQueueAuthorization) {
+        self.rows = rows; self.authorization = authorization
     }
     func page(_ cursor: String?) throws -> MusicQueueReferencePage {
         try Task.checkCancellation(); try authorization.check()
@@ -117,10 +106,8 @@ private final class MusicNativeFilteredCollectionRows: @unchecked Sendable {
     func close() {
         authorization.revoke()
         lock.lock(); rows = nil; lock.unlock()
-        access.remove(registration)
     }
     deinit {
         authorization.revoke()
-        access.remove(registration)
     }
 }

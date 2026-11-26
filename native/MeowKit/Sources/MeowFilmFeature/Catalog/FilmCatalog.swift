@@ -97,8 +97,3 @@ public struct FilmHomeSection: Equatable, Sendable {
         self.cache = cache
     }
 }
-
-public protocol FilmSource: Sendable {
-    var descriptor: FilmSourceDescriptor { get }
-    func loadHome(refresh: Bool) async throws -> [FilmHomeSection]
-}

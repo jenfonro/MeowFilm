@@ -7,7 +7,7 @@ import { parseJSON, text } from '../values.js';
 const cloud = 'https://cloud.189.cn';
 const authOrigin = 'https://open.e.189.cn';
 const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36';
-const video = /\.(mp4|mkv|mov|iso|flv)$/i;
+const video = /\.(?:mp4|mkv|mov|iso|flv|ts|m2ts|avi|wmv|rmvb|webm|m4v|mpg|mpeg)$/i;
 const pageSize = 200;
 const authFailureCodes = new Set(['-2', '-10101', '-10102', '-10103', '-10104', '10002', '10003']);
 
@@ -88,7 +88,7 @@ function shareInput(share) {
   requireValue(share && typeof share.url === 'string');
   requireValue(share.password === undefined || typeof share.password === 'string');
   const parsed = url(share.url, undefined, 'INVALID_REQUEST');
-  requireValue(['cloud.189.cn', 'h5.cloud.189.cn'].includes(parsed.hostname) && (!parsed.port || parsed.port === '443'));
+  requireValue(['cloud.189.cn', 'h5.cloud.189.cn'].includes(parsed.hostname));
   const path = parsed.hostname === 'cloud.189.cn' && /^\/t\/([A-Za-z0-9]+)\/?$/.exec(parsed.pathname);
   const query = parsed.hash.indexOf('?');
   const fragment = new URLSearchParams(query === -1 ? '' : parsed.hash.slice(query + 1));
@@ -359,8 +359,7 @@ export const tianyi = {
           if (declared > 0n && (total === undefined || declared > total)) total = declared;
         }
         const more = total === undefined ? items.length >= pageSize : total > BigInt(seen.size);
-        requireValue(!(page > 1 && items.length && !added) && !(more && !items.length), 'UPSTREAM_FORMAT');
-        if (!more) break;
+        if (!more || !items.length || !added) break;
       }
       if (index === 0) rootEmpty = seen.size === 0;
     }

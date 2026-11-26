@@ -16,10 +16,11 @@ internal static class CatSourceSettingsStore
 
     internal static CatSettingsState? Read(DatabaseSession db)
     {
-        bool hasRoot = db.TryQuerySingle(
+        if (!db.TryQuerySingle(
             "SELECT port FROM cat_settings WHERE singleton=1",
             row => row.GetInt32(0),
-            out int port);
+            out int port))
+            return null;
 
         var providers = db.Query(
             "SELECT provider,enabled FROM cat_providers ORDER BY position",
@@ -47,13 +48,6 @@ internal static class CatSourceSettingsStore
                 row.GetNullableString(5),
                 row.GetBool(6),
                 row.GetInt64(7)));
-
-        if (!hasRoot)
-        {
-            if (providers.Count > 0 || mappingRows.Count > 0 || aliasRows.Count > 0 || scripts.Count > 0)
-                throw new StorageException(StorageError.Corrupt);
-            return null;
-        }
 
         var aliasesByPos = new Dictionary<int, List<string>>();
         foreach (var (mPos, alias) in aliasRows)

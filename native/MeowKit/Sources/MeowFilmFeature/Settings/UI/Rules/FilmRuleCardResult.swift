@@ -12,7 +12,7 @@ struct FilmRuleCardResult: Equatable {
         if group.isClean {
             guard result.previews.count == count else { throw FilmRuleServiceError.invalidResponse }
             return result.previews.enumerated().map { index, preview in
-                .init(text: preview.isEmpty ? "空结果" : preview.displayString,
+                .init(text: preview.isEmpty ? "空结果" : preview,
                       failed: result.errors.contains { $0.group == group.rawValue && $0.ruleIndex == index + 1 })
             }
         }
@@ -29,7 +29,7 @@ struct FilmRuleCardResult: Equatable {
                 return .init(text: "未执行")
             }
             if let error = result.errors.first(where: { $0.group == group.rawValue && $0.ruleIndex == position }) {
-                return .init(text: error.text.displayString, failed: true)
+                return .init(text: error.text, failed: true)
             }
             guard result.matchedRuleIndex == position else { return .init(text: "未命中") }
             if group == .season {
@@ -40,9 +40,9 @@ struct FilmRuleCardResult: Equatable {
             }
             if let rewritten = result.rewrittenText {
                 return rewritten.isEmpty ? .init(text: "空结果（改写失败）", failed: true)
-                    : .init(text: rewritten.displayString)
+                    : .init(text: rewritten)
             }
-            let output = result.processedText.isEmpty ? "空结果" : result.processedText.displayString
+            let output = result.processedText.isEmpty ? "空结果" : result.processedText
             return .init(text: output + "（无改写）")
         }
     }

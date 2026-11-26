@@ -77,12 +77,9 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDelegate {
         let themeChanged = self.theme != theme
         self.theme = theme
         let active = snapshot?.active == true
-        let needsReadback = snapshot?.error == .commitUnconfirmed ||
-            recommendations?.error == .commitUnconfirmed || fm?.error == .commitUnconfirmed
         controls.isHidden = snapshot == nil && recommendations == nil && fm == nil && !returning
         mode.isHidden = returning && !active
-        retry.isHidden = !needsReadback && snapshot?.canRetry != true && recommendations?.canRetry != true
-        retry.setTitle(needsReadback ? "核对结果" : "重试", for: .normal)
+        retry.isHidden = snapshot?.canRetry != true && recommendations?.canRetry != true
         returnToQueue.isHidden = snapshot?.canRestoreQueue != true
         mode.setTitle(modeTitle, for: .normal)
         for button in [mode, retry, returnToQueue] {

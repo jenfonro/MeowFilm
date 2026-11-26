@@ -1,7 +1,7 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
-extension NativeMusicService: MusicSourceExclusionServing {
+extension NativeMusicService {
     public func sourceExclusions() async throws -> [MusicSourceExclusion] {
         let playback = try read().playback
         return playback.sourceExclusions.map {
@@ -18,17 +18,11 @@ extension NativeMusicService: MusicSourceExclusionServing {
         _ = try musicText(provider, maximum: 128)
         try musicRequire(MusicModel.sites.contains(platform))
         let provider = MusicSourceExclusion.providerID(provider, platform: platform)
-        let songID = try song(reference, read()).songID
-        func matches(_ selection: MusicPlaybackSelection) -> Bool {
-            selection.siteId == platform && MusicSourceExclusion.providerID(selection.installationId, platform: platform) == provider
-        }
-        var unconfirmed = false
-        do {
-            try transaction([.playback]) { d in
-                let song = try song(reference, d)
-                guard !d.playback.sourceExclusions.contains(where: {
-                    $0.songID == song.songID && $0.provider == provider && $0.platform == platform
-                }) else { return }
+        let songID = try transaction([.playback]) { d -> String in
+            let song = try song(reference, d)
+            if !d.playback.sourceExclusions.contains(where: {
+                $0.songID == song.songID && $0.provider == provider && $0.platform == platform
+            }) {
                 d.playback.sourceExclusions.append(MusicSourceExclusionRecord(
                     id: UUID().uuidString.lowercased(),
                     songID: song.songID,
@@ -40,7 +34,11 @@ extension NativeMusicService: MusicSourceExclusionServing {
                     excludedAtMs: Int64((now().timeIntervalSince1970 * 1000).rounded())
                 ))
             }
-        } catch MusicServiceError.commitUnconfirmed { unconfirmed = true }
+            return song.songID
+        }
+        func matches(_ selection: MusicPlaybackSelection) -> Bool {
+            selection.siteId == platform && MusicSourceExclusion.providerID(selection.installationId, platform: platform) == provider
+        }
         for (id, value) in preparedSources where value.seed.song.songID == songID && matches(value.result.choice.selection) {
             discardSource(attemptID: id)
         }
@@ -50,22 +48,24 @@ extension NativeMusicService: MusicSourceExclusionServing {
         if let session = await sourceSessionStore.current()?.session {
             await session.exclusionsChanged(songID: songID, provider: provider, platform: platform, excluded: true)
         }
-        if unconfirmed || Task.isCancelled { throw MusicServiceError.commitUnconfirmed }
     }
 
     public func restoreSourceExclusion(id: String) async throws {
-        let matches = try await sourceExclusions().filter { $0.id == id }
-        try musicRequire(!id.isEmpty && matches.count <= 1, .corruptStorage)
-        let row = matches.first
-        var unconfirmed = false
-        do {
-            try transaction([.playback]) { d in
-                try musicRequire(d.playback.sourceExclusions.filter { $0.id == id }.count <= 1, .corruptStorage)
-                try musicRequire(d.playback.recordingExclusions.filter { $0.id == id }.count <= 1, .corruptStorage)
-                d.playback.sourceExclusions.removeAll { $0.id == id }
-                d.playback.recordingExclusions.removeAll { $0.id == id }
+        try musicRequire(!id.isEmpty)
+        let row = try transaction([.playback]) { d -> MusicSourceExclusion? in
+            let sourceRow = d.playback.sourceExclusions.first { $0.id == id }.map {
+                MusicSourceExclusion(id: $0.id, songID: $0.songID, title: $0.title,
+                    artist: $0.artist, provider: $0.provider, platform: $0.platform)
             }
-        } catch MusicServiceError.commitUnconfirmed { unconfirmed = true }
+            let recordingRow = d.playback.recordingExclusions.first { $0.id == id }.map {
+                MusicSourceExclusion(id: $0.id, songID: $0.songID, title: $0.title,
+                    artist: $0.artist, provider: $0.provider, platform: $0.platform,
+                    scope: .recording(sourceKey: $0.sourceKey))
+            }
+            d.playback.sourceExclusions.removeAll { $0.id == id }
+            d.playback.recordingExclusions.removeAll { $0.id == id }
+            return sourceRow ?? recordingRow
+        }
         if let row, let session = await sourceSessionStore.current()?.session {
             switch row.scope {
             case .providerPlatform:
@@ -74,7 +74,6 @@ extension NativeMusicService: MusicSourceExclusionServing {
                 await session.recordingRestored(songID: row.songID, sourceKey: sourceKey)
             }
         }
-        if unconfirmed || Task.isCancelled { throw MusicServiceError.commitUnconfirmed }
     }
 
     func sourceExcluded(_ song: MusicSongRecord, provider: String, platform: String) throws -> Bool {
@@ -88,17 +87,13 @@ extension NativeMusicService: MusicSourceExclusionServing {
         try musicRequire(!recordingSourceExclusions(song).contains(selection.sourceKey), .sourceUnavailable)
         try musicRequire(!sourceExcluded(song, provider: selection.installationId, platform: selection.siteId), .sourceUnavailable)
     }
-}
 
-extension NativeMusicService: MusicOfficialSourceChecking {
     public func checkOfficialSource(_ platform: MusicAccountPlatform) async throws {
         try check(); try requirePlatform(platform.rawValue)
-        guard let checker = accounts as? any MusicOfficialSourceChecking else { throw MusicServiceError.unsupported }
-        try await work(label: "source-check:" + platform.rawValue) { try await checker.checkOfficialSource(platform) }
+        guard let accounts else { throw MusicServiceError.unsupported }
+        try await work(label: "source-check:" + platform.rawValue) { try await accounts.checkOfficialSource(platform) }
     }
-}
 
-extension NativeMusicService {
     func recordingSourceExclusions(_ song: MusicSongRecord) throws -> Set<String> {
         var keys = Set(try read().playback.recordingExclusions.filter { $0.songID == song.songID }.map(\.sourceKey))
         // Single-recording guard: preserve valid exclusions on multi-recording songs
@@ -121,29 +116,26 @@ extension NativeMusicService {
             platform = ""
         }
         try musicRequire(MusicModel.sites.contains(platform), .invalidRequest)
-        var unconfirmed = false
-        do {
-            try transaction([.playback]) { d in
-                let currentSong = (try? repositorySong(song.songID, d)) ?? song
-                let existing = Set(d.playback.recordingExclusions.filter { $0.songID == song.songID }.map(\.sourceKey))
-                let hasOtherPlayable = currentSong.sources.contains {
-                    $0.sourceKey != sourceKey && !existing.contains($0.sourceKey)
-                }
-                try musicRequire(hasOtherPlayable, .invalidRequest)
-                guard !existing.contains(sourceKey) else { return }
-                d.playback.recordingExclusions.append(MusicRecordingExclusionRecord(
-                    id: UUID().uuidString.lowercased(),
-                    songID: song.songID,
-                    provider: "",
-                    platform: platform,
-                    providerName: "",
-                    title: currentSong.title,
-                    artist: currentSong.artist,
-                    sourceKey: sourceKey,
-                    excludedAtMs: Int64((now().timeIntervalSince1970 * 1000).rounded())
-                ))
+        try transaction([.playback]) { d in
+            let currentSong = (try? repositorySong(song.songID, d)) ?? song
+            let existing = Set(d.playback.recordingExclusions.filter { $0.songID == song.songID }.map(\.sourceKey))
+            let hasOtherPlayable = currentSong.sources.contains {
+                $0.sourceKey != sourceKey && !existing.contains($0.sourceKey)
             }
-        } catch MusicServiceError.commitUnconfirmed { unconfirmed = true }
+            try musicRequire(hasOtherPlayable, .invalidRequest)
+            guard !existing.contains(sourceKey) else { return }
+            d.playback.recordingExclusions.append(MusicRecordingExclusionRecord(
+                id: UUID().uuidString.lowercased(),
+                songID: song.songID,
+                provider: "",
+                platform: platform,
+                providerName: "",
+                title: currentSong.title,
+                artist: currentSong.artist,
+                sourceKey: sourceKey,
+                excludedAtMs: Int64((now().timeIntervalSince1970 * 1000).rounded())
+            ))
+        }
         for (id, value) in preparedSources where value.seed.song.songID == song.songID &&
             value.result.option.sourceKey == sourceKey && !value.armed { discardSource(attemptID: id) }
         for (id, value) in preparedCacheSources where value.cache.identity.sourceKey == sourceKey &&
@@ -152,6 +144,5 @@ extension NativeMusicService {
         if let session = await sourceSessionStore.current()?.session {
             await session.recordingExcluded(songID: song.songID, sourceKey: sourceKey)
         }
-        if unconfirmed || Task.isCancelled { throw MusicServiceError.commitUnconfirmed }
     }
 }

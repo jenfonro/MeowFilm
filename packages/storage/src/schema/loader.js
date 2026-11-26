@@ -12,7 +12,6 @@ const ROLE_SPEC = Object.freeze({
     filename: 'meowfilm-data.sqlite3',
     applicationId: DATA_APPLICATION_ID,
     synchronous: 'FULL',
-    synchronousLevel: 2,
     initializeLock: 'data-initialize.lock',
     maintenanceLock: 'data-maintenance.lock',
     urls: Object.freeze({
@@ -26,7 +25,6 @@ const ROLE_SPEC = Object.freeze({
     filename: 'meowfilm-cache.sqlite3',
     applicationId: CACHE_APPLICATION_ID,
     synchronous: 'NORMAL',
-    synchronousLevel: 1,
     initializeLock: 'cache-initialize.lock',
     maintenanceLock: 'cache-maintenance.lock',
     urls: Object.freeze({
@@ -71,7 +69,6 @@ export function loadSchemaIdentity(target = 'standalone', role = 'data') {
       applicationId: spec.applicationId,
       version: SCHEMA_VERSION,
       synchronous: spec.synchronous,
-      synchronousLevel: spec.synchronousLevel,
       initializeLock: spec.initializeLock,
       maintenanceLock: spec.maintenanceLock,
     })).catch(error => {

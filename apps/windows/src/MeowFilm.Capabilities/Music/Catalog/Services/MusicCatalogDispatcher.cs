@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities;
 
@@ -120,11 +122,53 @@ internal static class MusicCatalogDispatcher
     internal static string CollectionReadKey(MusicCatalogCard card) =>
         card.CoverRef is { Kind: "playlist" } reference ? reference.Id : "";
 
+    private static MusicDailyBranch ParseDailyBranch(string branch) => branch switch
+    {
+        "default" => MusicDailyBranch.Default,
+        "style" => MusicDailyBranch.Style,
+        _ => throw new MusicPlatformException("INVALID_REQUEST")
+    };
+
+    private static MusicFmMode ParseFmMode(string mode) => mode switch
+    {
+        "default" => MusicFmMode.Default,
+        "familiar" => MusicFmMode.Familiar,
+        "explore" => MusicFmMode.Explore,
+        "puzzle" => MusicFmMode.Puzzle,
+        "scene" => MusicFmMode.Scene,
+        _ => throw new MusicPlatformException("INVALID_REQUEST")
+    };
+
+    private static MusicPersonalListKind ParsePersonalKind(string kind) => kind switch
+    {
+        "all" => MusicPersonalListKind.All,
+        "created" => MusicPersonalListKind.Created,
+        "subscribed" => MusicPersonalListKind.Subscribed,
+        _ => throw new MusicPlatformException("INVALID_REQUEST")
+    };
+
+    private static MusicHeartbeatEntry ParseHeartbeatEntry(string entry, string? songId, string? playlistId)
+    {
+        var parsed = entry switch
+        {
+            "favorites" => MusicHeartbeatEntry.Favorites,
+            "current" => MusicHeartbeatEntry.CurrentSong,
+            _ => throw new MusicPlatformException("INVALID_REQUEST")
+        };
+        if (parsed == MusicHeartbeatEntry.CurrentSong && (string.IsNullOrEmpty(songId) || string.IsNullOrEmpty(playlistId)))
+            throw new MusicPlatformException("INVALID_REQUEST");
+        return parsed;
+    }
+
     internal static Task<JsonElement> InvokeCardReadAsync(
-        MusicNativeApplication application, MusicCatalogCard card, bool previewLimit, CancellationToken token)
+        MusicNativeCatalogOwner catalogOwner, MusicCatalogCard card, bool previewLimit, CancellationToken token)
     {
         if (card.Kind == "daily")
-            return application.GetCatalogDailyAsync(card.Platform, CardDailyBranch(card), refresh: false, ct: token);
+        {
+            var branch = ParseDailyBranch(CardDailyBranch(card));
+            return catalogOwner.QueryAsync(card.Platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.DailyAsync(new(card.Platform, branch, false), signal), token);
+        }
         if (card.Kind == "fm")
         {
             string mode = "default", submode = "";
@@ -136,18 +180,26 @@ internal static class MusicCatalogDispatcher
                 if (MusicCatalogDto.Text(action, "ruleId") is { Length: > 0 } r) ruleId = r;
                 if (MusicCatalogDto.Text(action, "tabTagId") is { Length: > 0 } t) tabTagId = t;
             }
-            return application.GetCatalogFmAsync(card.Platform, mode, submode, preview: true, ruleId: ruleId, tabTagId: tabTagId, ct: token);
+            var fmMode = ParseFmMode(mode);
+            return catalogOwner.QueryAsync(card.Platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.FmAsync(new(card.Platform, fmMode, submode, true, ruleId, tabTagId), signal), token);
         }
         if (card.Kind == "playlist")
-            return application.GetCatalogPlaylistAsync(card.Platform, card.ActionId, page: 1,
-                limit: previewLimit ? 3 : 100, refresh: false, personal: card.Locator, continuation: null, ct: token);
+        {
+            int limit = previewLimit ? 3 : 100;
+            return catalogOwner.QueryAsync(card.Platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.PlaylistAsync(new(card.Platform, card.ActionId, 1, limit, false, card.Locator, null), signal), token);
+        }
         if (card.Kind == "album")
-            return application.GetCatalogAlbumAsync(card.Platform, card.ActionId, refresh: false, ct: token);
+        {
+            return catalogOwner.QueryAsync(card.Platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.AlbumAsync(new(card.Platform, card.ActionId, false), signal), token);
+        }
         throw new MusicOperationException("INVALID_REQUEST");
     }
 
     internal static Task<JsonElement> InvokeOperationAsync(
-        MusicNativeApplication application,
+        MusicNativeCatalogOwner catalogOwner,
         string operation,
         string platform,
         CatalogTarget? target,
@@ -167,62 +219,61 @@ internal static class MusicCatalogDispatcher
 
         return operation switch
         {
-            "home" => application.GetCatalogHomeAsync(platform, continuation, refresh, token),
-            "channels" => application.GetCatalogChannelsAsync(platform, refresh, token),
-            "channel" => application.GetCatalogChannelAsync(
-                platform,
-                routeId ?? Str(p.Id),
-                pageCode.Length > 0 ? pageCode : OptStr(p.PageCode),
-                continuation,
-                tag.Length > 0 ? tag : OptStr(p.Tag),
-                refresh,
-                token),
-            "playlist" => application.GetCatalogPlaylistAsync(
-                platform,
-                routeId ?? Str(p.Id),
-                page,
-                target?.Limit ?? 100,
-                refresh,
-                p.Personal is { ValueKind: JsonValueKind.Object } personal ? personal.Clone() : null,
-                continuation,
-                token),
-            "personalPlaylists" => application.GetCatalogPersonalPlaylistsAsync(
-                platform,
-                Str(p.Kind, "all"),
-                page,
-                target?.Limit ?? 30,
-                continuation,
-                refresh,
-                token),
-            "daily" => application.GetCatalogDailyAsync(platform, Str(p.Branch, "default"), refresh, token),
-            "fm" => application.GetCatalogFmAsync(
-                platform,
-                Str(p.Mode, "default"),
-                Str(p.Submode, ""),
-                p.Preview,
-                OptStr(p.RuleId),
-                OptStr(p.TabTagId),
-                token),
-            "similar" => application.GetCatalogSimilarAsync(
-                platform,
-                p.SourceIds ?? [],
-                Str(p.SourceType),
-                token),
-            "heartbeat" => application.GetCatalogHeartbeatAsync(
-                platform,
-                Str(p.Entry, "favorites"),
-                OptStr(p.SongId),
-                OptStr(p.PlaylistId),
-                token),
-            "album" => application.GetCatalogAlbumAsync(platform, routeId ?? Str(p.Id), refresh, token),
-            "chart" => application.GetCatalogChartAsync(
-                platform,
-                Str(p.Kind),
-                Str(p.Period, "daily"),
-                p.Year,
-                refresh,
-                token),
-            "artist" => application.GetCatalogArtistAsync(platform, routeId ?? Str(p.Id), refresh, token),
+            "home" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Catalog,
+                (cat, signal) => cat.HomeAsync(new(platform, continuation, refresh), signal), token),
+            "channels" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.None,
+                (cat, signal) => cat.ChannelsAsync(new(platform, refresh), signal), token),
+            "channel" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Catalog,
+                (cat, signal) => cat.ChannelAsync(new(
+                    platform,
+                    routeId ?? Str(p.Id),
+                    pageCode.Length > 0 ? pageCode : OptStr(p.PageCode),
+                    continuation,
+                    tag.Length > 0 ? tag : OptStr(p.Tag),
+                    refresh), signal), token),
+            "playlist" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.PlaylistAsync(new(
+                    platform,
+                    routeId ?? Str(p.Id),
+                    page,
+                    target?.Limit ?? 100,
+                    refresh,
+                    p.Personal is { ValueKind: JsonValueKind.Object } personal ? personal.Clone() : null,
+                    continuation), signal), token),
+            "personalPlaylists" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.None,
+                (cat, signal) => cat.PersonalPlaylistsAsync(new(
+                    platform,
+                    ParsePersonalKind(Str(p.Kind, "all")),
+                    page,
+                    target?.Limit ?? 30,
+                    continuation,
+                    refresh), signal), token),
+            "daily" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.DailyAsync(new(platform, ParseDailyBranch(Str(p.Branch, "default")), refresh), signal), token),
+            "fm" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.FmAsync(new(
+                    platform,
+                    ParseFmMode(Str(p.Mode, "default")),
+                    Str(p.Submode, ""),
+                    p.Preview,
+                    OptStr(p.RuleId),
+                    OptStr(p.TabTagId)), signal), token),
+            "similar" => (p.SourceIds ?? []).Length > 0
+                ? catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
+                    (cat, signal) => cat.SimilarAsync(new(platform, p.SourceIds!, Str(p.SourceType)), signal), token)
+                : throw new MusicPlatformException("INVALID_REQUEST"),
+            "heartbeat" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.HeartbeatAsync(new(
+                    platform,
+                    ParseHeartbeatEntry(Str(p.Entry, "favorites"), OptStr(p.SongId), OptStr(p.PlaylistId)),
+                    OptStr(p.SongId),
+                    OptStr(p.PlaylistId)), signal), token),
+            "album" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.AlbumAsync(new(platform, routeId ?? Str(p.Id), refresh), signal), token),
+            "chart" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Catalog,
+                (cat, signal) => cat.ChartAsync(new(platform, Str(p.Kind), Str(p.Period, "daily"), p.Year, refresh), signal), token),
+            "artist" => catalogOwner.QueryAsync(platform, MusicLibraryOwner.PlatformSongShape.Page,
+                (cat, signal) => cat.ArtistAsync(new(platform, routeId ?? Str(p.Id), refresh), signal), token),
             _ => throw new MusicOperationException("INVALID_REQUEST")
         };
     }

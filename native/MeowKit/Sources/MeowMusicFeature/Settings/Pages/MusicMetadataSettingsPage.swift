@@ -12,8 +12,8 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
 
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
         owner = model
-        state = model.metadataPreferencesService.map { service in
-            MusicMetadataSettingsModel(service: service, receipts: model.settingsReceipts) { [weak model] _ in
+        state = model.service.map { service in
+            MusicMetadataSettingsModel(service: service) { [weak model] _ in
                 model?.scheduleMetadataPreferencesRefresh()
             }
         }
@@ -23,12 +23,6 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        observe(owner.accessChanges) { [weak self] in
-            guard let self, owner.isClosed else { return }
-            clearErrorSource("metadata")
-            state?.setActive(false)
-            render()
-        }
         if let state {
             observe(state, whenVisible: true) { [weak self] in
                 self?.render()

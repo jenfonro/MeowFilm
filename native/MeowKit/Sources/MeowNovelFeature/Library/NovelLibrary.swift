@@ -36,19 +36,17 @@ public actor NovelLibrary {
         try checkOpen()
         let raw = try await database.snapshot { try NovelLibraryRepository.loadSnapshot($0) }
         let result = try Self.projectSnapshot(raw)
-        guard Self.valid(result) else { throw NovelError.corruptStorage }
         cachedRules = result.rules
         return result
     }
     @discardableResult public func retain(_ book: NovelBook, identity: String, shelf: Bool = false) async throws -> NovelBook {
         try checkOpen()
+        guard !book.installationId.isEmpty, !book.bookUrl.isEmpty else {
+            throw NovelError.invalidInput("书籍数据无效")
+        }
         let record = Self.makeStorageRecord(book, identity: identity, onShelf: shelf)
         let savedID = try await database.transaction { db in
-            try NovelLibraryRepository.retain(record, shelf: shelf, validate: { candidate in
-                guard let entry = try? Self.projectEntry(candidate) else { return false }
-                var value = NovelLibrarySnapshot(); value.entries = [entry]
-                return Self.valid(value)
-            }, db)
+            try NovelLibraryRepository.retain(record, shelf: shelf, db)
         }
         var updated = book
         updated.id = savedID
@@ -69,19 +67,17 @@ public actor NovelLibrary {
         try checkOpen()
         guard !anchor.chapterUrl.isEmpty, anchor.chapterIndex >= 0, anchor.blockIndex >= 0,
               anchor.utf16Offset >= 0, anchor.ratio.isFinite, (0...1).contains(anchor.ratio) else { throw NovelError.noChapter }
+        guard !book.installationId.isEmpty, !book.bookUrl.isEmpty else {
+            throw NovelError.invalidInput("书籍数据无效")
+        }
         let record = Self.makeStorageRecord(book, identity: identity, onShelf: false)
         return try await database.transaction { db in
-            try NovelLibraryRepository.record(record, anchor: anchor, validate: { candidate in
-                guard let entry = try? Self.projectEntry(candidate) else { return false }
-                var value = NovelLibrarySnapshot(); value.entries = [entry]
-                return Self.valid(value)
-            }, db)
+            try NovelLibraryRepository.record(record, anchor: anchor, db)
         }
     }
     public func saveSettings(_ settings: NovelReadingSettings) async throws {
         try checkOpen()
-        var value = NovelLibrarySnapshot(); value.settings = settings
-        guard Self.valid(value) else { throw NovelError.invalidInput("阅读排版设置无效") }
+        guard Self.validSettings(settings) else { throw NovelError.invalidInput("阅读排版设置无效") }
         try await database.transaction { db in
             try NovelLibraryRepository.saveSettings(settings, db)
         }
@@ -181,28 +177,18 @@ public actor NovelLibrary {
         )
     }
 
-    private static func valid(_ value: NovelLibrarySnapshot) -> Bool {
-        let settings = value.settings
+    private static func validSettings(_ settings: NovelReadingSettings) -> Bool {
         func color(_ text: String) -> Bool {
             text.isEmpty || text.count == 7 && text.first == "#" && UInt64(text.dropFirst(), radix: 16) != nil
         }
-        guard settings.fontSize.isFinite, settings.fontSize > 0,
-              [0, 0.35].contains(settings.fontWeight),
-              [settings.lineSpacing, settings.paragraphSpacing, settings.margin].allSatisfy({ $0.isFinite && $0 >= 0 }),
-              settings.contentWidth.isFinite, settings.contentWidth > 0,
-              settings.automaticSpeed.isFinite, (1...10).contains(settings.automaticSpeed),
-              NovelReadingSettings.themes.indices.contains(settings.theme),
-              ["none", "simplified", "traditional"].contains(settings.conversion),
-              color(settings.foreground), color(settings.background),
-              Set(value.entries.map(\.id)).count == value.entries.count,
-              Set(value.rules.map(\.id)).count == value.rules.count,
-              value.rules.allSatisfy({ !$0.id.isEmpty && !$0.pattern.isEmpty && $0.timeoutMillisecond > 0 }) else { return false }
-        return value.entries.allSatisfy { entry in
-            guard !entry.id.isEmpty, !entry.book.installationId.isEmpty, !entry.book.bookUrl.isEmpty else { return false }
-            guard let anchor = entry.anchor else { return entry.readAt == nil }
-            return !anchor.chapterUrl.isEmpty && anchor.chapterIndex >= 0 && anchor.blockIndex >= 0 &&
-                anchor.utf16Offset >= 0 && anchor.ratio.isFinite && (0...1).contains(anchor.ratio)
-        }
+        return settings.fontSize.isFinite && settings.fontSize > 0 &&
+            [0, 0.35].contains(settings.fontWeight) &&
+            [settings.lineSpacing, settings.paragraphSpacing, settings.margin].allSatisfy({ $0.isFinite && $0 >= 0 }) &&
+            settings.contentWidth.isFinite && settings.contentWidth > 0 &&
+            settings.automaticSpeed.isFinite && (1...10).contains(settings.automaticSpeed) &&
+            NovelReadingSettings.themes.indices.contains(settings.theme) &&
+            ["none", "simplified", "traditional"].contains(settings.conversion) &&
+            color(settings.foreground) && color(settings.background)
     }
     public func close() async {
         closed = true

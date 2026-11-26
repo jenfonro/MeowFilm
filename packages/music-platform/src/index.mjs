@@ -2,7 +2,7 @@ import { performance } from 'node:perf_hooks';
 import { createClientContexts } from './clients.mjs';
 import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { createMusicTransport } from './transport.mjs';
-import { fail, errorCode, MusicPlatformError, musicPlatformCodes } from './errors.mjs';
+import { fail, errorCode, MusicPlatformError } from './errors.mjs';
 import { input, object, protocolInteger, required, rows, scalar } from './model.mjs';
 import { cookieFields, encryptedWyResponse, kgRequest, kgSalt, kgSuccess, md5, wyRequest, wySuccess, txRequest, txSuccess } from './protocols.mjs';
 import { waitForFlight } from './flight.mjs';
@@ -15,7 +15,16 @@ import { mgProvider } from './providers/mg.mjs';
 import { createAccountOperations } from './accounts.mjs';
 import { createMutations } from './mutations.mjs';
 
-export { MusicPlatformError, musicPlatformCodes };
+export { MusicPlatformError };
+function estimateBytes(value) {
+  if (value === null || value === undefined) return 4;
+  if (typeof value === 'string') return value.length * 2 + 2;
+  if (typeof value !== 'object') return 8;
+  if (Array.isArray(value)) return value.reduce((sum, item) => sum + estimateBytes(item), 2);
+  let sum = 2;
+  for (const key of Object.keys(value)) sum += key.length * 2 + estimateBytes(value[key]) + 4;
+  return sum;
+}
 const providers = { wy: wyProvider, tx: txProvider, kg: kgProvider, kw: kwProvider, mg: mgProvider };
 const writes = new Set(['dailyStyle.save', 'sync.write', 'feedback.send', 'feedback.upload', 'vip.checkIn', 'sms.send']);
 const physicalCancellation = new Set(['audio', 'lyrics', 'chorus', 'account.verify', 'account.refresh', 'account.profile',
@@ -296,7 +305,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
                 (isRefresh ? refreshSlot.latestSeq === refreshOrder : flights.get(key) === flight);
               if (canStore && (!flightEntry.account || sessionCacheable.has(parts[0])) &&
                   (!shouldCache || shouldCache(result))) {
-                const bytes = Buffer.byteLength(stringifyJSONValue(result));
+                const bytes = estimateBytes(result);
                 const nowMs = Date.now();
                 const explicitExpiry = typeof result?.expiresAt === 'number' ? result.expiresAt : Infinity;
                 const expires = Math.min(nowMs + ttl, explicitExpiry);

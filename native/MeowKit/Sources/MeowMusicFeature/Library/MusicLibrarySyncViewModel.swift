@@ -9,12 +9,10 @@ import Combine
     @Published public private(set) var busy = false
     @Published public private(set) var isActive = false
     @Published public private(set) var error: String?
-    private let service: any MusicLibrarySyncing
-    private let accountService: (any MusicAccountsServing)?
-    private let settingsReceipts: MusicSettingsReceiptOwner
+    private let service: NativeMusicService
+    private let accountService: NativeMusicAccountService?
     private let onLibraryChanged: @MainActor () async -> Void
-    private var automatic: (any MusicAutomaticLibrarySyncing)? { service as? any MusicAutomaticLibrarySyncing }
-    public var supportsAutomatic: Bool { automatic != nil }
+    public var supportsAutomatic: Bool { true }
     @Published public private(set) var automaticRevision: Int?
     private var writeAuthorization: MusicQueueAuthorization?
     private var completionTask: Task<Void, Never>?
@@ -24,10 +22,9 @@ import Combine
     private var settingsTask: Task<MusicAutomaticLibrarySyncSaveResult, Error>?
     private var loadID = UUID()
 
-    public init(service: any MusicLibrarySyncing, accounts: (any MusicAccountsServing)? = nil,
-                settingsReceipts: MusicSettingsReceiptOwner,
+    public init(service: NativeMusicService, accounts: NativeMusicAccountService? = nil,
                 onLibraryChanged: @escaping @MainActor () async -> Void = {}) {
-        self.service = service; accountService = accounts; self.settingsReceipts = settingsReceipts
+        self.service = service; accountService = accounts
         self.onLibraryChanged = onLibraryChanged
     }
     public var canSync: Bool {
@@ -39,54 +36,47 @@ import Combine
     }
     public func select(_ platform: MusicAccountPlatform, favorites: Bool? = nil, playlists: Bool? = nil) {
         guard isActive, !busy, settingsTask == nil,
-              !supportsAutomatic || automaticRevision != nil else { return }
+              let revision = automaticRevision else { return }
         loadID = UUID() // A late status load must not undo this explicit choice.
         var value = selection(platform)
         if let favorites { value.favorites = favorites }
         if let playlists { value.playlists = playlists }
         selections.removeAll { $0.platform == platform }; selections.append(value)
-        if let automatic, let revision = automaticRevision {
-            let own = epoch, id = UUID(), permission = MusicQueueAuthorization()
-            let preferences = MusicAutomaticLibrarySyncPreferences(revision: revision, selections: selections)
-            completionTask?.cancel(); completionTask = nil
-            busy = true; error = nil
-            let keys = [
-                favorites == nil ? nil : "library/automatic/" + platform.rawValue + "/favorites",
-                playlists == nil ? nil : "library/automatic/" + platform.rawValue + "/playlists"
-            ].compactMap { $0 }
-            let task = settingsReceipts.submit(settings: keys, operation: "保存自动同步设置") {
-                do { return try await automatic.saveAutomaticLibrarySync(preferences, requestID: id, authorization: permission) }
-                catch { permission.revoke(); throw error }
-            }
-            settingsTask = task
-            Task { [weak self] in
-                let result = await task.result
-                guard let self else { return }
-                settingsTask = nil
-                guard current(own) else {
-                    if isActive {
-                        await load()
-                        if case .success(let receipt) = result,
-                           automaticRevision == receipt.preferences.revision {
-                            observeSettingsSynchronization(receipt, own: epoch)
-                        }
-                    }
-                    return
-                }
-                busy = false
-                switch result {
-                case .success(let receipt):
-                    selections = receipt.preferences.selections
-                    automaticRevision = receipt.preferences.revision
-                    error = nil
-                    observeSettingsSynchronization(receipt, own: own)
-                case .failure(let failure):
-                    let problem = failure as? MusicServiceError ?? MusicServiceError.sanitized(failure)
-                    error = problem == .commitUnconfirmed ? nil : problem.localizedDescription
-                    // Read once on the live page, never replay an uncertain save.
+        let own = epoch, id = UUID(), permission = MusicQueueAuthorization(), service = service
+        let preferences = MusicAutomaticLibrarySyncPreferences(revision: revision, selections: selections)
+        completionTask?.cancel(); completionTask = nil
+        busy = true; error = nil
+        let task = Task {
+            do { return try await service.saveAutomaticLibrarySync(preferences, requestID: id, authorization: permission) }
+            catch { permission.revoke(); throw error }
+        }
+        settingsTask = task
+        Task { [weak self] in
+            let result = await task.result
+            guard let self else { return }
+            settingsTask = nil
+            guard current(own) else {
+                if isActive {
                     await load()
-                    if current(own), problem != .commitUnconfirmed { error = problem.localizedDescription }
+                    if case .success(let receipt) = result,
+                       automaticRevision == receipt.preferences.revision {
+                        observeSettingsSynchronization(receipt, own: epoch)
+                    }
                 }
+                return
+            }
+            busy = false
+            switch result {
+            case .success(let receipt):
+                selections = receipt.preferences.selections
+                automaticRevision = receipt.preferences.revision
+                error = nil
+                observeSettingsSynchronization(receipt, own: own)
+            case .failure(let failure):
+                let problem = failure as? MusicServiceError ?? MusicServiceError.sanitized(failure)
+                error = problem.localizedDescription
+                await load()
+                if current(own) { error = problem.localizedDescription }
             }
         }
     }
@@ -131,12 +121,12 @@ import Combine
         do {
             let status = try await service.librarySyncState()
             guard current(own), loadID == request else { return }
-            let preferences = try await automatic?.automaticLibrarySyncPreferences()
+            let preferences = try await service.automaticLibrarySyncPreferences()
             guard current(own), loadID == request else { return }
             let rows = try await accountService?.statuses() ?? []
             guard current(own), loadID == request else { return }
-            state = status; selections = preferences?.selections ?? status.selections
-            automaticRevision = preferences?.revision; accounts = rows; error = nil
+            state = status; selections = preferences.selections
+            automaticRevision = preferences.revision; accounts = rows; error = nil
         } catch {
             guard current(own), loadID == request else { return }
             self.error = MusicServiceError.sanitized(error).errorDescription
@@ -154,11 +144,10 @@ import Combine
             let next = try await service.resetSyncAccount(for: platform)
             guard current(own) else { return }
             state = next
-            if let preferences = try await automatic?.automaticLibrarySyncPreferences() {
-                guard current(own) else { return }
-                selections = preferences.selections
-                automaticRevision = preferences.revision
-            }
+            let preferences = try await service.automaticLibrarySyncPreferences()
+            guard current(own) else { return }
+            selections = preferences.selections
+            automaticRevision = preferences.revision
             error = nil
             await onLibraryChanged()
         } catch {
@@ -175,12 +164,12 @@ import Combine
             confirmDestructive: confirmDestructive
         )
         loadID = UUID(); syncID = id; busy = true; error = nil
-        if let automatic, !confirmDestructive {
+        if !confirmDestructive {
             let permission = MusicQueueAuthorization()
             writeAuthorization = permission
             let automaticRequest = MusicAutomaticLibrarySyncRequest(id: id, reason: .manual,
                 preferenceRevision: automaticRevision, authorization: permission)
-            let task = Task { try await automatic.synchronizeAutomaticLibrary(automaticRequest) }
+            let task = Task { try await service.synchronizeAutomaticLibrary(automaticRequest) }
             syncTask = task
             await finishAutomatic(task, own: own, id: id, permission: permission)
             return
@@ -220,12 +209,10 @@ import Combine
         // Settings can be durable even when the following network round fails.
         // Read actual preferences; never visually roll back a saved OFF switch.
         do {
-            let preferences = try await automatic?.automaticLibrarySyncPreferences()
+            let preferences = try await service.automaticLibrarySyncPreferences()
             let status = try await service.librarySyncState()
             guard current(own), syncID == id else { return }
-            if let preferences {
-                selections = preferences.selections; automaticRevision = preferences.revision
-            }
+            selections = preferences.selections; automaticRevision = preferences.revision
             state = status; error = failure
             await onLibraryChanged()
         } catch {

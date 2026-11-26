@@ -32,15 +32,10 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
                 ? rowColor : null;
             return (value, db.Revision(StorageOwner));
         });
-        string color = AppearanceColors.DefaultColor;
-        if (saved is not null)
-        {
-            if (!AppearanceColors.TryParse(saved, out var parsed))
-                throw new StorageException(StorageError.Corrupt);
-            color = AppearanceColors.Hex(parsed);
-        }
         storageRevision = revision;
-        ThemeColor = color;
+        ThemeColor = saved is not null && AppearanceColors.TryParse(saved, out var parsed)
+            ? AppearanceColors.Hex(parsed)
+            : AppearanceColors.DefaultColor;
         loaded = true;
     }
     public async Task LoadAsync()
@@ -90,10 +85,7 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
             }
             catch
             {
-                // A storage failure can follow acceptance. Read the authority,
-                // never overwrite it or pretend the in-memory draft was saved.
-                try { await Read(); Status = ThemeColor == color ? "" : "主题设置未保存，请重试"; }
-                catch { loaded = false; Status = "主题设置保存失败，请重新读取"; }
+                Status = "主题设置保存失败";
             }
         }
         finally

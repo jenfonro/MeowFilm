@@ -375,7 +375,6 @@ public partial class MusicPlayerView : UserControl
             foreach (var (label, mode) in new[] { ("列表循环", 1), ("单曲循环", 3), ("随机播放", 2) })
                 ModeMenu.Items.Add(ModeAction(label, Queue.CanChangePlaybackMode, !(Queue.HasActiveRecommendation && Queue.RecommendationContinue) && Playback.Mode == mode, () => Playback.ChangeModeAsync(mode)));
             if (Queue.HasPlaybackFm) ModeMenu.Items.Add(ModeAction("切换频道", CanOpenFmChoices, false, OpenFmChoicesAsync));
-            if (Queue.CanReconcileRecommendation) ModeMenu.Items.Add(ModeAction("核对保存结果", true, false, Queue.ReconcileRecommendationAsync));
             await Show(ModeMenu, ModeButton);
             shown = ReferenceEquals(activeFlyout, ModeMenu);
         }
@@ -402,7 +401,7 @@ public partial class MusicPlayerView : UserControl
         return item;
     }
 
-    private bool CanOpenFmChoices => Queue.HasPlaybackFm && Queue.CanChangePlaybackMode && !Queue.CanReconcileRecommendation;
+    private bool CanOpenFmChoices => Queue.HasPlaybackFm && Queue.CanChangePlaybackMode;
 
     private async Task OpenFmChoicesAsync()
     {

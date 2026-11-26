@@ -13,8 +13,8 @@ public sealed partial class MusicAccountsController
     public int AccountSmsRetrySeconds => (int)Math.Clamp(
         Math.Ceiling((accountSmsRetryUntil - Environment.TickCount64) / 1000d), 0, 600);
     public string AccountSmsSendText => AccountSmsRetrySeconds > 0 ? $"{AccountSmsRetrySeconds}秒后重发" : "发送验证码";
-    public bool CanSendAccountSms => CanManageAccount && !accountSaveUncertain && ShowAccountSms && AccountSmsRetrySeconds == 0;
-    public bool CanLoginAccountSms => CanManageAccount && !accountSaveUncertain && ShowAccountSms;
+    public bool CanSendAccountSms => CanManageAccount && ShowAccountSms && AccountSmsRetrySeconds == 0;
+    public bool CanLoginAccountSms => CanManageAccount && ShowAccountSms;
 
     private void AccountSmsBindings()
     {
@@ -55,10 +55,10 @@ public sealed partial class MusicAccountsController
         accountSmsPending = true;
         return login
             ? ChangeAccountAsync("wy", "sms.login",
-                token => application.LoginAccountSmsAsync("wy", phone, countryCode, captcha!, token),
+                token => application.Accounts.LoginSmsAsync("wy", phone, countryCode, captcha!, token),
                 status => status)
             : ChangeAccountAsync("wy", "sms.send",
-                token => application.SendAccountSmsAsync("wy", phone, countryCode, token),
+                token => application.Accounts.SendSmsAsync("wy", phone, countryCode, token),
                 sent =>
                 {
                     if (sent.RetryAfterSeconds > 0) SmsCooldown(sent.RetryAfterSeconds);
@@ -78,6 +78,11 @@ public sealed partial class MusicAccountsController
         try
         {
             reply = operation == "sms.send" ? await work : await work.WaitAsync(token);
+        }
+        catch (MusicAccountException error) when (error.RetryAfterSeconds is >= 1 and <= 600)
+        {
+            SmsCooldown(error.RetryAfterSeconds);
+            throw;
         }
         catch (MusicOperationException error) when (error.RetryAfterSeconds is >= 1 and <= 600)
         {

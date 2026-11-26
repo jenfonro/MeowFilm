@@ -17,7 +17,7 @@ public sealed partial class MusicAccountOwner
         lock (gate)
         {
             var state = states[platform];
-            if (closed || state.Revoked || state.Uncertain || state.Active is not null ||
+            if (closed || state.Revoked || state.Active is not null ||
                 state.Current is not { Cookie: null }) return null;
             AccountRules.Require(state.Epoch < AccountRules.MaxInteger, "LIMIT");
             session = new("wy", "public:wy", state.Epoch + 1, "0", "__remember_me=true");
@@ -32,7 +32,7 @@ public sealed partial class MusicAccountOwner
     {
         if (!officialGuests.TryGetValue(session, out var lease)) return IsCurrent(session);
         lock (gate)
-            return !closed && states["wy"] is { Revoked: false, Uncertain: false, Active: null } state &&
+            return !closed && states["wy"] is { Revoked: false, Active: null } state &&
                 state.Epoch == lease.Epoch && state.Current is { Cookie: null } &&
                 session.Generation == lease.Epoch + 1;
     }

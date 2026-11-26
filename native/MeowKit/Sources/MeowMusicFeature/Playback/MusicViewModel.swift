@@ -3,6 +3,8 @@ import Foundation
 import Combine
 import MeowContracts
 import MeowDebug
+@_exported import MeowMusicNativeService
+@_exported import MeowMusicPlatform
 import MeowPlayback
 import MeowStorage
 import MeowUI
@@ -31,11 +33,10 @@ import MeowUI
             throw MusicServiceError.storageFailed
         }
     }
-    public let accessState = MusicAccessState()
+    public private(set) var isClosed = false
     public let libraryState = MusicLibraryState()
     public let playbackState = MusicPlaybackFeatureState()
     public let metadataState = MusicMetadataState()
-    public let settingsReceipts = MusicSettingsReceiptOwner()
     public var query = ""
     public let notices = MusicNoticeState()
     nonisolated(unsafe) private var favoritesStorage: MusicMiniPlayerFavorites?
@@ -74,10 +75,8 @@ import MeowUI
         if !libraryState.isLoaded, !isLoading { await load() }
     }
 
-    /// Adapters with an authoritative stream do not need an extra UI echo.
-    /// Other account adapters publish after their actual mutation completes.
     public func accountSessionsChanged(_ platform: MusicAccountPlatform? = nil) {
-        guard !(accounts is any MusicAccountSessionsObserving), !isClosed else { return }
+        guard accounts == nil, !isClosed else { return }
         publishAccountSessionChanges(platform.map({ [$0] }) ?? MusicAccountPlatform.allCases)
     }
 
@@ -94,7 +93,7 @@ import MeowUI
     }
 
     func observeAccountSessions() {
-        guard accountObservation == nil, let source = accounts as? any MusicAccountSessionsObserving else { return }
+        guard accountObservation == nil, let source = accounts else { return }
         accountObservation = Task { [weak self] in
             let changes = await source.accountSessionChanges()
             for await platform in changes {
@@ -116,10 +115,9 @@ import MeowUI
         activeNativeAttemptID == nil ? nil : candidate?.isCachedAudio
     }
     func chorus(actualDuration: Double) async throws -> MusicChorusPoint? {
-        guard !isClosed, let candidate, nativeAttempt != nil,
-              let provider = service as? any MusicChorusProviding else { return nil }
+        guard !isClosed, let candidate, nativeAttempt != nil, let service else { return nil }
         let epoch = lifecycle, selection = selectionID
-        let point = try await provider.chorus(attemptID: candidate.attemptId, actualDuration: actualDuration)
+        let point = try await service.chorus(attemptID: candidate.attemptId, actualDuration: actualDuration)
         try Task.checkCancellation()
         guard lifecycle == epoch, selectionID == selection, self.candidate?.attemptId == candidate.attemptId,
               !isClosed else { throw MusicServiceError.staleResult }
@@ -139,16 +137,11 @@ import MeowUI
         set { if clock.duration != newValue { clock.duration = newValue } }
     }
 
-    let service: (any MusicServing)?
-    lazy var libraryActions = MusicLibraryActions(service: service, access: accessState, state: libraryState)
-    public let accounts: (any MusicAccountsServing)?
+    public let service: NativeMusicService?
+    lazy var libraryActions = MusicLibraryActions(owner: self, state: libraryState)
+    public let accounts: NativeMusicAccountService?
     /// Installed script sources; built-in sources are part of the playback settings.
-    public let scriptSources: (any MusicScriptSourceManaging)?
-    public var accountBrowser: (any MusicAccountBrowsing)? { service as? any MusicAccountBrowsing }
-    public var librarySync: (any MusicLibrarySyncing)? { service as? any MusicLibrarySyncing }
-    public var remoteQueueService: (any MusicRemoteQueueServing)? { service as? any MusicRemoteQueueServing }
-    public var playbackFeedbackSettings: (any MusicPlaybackFeedbackSettingsServing)? { service as? any MusicPlaybackFeedbackSettingsServing }
-    public var metadataPreferencesService: (any MusicMetadataPreferencesServing)? { service }
+    public let scriptSources: NativeMusicScriptService?
     let feedbackConsumer: MusicPlaybackFeedbackConsumer
     let sourcePlayback = MusicSourcePlaybackCoordinator()
     let recommendations = MusicRecommendationCoordinator()
@@ -213,25 +206,27 @@ import MeowUI
     }
 
     #if os(iOS)
-    public init(service: any MusicServing, playback: PlaybackController,
-                accounts: (any MusicAccountsServing)? = nil,
-                scriptSources: (any MusicScriptSourceManaging)? = nil,
+    public init(service: NativeMusicService, playback: PlaybackController,
+                accounts: NativeMusicAccountService? = nil,
+                scriptSources: NativeMusicScriptService? = nil,
                 artworkImages: MusicArtworkImages? = nil) {
         self.artworkImages = artworkImages ?? MusicArtworkImages()
-        self.service = service; self.playback = playback; self.accounts = accounts
-        self.scriptSources = scriptSources
-        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
+        self.service = service; self.playback = playback
+        self.accounts = accounts ?? service.accounts
+        self.scriptSources = scriptSources ?? service.scripts
+        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service)
         configureMetadata()
         observeAccountSessions()
         observeSongRepository()
     }
     #else
-    public init(service: any MusicServing, playback: PlaybackController,
-                accounts: (any MusicAccountsServing)? = nil,
-                scriptSources: (any MusicScriptSourceManaging)? = nil) {
-        self.service = service; self.playback = playback; self.accounts = accounts
-        self.scriptSources = scriptSources
-        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
+    public init(service: NativeMusicService, playback: PlaybackController,
+                accounts: NativeMusicAccountService? = nil,
+                scriptSources: NativeMusicScriptService? = nil) {
+        self.service = service; self.playback = playback
+        self.accounts = accounts ?? service.accounts
+        self.scriptSources = scriptSources ?? service.scripts
+        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service)
         configureMetadata()
         observeAccountSessions()
         observeSongRepository()
@@ -291,7 +286,7 @@ import MeowUI
                                          diagnosticID: trace.logicalID)
         }
     }
-    func requireService() throws -> any MusicServing {
+    func requireService() throws -> NativeMusicService {
         guard let service else { throw MusicServiceError.unavailable }; return service
     }
     func stopOwned() {
@@ -357,9 +352,7 @@ import MeowUI
                 if collectionCatalogueID == catalogueID { publishCollections(nextCollections) }
                 libraryState.platforms = nextPlatforms
                 libraryState.isLoaded = true
-                if let repository = service as? any MusicSongRepositoryReading {
-                    await refreshRepositoryProjections(repository, access: epoch)
-                }
+                await refreshRepositoryProjections(service, access: epoch)
                 try check(epoch); guard loadID == token else { return }
                 // Persistence never means playback. No prepare, resolve, play,
                 // resume, audio-session activation or synthetic played event.
@@ -387,13 +380,10 @@ import MeowUI
         // A settings action supersedes an in-flight selection, not an already
         // playing resource. Do this before the first await, even if the write fails.
         if isResolving { invalidateSelection(stopMedia: candidate == nil) }
-        let service: any MusicServing
+        let service: NativeMusicService
         do { service = try requireService() } catch { return }
-        let submitted = settingsReceipts.submit(settings: change.receiptSettings, operation: "保存播放设置") {
-            try await service.updateSettings(change)
-        }
         do {
-            _ = try await submitted.value
+            _ = try await service.updateSettings(change)
             try await reconcilePlaybackFeedbackSettings()
             try check(epoch)
             if change.mode != nil { await loadRecommendationState() }
@@ -405,14 +395,14 @@ import MeowUI
             }
         } catch {
             let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
-            if [.commitUnconfirmed, .staleRevision, .storageConflict].contains(failure) {
+            if [.staleRevision, .storageConflict].contains(failure) {
                 do { try await reconcilePlaybackFeedbackSettings() }
                 catch {
                     if !Task.isCancelled { report(error, epoch: epoch, operation: "读取播放设置", kind: .settings) }
                     return
                 }
             }
-            if failure != .commitUnconfirmed, !Task.isCancelled {
+            if !Task.isCancelled {
                 report(error, epoch: epoch, operation: "保存播放设置", kind: .settings)
             }
         }
@@ -420,12 +410,33 @@ import MeowUI
     public func setMode(_ mode: MusicPlaybackMode) async {
         await updateSettings(MusicSettingsChange(ifRevision: state.settingsRevision, mode: mode))
     }
+    func reconcilePlaybackFeedbackSettings() async throws {
+        let own = lifecycle
+        guard !isClosed else { throw MusicServiceError.staleAccess }
+        let service = try requireService()
+        let next = try await service.state()
+        guard !isClosed, lifecycle == own else { throw MusicServiceError.staleAccess }
+        guard next.settingsRevision >= state.settingsRevision else { return }
+        let current = state, navigation = next.revision == current.revision ? next : current
+        let reconciled = MusicPlaybackState(
+            revision: current.revision, settingsRevision: next.settingsRevision, mode: next.mode,
+            qualityEnabled: next.qualityEnabled, qualityOrder: next.qualityOrder,
+            spatialEnabled: next.spatialEnabled, spatialOrder: next.spatialOrder,
+            lyricsEnabled: next.lyricsEnabled, showTranslation: next.showTranslation,
+            officialSources: next.officialSources, currentId: current.currentId, total: current.total,
+            position: current.position, canNext: navigation.canNext, canPrevious: navigation.canPrevious,
+            nextPreviewID: navigation.nextPreviewID, previousPreviewID: navigation.previousPreviewID,
+            sourceCollectionID: current.sourceCollectionID, requestQuality: next.requestQuality,
+            queueSourceTitle: current.queueSourceTitle
+        )
+        if reconciled != current { playbackState.state = reconciled }
+    }
     /// Stops output synchronously while exit observations still own their
     /// candidate. `close()` drains those local facts, never the network ACK.
     public func prepareForClose() {
         guard !isClosed, !isClosing else { return }
         isClosing = true
-        (service as? any MusicPlaybackFeedbackClosePreparing)?.stopPlaybackFeedbackDispatchForClose()
+        service?.stopPlaybackFeedbackDispatchForClose()
         cancelPlayPauseCommands()
         navigationTask?.cancel()
         sourcePlayback.cancel()
@@ -436,14 +447,32 @@ import MeowUI
         nativeAttempt = nil; pendingNativeResourceID = nil
         closingTask = Task { await completeClose(attemptID: attempt) }
     }
+    public func searchPage(platform: String, query: String, page: Int, limit: Int = 30) async throws -> MusicSearchPage {
+        guard MusicSearchPreferences.platforms.contains(where: { $0.rawValue == platform }) else {
+            throw MusicServiceError.unsupported
+        }
+        return try await requireService().search(platform: platform, query: query, page: page, limit: limit)
+    }
+    public func searchRecording(_ request: MusicSearchBatchRequest) async throws -> MusicRemoteTrack {
+        try await requireService().searchRecording(request)
+    }
+    public func observeSearchPages(_ pages: [MusicSearchPage], references: [MusicReference]) async throws {
+        try await service?.observeSearchPages(pages, references: references)
+    }
+    public func searchPlaylistPage(platform: MusicPublicBrowsePlatform, query: String,
+                                   page: Int, limit: Int) async throws -> MusicPlaylistSearchPage {
+        try await requireService().searchPublicPlaylists(platform: platform, query: query, page: page, limit: limit)
+    }
+
     public func close() async {
         prepareForClose()
         await closingTask?.value
     }
     public func debugCacheStats() async -> DebugJSONValue {
+        let lyricStats = await playbackMetadata.debugLyricCacheStats()
         let searchStats = await searchResultsCache.stats()
         return .object([
-            "lyricMemoryCache": playbackMetadata.debugLyricCacheStats(),
+            "lyricMemoryCache": lyricStats,
             "searchResultsCache": .object([
                 "entryCount": .int(searchStats.entryCount),
                 "inFlightCount": .int(searchStats.inFlightCount),
@@ -455,7 +484,7 @@ import MeowUI
     }
 
     public func debugClearMemoryCaches() async {
-        playbackMetadata.clearMemoryLyricCache()
+        await playbackMetadata.clearMemoryLyricCache()
         await searchResultsCache.invalidate()
         cacheClearEvents.send()
     }
@@ -467,20 +496,18 @@ import MeowUI
         await feedbackConsumer.flush()
         await eventTail?.value
         await feedbackConsumer.finish(reason: .interrupt)
-        await settingsReceipts.flush()
         favoritesObservation?.cancel(); favoritesObservation = nil
         favoritesStorage?.suspend()
         accountObservation?.cancel(); accountObservation = nil
         songRepositoryObservation?.cancel(); songRepositoryObservation = nil
-        notifyCollectionPages(.revoking)
         cancelRemoteQueuePreparation(); cancelFMNavigation(); await stopFMAndDrain()
         stopSimilarObservation()
-        accessState.isClosed = true; lifecycle = UUID(); searchAccessGeneration = UUID(); navigationTask?.cancel(); eventTail?.cancel()
+        isClosed = true; lifecycle = UUID(); searchAccessGeneration = UUID(); navigationTask?.cancel(); eventTail?.cancel()
         metadataPreferencesRefreshRequested = false
         metadataPreferencesRefreshTask?.cancel()
         await playbackMetadata.close()
         await searchResultsCache.invalidate()
-        notifyCollectionPages(.access)
+        notifyCollectionPagesClosed()
         navigationID = UUID(); playbackState.isNavigating = false; playbackState.isChangingQueue = false
         invalidateSelection(stopMedia: true)
         playbackState.queue = []; notices.queueNotice = nil; metadataState.lyricLines = []

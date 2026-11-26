@@ -17,7 +17,7 @@ private final class MusicAccountExportStagingFile {
 final class MusicAccountTransferState: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var summary: MusicAccountImportSummary?
-    let service: (any MusicAccountTransferring)?
+    let service: NativeMusicAccountService?
     private let owner: MusicViewModel
     private var active = false
     private var operation = UUID()
@@ -32,7 +32,7 @@ final class MusicAccountTransferState: ObservableObject {
 
     init(owner: MusicViewModel) {
         self.owner = owner
-        service = owner.accounts as? any MusicAccountTransferring
+        service = owner.accounts
     }
     var canTransfer: Bool { active && !owner.isClosed && service != nil }
     func start() { active = true }

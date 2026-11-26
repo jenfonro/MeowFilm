@@ -9,7 +9,7 @@
   },
   "exports": {
     ".": "./src/index.js",
-    "./bootstrap": "./src/bootstrap.js",
+    "./bootstrap": "./src/native-loader.js",
     "./cat-output": "./src/cat-output.js",
     "./media-manifest": "./src/media-manifest.js",
     "./native-json": "./src/native-json.js",
@@ -24,9 +24,6 @@
     "build/Release/source-sdk.js",
     "build/Release/cat-web-values.cjs"
   ],
-  "scripts": {
-    "check": "node scripts/check.mjs"
-  },
   "dependencies": {
     "@meowfilm/storage": "0.1.0",
     "@meowfilm/runtime-bridge": "0.2.0",

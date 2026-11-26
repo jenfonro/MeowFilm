@@ -186,7 +186,7 @@ final class MeowfilmDebugNavigator {
 
         case "music.daily":
             let coordinator = try requireCoordinator()
-            guard let music = assembly?.music, let browser = music.publicBrowser else {
+            guard let music = assembly?.music, let service = music.service else {
                 throw DebugAPIError.invalidState("Music public browser is not available")
             }
             let platform = resolveAccountPlatform(params["platform"]?.stringValue, music: music)
@@ -194,7 +194,7 @@ final class MeowfilmDebugNavigator {
             let page = MusicCollectionViewController(
                 model: music,
                 recommendation: .discovery(.daily(platform)),
-                browser: browser,
+                service: service,
                 appearance: coordinator.assembly.appearance,
                 router: coordinator
             )
@@ -267,7 +267,7 @@ final class MeowfilmDebugNavigator {
             } else if let platRaw = params["platform"]?.stringValue,
                       let remoteId = params["remoteId"]?.stringValue,
                       !remoteId.isEmpty {
-                guard let browser = music.publicBrowser else {
+                guard let service = music.service else {
                     throw DebugAPIError.invalidState("Music public browser is not available")
                 }
                 guard let platform = parseBrowsePlatform(platRaw) else {
@@ -280,7 +280,7 @@ final class MeowfilmDebugNavigator {
                 let page = MusicCollectionViewController(
                     model: music,
                     collection: col,
-                    browser: browser,
+                    service: service,
                     appearance: coordinator.assembly.appearance,
                     router: coordinator
                 )

@@ -1,5 +1,5 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 import MeowStorage
 
 enum MusicSourceDiscoveryStore {

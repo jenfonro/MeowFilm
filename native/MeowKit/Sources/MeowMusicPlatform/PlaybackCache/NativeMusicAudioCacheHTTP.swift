@@ -21,7 +21,6 @@ enum NativeMusicAudioCacheHTTPPolicy {
     static let maximumBytes: Int64 = 256 * 1024 * 1024
     static let transferIdle: TimeInterval = 120
     static let transferMaximum: TimeInterval = 30 * 60
-    static let inspectionMaximum: TimeInterval = 120
     static let maxRedirects = 10
 
     static func permits(_ url: URL) -> Bool {

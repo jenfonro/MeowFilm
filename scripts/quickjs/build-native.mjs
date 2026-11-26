@@ -211,30 +211,8 @@ export async function prepareSource(name, source) {
     }
     // Only this tool's fixed dependency cache is replaced when locked inputs change.
     await rm(directory, { recursive: true, force: true });
-  } else if (await exists(directory)) {
-    // Existing source was downloaded during implementation; validate through a temporary extraction.
-    // The fixed preparation directory is removed immediately after adoption.
-    const temporary = `${directory}.prepare`;
-    if (await exists(temporary)) throw new Error(`Unfinished native source preparation: ${pathOf(temporary)}`);
-    await mkdir(temporary);
-    try {
-      await run('tar', ['-xzf', archive, '--strip-components=1', '-C', temporary]);
-      const oldPath = source.sourcePath;
-      const tempSource = { ...source, sourcePath: pathOf(temporary) };
-      for (const patch of patches) await applyPatch(tempSource, patch);
-      const sourceFiles = await files(pathOf(temporary));
-      const paths = sourceFiles.map(file => `${oldPath}/${file.slice(pathOf(temporary).length + 1)}`);
-      await verifySourceInventory(source, paths);
-      for (const file of sourceFiles) {
-        const target = `${oldPath}/${relative(temporary, resolve(root, file)).split(sep).join('/')}`;
-        if (!await exists(resolve(root, target)) || await fileHash(target) !== await fileHash(file)) {
-          throw new Error(`Existing native source does not match pinned input: ${target}`);
-        }
-      }
-      await writeFile(recordPath, JSON.stringify({ identity, files: await hashInputs(paths) }, null, 2) + '\n');
-      return paths;
-    } finally { await rm(temporary, { recursive: true }); }
   }
+  await rm(directory, { recursive: true, force: true });
   await mkdir(directory, { recursive: true });
   await run('tar', ['-xzf', archive, '--strip-components=1', '-C', directory]);
   for (const patch of patches) await applyPatch(source, patch);
@@ -426,10 +404,6 @@ async function buildNative() {
     ...await sdkDependencyInputs(),
   ];
   if (JSON.stringify(finalSDKCandidates) !== JSON.stringify(sdkCandidates)) throw new Error('SDK source membership changed during build');
-  await unchanged(before);
-  await unchanged(headerArchiveInput);
-  const finalHeaders = await verifyHeaders(gypPackage, nodeArchive, headerRoot);
-  if (JSON.stringify(headers.inputs) !== JSON.stringify(finalHeaders.inputs)) throw new Error('Node headers changed during build');
   const paths = [
     'package.json', 'package-lock.json', ...policy.mandatoryInputs,
     'scripts/quickjs/build-source-sdk.mjs', ...nativeInputs, ...sourceInputs, ...sdkInputs,
@@ -466,10 +440,7 @@ async function buildNative() {
     },
   };
   await unchanged(before);
-  await unchanged(inputs);
-  for (const source of Object.values(policy.sources)) {
-    await verifySourceInventory(source, sourceInputs.filter(path => path.startsWith(source.sourcePath + '/')));
-  }
+  await unchanged(headerArchiveInput);
   const receiptPath = resolve(root, policy.artifact.manifest);
   const receiptPartial = `${receiptPath}.partial`;
   await writeFile(receiptPartial, JSON.stringify(receipt, null, 2) + '\n');

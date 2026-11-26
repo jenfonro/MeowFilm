@@ -58,11 +58,7 @@ public sealed partial class MusicSettingsController
         if (!preserveGeometryRequest && desktopLyricGeometryWrites == 0)
             desktopLyricGeometryRequest = nextGeometry;
         desktopLyricLoaded = true;
-        if (layoutChanged)
-        {
-            Changed(nameof(DesktopLyricLayout));
-            DesktopLyricLayoutChanged?.Invoke();
-        }
+        if (layoutChanged) Changed(nameof(DesktopLyricLayout));
         if (normalChanged) Changed(nameof(DesktopLyricNormalColor));
         if (highlightChanged) Changed(nameof(DesktopLyricHighlightColor));
         if (geometryChanged) Changed(nameof(DesktopLyricGeometry));
@@ -78,8 +74,7 @@ public sealed partial class MusicSettingsController
         {
             try
             {
-                var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.DesktopLyricsWithGeometry,
-                    ct => application.GetDesktopLyricsAsync(ct), lifetime.Token);
+                var settings = await application.Library.GetDesktopLyricsAsync(lifetime.Token);
                 lifetime.Token.ThrowIfCancellationRequested();
                 AcceptDesktopLyrics(settings);
             }
@@ -136,26 +131,22 @@ public sealed partial class MusicSettingsController
                 MusicDesktopLyricsGeometryRecord? nextGeometryRecord = nextGeometry is { } value
                     ? new MusicDesktopLyricsGeometryRecord(value.Monitor, value.X, value.Y, value.Width, value.Height)
                     : null;
-                var descriptor = MusicSettingReceiptKeys.DesktopLyrics(nextGeometryRecord is not null);
                 try
                 {
-                    var saved = await RunSettingReceiptAsync(descriptor,
-                        ct => application.SaveDesktopLyricsAsync(desktopLyricRevision, nextLayout, nextNormal,
-                            nextHighlight, nextGeometryRecord, nextGeometryRecord is not null, ct), lifetime.Token);
+                    var saved = await application.Library.SaveDesktopLyricsAsync(desktopLyricRevision, nextLayout, nextNormal,
+                        nextHighlight, nextGeometryRecord, nextGeometryRecord is not null, lifetime.Token);
                     AcceptDesktopLyrics(saved, preserveGeometryRequest: desktopLyricGeometryWrites > 0);
                 }
-                catch (MusicOperationException error) when (error.Code is
-                    "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
+                catch (Exception error) when (ErrorCode(error) is "STORAGE_CONFLICT" or "REVISION_CONFLICT")
                 {
-                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.DesktopLyricsWithGeometry,
-                        ct => application.GetDesktopLyricsAsync(ct), lifetime.Token);
+                    var current = await application.Library.GetDesktopLyricsAsync(lifetime.Token);
                     AcceptDesktopLyrics(current, preserveGeometryRequest: desktopLyricGeometryWrites > 0);
                     bool requestedValuesChanged = nextLayoutArg is not null && desktopLyricLayout != nextLayout ||
                         nextNormalArg is not null && desktopLyricNormalColor != nextNormal ||
                         nextHighlightArg is not null && desktopLyricHighlightColor != nextHighlight ||
                         saveGeometry && desktopLyricGeometry != nextGeometry;
                     if (requestedValuesChanged)
-                        await Notify(error.Code == "REVISION_CONFLICT" ? "桌面歌词设置已更新" :
+                        await Notify(ErrorCode(error) == "REVISION_CONFLICT" ? "桌面歌词设置已更新" :
                             saveGeometry ? "桌面歌词位置和大小保存失败" : "桌面歌词设置保存失败");
                 }
             }

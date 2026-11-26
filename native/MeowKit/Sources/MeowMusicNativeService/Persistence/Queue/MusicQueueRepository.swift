@@ -41,42 +41,21 @@ enum MusicQueueRepository {
         ) else { return nil }
 
         let rawEntries: [(id: String, songID: String, contextID: String?)] = try db.query(
-            "SELECT entry_id,song_id,context_id FROM music_queue_entries WHERE scope=? ORDER BY position",
-            [.text(scope)]
-        ) { c in
-            (id: try c.text(0), songID: try c.text(1), contextID: try c.optionalText(2))
-        }
+            "SELECT entry_id,song_id,context_id FROM music_queue_entries WHERE scope=? ORDER BY position", [.text(scope)]
+        ) { c in (id: try c.text(0), songID: try c.text(1), contextID: try c.optionalText(2)) }
 
         var contextIDs = Set(rawEntries.compactMap(\.contextID))
-
         var lists: [String: [String]] = [:]
-        try db.scan(
-            "SELECT list_kind,item_value FROM music_queue_list_items WHERE scope=? ORDER BY list_kind,position",
-            [.text(scope)]
-        ) { c in
+        try db.scan("SELECT list_kind,item_value FROM music_queue_list_items WHERE scope=? ORDER BY list_kind,position", [.text(scope)]) { c in
             lists[try c.text(0), default: []].append(try c.text(1))
         }
 
-        let similarRaw = try readSimilarRaw(db, scope: scope)
-        if let retEntries = similarRaw?.returnEntries {
-            for row in retEntries {
-                if let cid = row.contextID { contextIDs.insert(cid) }
-            }
-        }
-
+        let similarRaw = try readSimilar(db, scope: scope, contextIDs: &contextIDs)
         let contexts = try MusicPlayContextStore.loadMap(db, ids: contextIDs)
-
         let entries = rawEntries.map { row in
-            MusicQueueEntryRecord(
-                id: row.id,
-                songID: row.songID,
-                context: row.contextID.flatMap { contexts[$0] } ?? .empty
-            )
+            MusicQueueEntryRecord(id: row.id, songID: row.songID, context: row.contextID.flatMap { contexts[$0] } ?? .empty)
         }
-
-        let similar = similarRaw.map { raw in
-            buildSimilar(raw: raw, contexts: contexts)
-        }
+        let similar = similarRaw?(contexts)
 
         return MusicQueueState(
             currentID: state.currentID,
@@ -201,159 +180,61 @@ enum MusicQueueRepository {
         }
     }
 
-    private struct SimilarRaw {
-        let seedSongID: String?
-        let seedTitle: String
-        let seedEntryID: String?
-        let fromHome: Bool
-        let provider: String
-        let continueEnabled: Bool
-        let offsetVal: Int
-        let exhausted: Bool
-        let similarScope: String
-        let status: String
-        let providerPID: String?
-        let providerSID: String?
-        let providerCount: Int?
-        let hasReturnQueue: Bool
-        let returnCurrentID: String?
-        let returnSource: MusicSourceRecord?
-        let returnEntries: [(id: String, songID: String, contextID: String?)]
-        let lists: [String: [String]]
-        let batches: [MusicQueueSimilarBatchRecord]
-    }
-
-    private static func readSimilarRaw(_ db: SQLiteConnection, scope: String) throws -> SimilarRaw? {
+    private static func readSimilar(
+        _ db: SQLiteConnection, scope: String, contextIDs: inout Set<String>
+    ) throws -> (([String: MusicPlayContextRecord]) -> MusicQueueSimilarState)? {
         guard let row = try db.queryOne(
-            "SELECT \(similarSelectColumns) FROM ios_music_queue_similar_state WHERE scope=?",
-            [.text(scope)],
+            "SELECT \(similarSelectColumns) FROM ios_music_queue_similar_state WHERE scope=?", [.text(scope)],
             map: { c in
-                (
-                    seedSongID: try c.optionalText(0),
-                    seedTitle: try c.optionalText(1) ?? "",
-                    seedEntryID: try c.optionalText(2),
-                    fromHome: try c.optionalBool(3) ?? false,
-                    provider: try c.optionalText(4) ?? "",
-                    continueEnabled: try c.optionalBool(5) ?? false,
-                    offsetVal: try c.optionalInteger(6) ?? 0,
-                    exhausted: try c.optionalBool(7) ?? false,
-                    similarScope: try c.optionalText(8) ?? "",
-                    status: try c.optionalText(9) ?? "ready",
-                    providerPID: try c.optionalText(10),
-                    providerSID: try c.optionalText(11),
-                    providerCount: try c.optionalInteger(12),
-                    hasReturnQueue: try c.bool(13),
-                    returnCurrentID: try c.optionalText(14),
-                    returnSource: try MusicSourceRecord.read(from: c, offset: 15)
-                )
+                (seedSongID: try c.optionalText(0), seedTitle: try c.optionalText(1) ?? "",
+                 seedEntryID: try c.optionalText(2), fromHome: try c.optionalBool(3) ?? false,
+                 provider: try c.optionalText(4) ?? "", continueEnabled: try c.optionalBool(5) ?? false,
+                 offsetVal: try c.optionalInteger(6) ?? 0, exhausted: try c.optionalBool(7) ?? false,
+                 similarScope: try c.optionalText(8) ?? "", status: try c.optionalText(9) ?? "ready",
+                 providerPID: try c.optionalText(10), providerSID: try c.optionalText(11),
+                 providerCount: try c.optionalInteger(12), hasReturnQueue: try c.bool(13),
+                 returnCurrentID: try c.optionalText(14), returnSource: try MusicSourceRecord.read(from: c, offset: 15))
             }
         ) else { return nil }
 
         var lists: [String: [String]] = [:]
-        try db.scan(
-            "SELECT list_kind,item_value FROM ios_music_queue_similar_list_items WHERE scope=? ORDER BY list_kind,position",
-            [.text(scope)]
-        ) { c in
+        try db.scan("SELECT list_kind,item_value FROM ios_music_queue_similar_list_items WHERE scope=? ORDER BY list_kind,position", [.text(scope)]) { c in
             lists[try c.text(0), default: []].append(try c.text(1))
         }
-
-        let returnEntries: [(id: String, songID: String, contextID: String?)]
-        if row.hasReturnQueue {
-            returnEntries = try db.query(
-                "SELECT entry_id,song_id,context_id FROM ios_music_queue_similar_return_entries WHERE scope=? ORDER BY position",
-                [.text(scope)]
-            ) { c in
+        let returnEntries: [(id: String, songID: String, contextID: String?)] = row.hasReturnQueue
+            ? try db.query("SELECT entry_id,song_id,context_id FROM ios_music_queue_similar_return_entries WHERE scope=? ORDER BY position", [.text(scope)]) { c in
                 (id: try c.text(0), songID: try c.text(1), contextID: try c.optionalText(2))
-            }
-        } else {
-            returnEntries = []
-        }
+            } : []
+        for item in returnEntries { if let cid = item.contextID { contextIDs.insert(cid) } }
 
         var batchEntries: [String: [String]] = [:]
-        try db.scan(
-            "SELECT batch_id,entry_id FROM ios_music_queue_similar_batch_entries WHERE scope=? ORDER BY batch_id,position",
-            [.text(scope)]
-        ) { c in
+        try db.scan("SELECT batch_id,entry_id FROM ios_music_queue_similar_batch_entries WHERE scope=? ORDER BY batch_id,position", [.text(scope)]) { c in
             batchEntries[try c.text(0), default: []].append(try c.text(1))
         }
-
         let batches: [MusicQueueSimilarBatchRecord] = try db.query(
-            "SELECT batch_id,based_on_song_id,based_on_title,provider FROM ios_music_queue_similar_batches " +
-            "WHERE scope=? ORDER BY position",
-            [.text(scope)]
+            "SELECT batch_id,based_on_song_id,based_on_title,provider FROM ios_music_queue_similar_batches WHERE scope=? ORDER BY position", [.text(scope)]
         ) { c in
             let batchID = try c.text(0)
-            return MusicQueueSimilarBatchRecord(
-                id: batchID,
-                basedOnSongID: try c.optionalText(1),
-                basedOnTitle: try c.optionalText(2) ?? "",
-                provider: try c.optionalText(3) ?? "",
-                entryIDs: batchEntries[batchID] ?? []
-            )
+            return MusicQueueSimilarBatchRecord(id: batchID, basedOnSongID: try c.optionalText(1),
+                basedOnTitle: try c.optionalText(2) ?? "", provider: try c.optionalText(3) ?? "",
+                entryIDs: batchEntries[batchID] ?? [])
         }
 
-        return SimilarRaw(
-            seedSongID: row.seedSongID,
-            seedTitle: row.seedTitle,
-            seedEntryID: row.seedEntryID,
-            fromHome: row.fromHome,
-            provider: row.provider,
-            continueEnabled: row.continueEnabled,
-            offsetVal: row.offsetVal,
-            exhausted: row.exhausted,
-            similarScope: row.similarScope,
-            status: row.status,
-            providerPID: row.providerPID,
-            providerSID: row.providerSID,
-            providerCount: row.providerCount,
-            hasReturnQueue: row.hasReturnQueue,
-            returnCurrentID: row.returnCurrentID,
-            returnSource: row.returnSource,
-            returnEntries: returnEntries,
-            lists: lists,
-            batches: batches
-        )
-    }
-
-    private static func buildSimilar(raw: SimilarRaw, contexts: [String: MusicPlayContextRecord]) -> MusicQueueSimilarState {
-        let returnQueue: MusicQueueSimilarReturnRecord?
-        if raw.hasReturnQueue {
-            let entries = raw.returnEntries.map { entry in
-                MusicQueueEntryRecord(
-                    id: entry.id,
-                    songID: entry.songID,
-                    context: entry.contextID.flatMap { contexts[$0] } ?? .empty
-                )
-            }
-            returnQueue = MusicQueueSimilarReturnRecord(
-                entries: entries,
-                currentID: raw.returnCurrentID,
-                priority: raw.lists["return_priority"] ?? [],
-                history: raw.lists["return_history"] ?? [],
-                source: raw.returnSource
+        return { contexts in
+            let returnQueue: MusicQueueSimilarReturnRecord? = row.hasReturnQueue ? MusicQueueSimilarReturnRecord(
+                entries: returnEntries.map { MusicQueueEntryRecord(id: $0.id, songID: $0.songID, context: $0.contextID.flatMap { contexts[$0] } ?? .empty) },
+                currentID: row.returnCurrentID, priority: lists["return_priority"] ?? [],
+                history: lists["return_history"] ?? [], source: row.returnSource
+            ) : nil
+            return MusicQueueSimilarState(
+                seedSongID: row.seedSongID, seedTitle: row.seedTitle, seedEntryID: row.seedEntryID,
+                fromHome: row.fromHome, provider: row.provider, continueEnabled: row.continueEnabled,
+                offsetVal: row.offsetVal, exhausted: row.exhausted, similarScope: row.similarScope,
+                status: row.status, providerPID: row.providerPID, providerSID: row.providerSID,
+                providerCount: row.providerCount, returnQueue: returnQueue,
+                sourceIDs: lists["source_ids"] ?? [], attempted: lists["attempted"] ?? [], batches: batches
             )
-        } else {
-            returnQueue = nil
         }
-        return MusicQueueSimilarState(
-            seedSongID: raw.seedSongID,
-            seedTitle: raw.seedTitle,
-            seedEntryID: raw.seedEntryID,
-            fromHome: raw.fromHome,
-            provider: raw.provider,
-            continueEnabled: raw.continueEnabled,
-            offsetVal: raw.offsetVal,
-            exhausted: raw.exhausted,
-            similarScope: raw.similarScope,
-            status: raw.status,
-            providerPID: raw.providerPID,
-            providerSID: raw.providerSID,
-            providerCount: raw.providerCount,
-            returnQueue: returnQueue,
-            sourceIDs: raw.lists["source_ids"] ?? [],
-            attempted: raw.lists["attempted"] ?? [],
-            batches: raw.batches
-        )
     }
 
     private static func applySimilarChanges(_ db: SQLiteConnection,

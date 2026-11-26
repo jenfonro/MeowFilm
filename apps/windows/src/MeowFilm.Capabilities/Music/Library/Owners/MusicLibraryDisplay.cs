@@ -50,45 +50,6 @@ public sealed partial class MusicLibraryOwner
         return result;
     }
 
-    private static void ValidateCachedLines(IReadOnlyList<CachedLyricLine> lines)
-    {
-        MusicRules.Require(lines.Count > 0, "INVALID_LYRIC_RESPONSE");
-        MusicRules.Require(lines.Count <= 10000, "LIMIT");
-        double previous = -1;
-        int characters = 0, wordCount = 0;
-
-        void CheckText(string text)
-        {
-            MusicRules.Require(!text.Contains('\0'), "INVALID_LYRIC_RESPONSE");
-            characters += text.Length;
-            MusicRules.Require(text.Length <= 65536 && characters <= 4 * 65536, "LIMIT");
-        }
-
-        foreach (var line in lines)
-        {
-            MusicRules.Require(double.IsFinite(line.TimeSec) && line.TimeSec is >= 0 and <= 86400000, "INVALID_LYRIC_RESPONSE");
-            MusicRules.Require(line.TimeSec >= previous, "INVALID_LYRIC_RESPONSE");
-            previous = line.TimeSec;
-            if (line.EndSec is { } end)
-                MusicRules.Require(double.IsFinite(end) && end is >= 0 and <= 86400000 && end >= line.TimeSec, "INVALID_LYRIC_RESPONSE");
-            CheckText(line.Text);
-            if (line.Translation is not null) CheckText(line.Translation);
-            if (line.Romanization is not null) CheckText(line.Romanization);
-            if (line.Words is { } words)
-            {
-                foreach (var word in words)
-                {
-                    MusicRules.Require(++wordCount <= 65536, "LIMIT");
-                    MusicRules.Require(double.IsFinite(word.TimeSec) && Math.Abs(word.TimeSec) <= 86400000, "INVALID_LYRIC_RESPONSE");
-                    MusicRules.Require(double.IsFinite(word.DurationSec) && word.DurationSec is >= 0 and <= 86400000, "INVALID_LYRIC_RESPONSE");
-                    CheckText(word.Text);
-                    if (word.OffsetSec is { } off)
-                        MusicRules.Require(double.IsFinite(off) && Math.Abs(off) <= 86400000, "INVALID_LYRIC_RESPONSE");
-                }
-            }
-        }
-    }
-
     private static int EstimateDisplayBytes(string sourceKey, IReadOnlyList<CachedLyricLine> lines)
     {
         int bytes = 32 + Encoding.UTF8.GetByteCount(sourceKey);
@@ -111,10 +72,9 @@ public sealed partial class MusicLibraryOwner
         try
         {
             lock (repositoryGate) MusicRules.Require(!closed && !preparing, "CLOSED");
-            var normalized = NativeMusicSong.Normalize(song);
-            string key = DisplayKey(normalized);
+            string key = DisplayKey(song);
             if (requestedSourceKey is not null)
-                MusicRules.Require(normalized.Sources.Any(source => source.SourceKey == requestedSourceKey), "TARGET_CHANGED");
+                MusicRules.Require(song.Sources.Any(source => source.SourceKey == requestedSourceKey), "TARGET_CHANGED");
 
             CachedLyricsRecord? saved = null;
             var presentations = PresentationCache;
@@ -129,36 +89,21 @@ public sealed partial class MusicLibraryOwner
                     saved = null;
                 }
                 await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding); entered = true;
-                // A save completed while this individual read or gate wait
-                // was in flight wins. Re-read only that song, outside the gate.
                 if (key.Length == 0 || version == presentations.LyricVersion) break;
                 gate.Release(); entered = false;
             }
             MusicRules.Require(!closed && !preparing, "CLOSED");
             token.ThrowIfCancellationRequested();
             await LoadAsync(token).ConfigureAwait(false);
-            await AdmitReadLockedAsync(null, token).ConfigureAwait(false);
             var doc = session!;
-
-            try
-            {
-                if (saved is not null) ValidateCachedLines(saved.Lines);
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception error) when (error is StorageException or MusicLibraryException)
-            {
-                DebugLog.Warn(DebugCategories.MusicPlayback, "lyrics", "display_lyric_cache_invalid",
-                    new { songId = key, error = error.Message });
-                saved = null;
-            }
 
             if (!Settings(doc).LyricsEnabled)
                 return new MusicLyricLookupResult("disabled", []);
-            if (saved is null || requestedSourceKey is not null && saved.SourceKey != requestedSourceKey)
+            if (saved is null || saved.Lines.Count == 0 || requestedSourceKey is not null && saved.SourceKey != requestedSourceKey)
                 return new MusicLyricLookupResult("none", []);
-            if (!MetadataSourceEnabled(doc, normalized, saved.SourceKey))
+            if (!MetadataSourceEnabled(doc, song, saved.SourceKey))
             {
-                bool alternative = requestedSourceKey is null && normalized.Sources.Any(s => MetadataSourceEnabled(doc, normalized, s.SourceKey));
+                bool alternative = requestedSourceKey is null && song.Sources.Any(s => MetadataSourceEnabled(doc, song, s.SourceKey));
                 return new MusicLyricLookupResult(alternative ? "none" : "disabled", []);
             }
             return new MusicLyricLookupResult("restored", ToLyricLineRecords(saved.Lines), saved.SourceKey);
@@ -175,9 +120,9 @@ public sealed partial class MusicLibraryOwner
         {
             lock (repositoryGate) MusicRules.Require(!closed && !preparing, "CLOSED");
             MusicRules.Require(!string.IsNullOrEmpty(sourceKey), "TARGET_CHANGED");
-            var normalized = NativeMusicSong.Normalize(song);
-            string key = DisplayKey(normalized);
-            MusicRules.Require(normalized.Sources.Any(source => source.SourceKey == sourceKey), "TARGET_CHANGED");
+            string key = DisplayKey(song);
+            MusicRules.Require(song.Sources.Any(source => source.SourceKey == sourceKey), "TARGET_CHANGED");
+            MusicRules.Require(lines.Count is > 0 and <= 10000, "INVALID_LYRIC_RESPONSE");
 
             var presentations = PresentationCache;
             await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding); entered = true;
@@ -186,13 +131,11 @@ public sealed partial class MusicLibraryOwner
             long saveSequence = ++lyricDisplaySaveSequence;
             token.ThrowIfCancellationRequested();
             await LoadAsync(token).ConfigureAwait(false);
-            await AdmitWriteLockedAsync(token).ConfigureAwait(false);
             var doc = session!;
 
-            MusicRules.Require(Settings(doc).LyricsEnabled && MetadataSourceEnabled(doc, normalized, sourceKey), "DISABLED");
+            MusicRules.Require(Settings(doc).LyricsEnabled && MetadataSourceEnabled(doc, song, sourceKey), "DISABLED");
             RequireCurrentLyricSong(doc, key);
             var cached = ToCachedLines(lines);
-            ValidateCachedLines(cached);
             MusicRules.Require(EstimateDisplayBytes(sourceKey, cached) <= MusicPresentationCache.MaximumSingleLyricBytes, "LIMIT");
             gate.Release(); entered = false;
             try

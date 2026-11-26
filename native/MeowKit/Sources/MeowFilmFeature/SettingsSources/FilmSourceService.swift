@@ -104,14 +104,6 @@ public actor FilmSourceService {
             do { revision = try await repository.save(candidate, previous: document, expected: revision) }
             catch {
                 initialized = false
-                do { try await load() }
-                catch {
-                    DebugRuntime.logError(.filmCatalog, sub: "sources", event: "commit.reconcile.error", error: error)
-                }
-                if document == candidate {
-                    publish(.init(cats: cats, videos: videos, runtimeError: snapshot.runtimeError))
-                    return
-                }
                 throw error
             }
             if videosChanged { settingsRepository.notifyVideoSourcesChanged() }

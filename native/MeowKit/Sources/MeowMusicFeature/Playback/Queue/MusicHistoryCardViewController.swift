@@ -66,7 +66,6 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         view.layer.addSublayer(fade)
         observe(model.queueChanges, whenVisible: true) { [weak self] in self?.updateVisiblePlayback() }
         observe(model.historyChanges, whenVisible: true) { [weak self] in self?.reconcileSummary() }
-        observe(model.accessChanges) { [weak self] in self?.reconcileSummary() }
         renderRows(); renderState()
     }
 
@@ -183,29 +182,23 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         if isViewLoaded { renderRows() }
     }
 
-    private func intent(_ detail: MusicHistoryDetail) -> MusicReferenceHistoryIntent {
-        .init(request: command, token: detail.actionToken)
-    }
-
-    private func admits(_ intent: MusicReferenceHistoryIntent) -> Bool {
-        intent.admits(request: command, token: detail?.actionToken, permitted: permitted)
-    }
-
     private func continuePlaying() {
         guard permitted, let detail else { return }
-        let captured = intent(detail)
+        let expectedCommand = command
         runPageTask { [weak self] in
-            guard let self, self.admits(captured) else { return }
+            guard let self, self.permitted, self.command == expectedCommand,
+                  self.detail?.summary.id == detail.summary.id else { return }
             await self.model.restoreHistory(detail: detail)
         }
     }
 
     private func confirmRemoval() {
         guard permitted, let detail else { return }
-        let captured = intent(detail)
+        let expectedCommand = command
         presentPageConfirmation(title: "删除这份已播歌单？", confirmTitle: "确认删除", destructive: true, onConfirm: { [weak self] in
             self?.runPageTask { [weak self] in
-                guard let self, self.admits(captured) else { return }
+                guard let self, self.permitted, self.command == expectedCommand,
+                      self.detail?.summary.id == detail.summary.id else { return }
                 await self.model.removeHistory(detail: detail)
             }
         })

@@ -31,11 +31,10 @@ extension MusicViewModel {
         clearRecommendationSnapshots()
     }
     func observeSimilarMode() {
-        guard recommendations.similarObservation == nil, !isClosed,
-              let provider = service as? any MusicSimilarModeServing else { return }
+        guard recommendations.similarObservation == nil, !isClosed, let service else { return }
         let own = lifecycle, id = UUID(); recommendations.similarObservationID = id
         recommendations.similarObservation = Task { [weak self] in
-            let events = await provider.similarModeChanges()
+            let events = await service.similarModeChanges()
             for await _ in events {
                 guard let self, !Task.isCancelled, self.lifecycle == own,
                       self.recommendations.similarObservationID == id else { return }
@@ -44,7 +43,7 @@ extension MusicViewModel {
         }
     }
     func requestRecommendationRefresh() {
-        guard service is any MusicSimilarModeServing || service is any MusicQueueRecommendationServing else { return }
+        guard service != nil else { return }
         let own = lifecycle, account = searchAccessGeneration, read = recommendations.recommendationReadID
         Task { [weak self] in
             guard let self, self.lifecycle == own, self.searchAccessGeneration == account,
@@ -61,11 +60,11 @@ extension MusicViewModel {
     public func cancelQueueRecommendationPreview() {
         recommendations.recommendationReadID = UUID()
         recommendations.recommendationPreviewReadID = nil
-        guard let provider = service as? any MusicQueueRecommendationServing else { return }
+        guard let service else { return }
         let previous = recommendations.queuePreviewCancellation
         recommendations.queuePreviewCancellation = Task {
             await previous?.value
-            await provider.cancelQueueRecommendationPreview()
+            await service.cancelQueueRecommendationPreview()
         }
     }
     /// Read the queue and both recommendation projections as one fenced view.
@@ -74,9 +73,6 @@ extension MusicViewModel {
                                  refreshQueue: Bool = true) async {
         guard !isClosed, let service,
               !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations else { return }
-        let similar = service as? any MusicSimilarModeServing
-        let ordinary = service as? any MusicQueueRecommendationServing
-        guard similar != nil || ordinary != nil else { return }
         let preview = previewSimilar || previewQueue
         // Stream refreshes cannot invalidate an explicit preview before it has
         // even submitted its candidate request.
@@ -97,32 +93,21 @@ extension MusicViewModel {
             else { throw MusicServiceError.cancelled }
         }
         do {
-            let before = try await service.state()
-            try admitted()
             if previewSimilar { recommendations.recommendationPreviewReadID = nil }
-            let mode = try await (previewSimilar ? similar?.previewSimilarMode() : similar?.similarModeSnapshot())
-            try admitted()
-            let canEnter = try await similar?.canEnterSimilarMode() ?? false
-            try admitted()
-            let canRecommend = try await similar?.canEnterSongRecommendations() ?? false
-            try admitted()
-            let radio = try await (service as? any MusicFMPlaybackServing)?.fmPlaybackSnapshot()
-            try admitted()
+            let mode = try await (previewSimilar ? service.previewSimilarMode() : service.similarModeSnapshot())
+            let canEnter = try await service.canEnterSimilarMode()
+            let canRecommend = try await service.canEnterSongRecommendations()
+            let radio = try await service.fmPlaybackSnapshot()
             let batch: MusicQueueRecommendationSnapshot?
-            if previewQueue, let ordinary {
-                // Closing a previous sheet owns its cancel/drain. A new sheet
-                // cannot start a preview that the old global cancel could hit.
+            if previewQueue {
                 await recommendations.queuePreviewCancellation?.value
                 try admitted()
                 recommendations.recommendationPreviewReadID = nil
-                batch = try await ordinary.previewQueueRecommendations()
-            } else { batch = try await ordinary?.queueRecommendationSnapshot() }
-            try admitted()
+                batch = try await service.previewQueueRecommendations()
+            } else { batch = try await service.queueRecommendationSnapshot() }
             let next = try await service.state(), rows = try await service.queue()
             try admitted()
-            guard before.revision == next.revision, before.settingsRevision == next.settingsRevision,
-                  before.currentId == next.currentId,
-                  next.revision == rows.revision, next.currentId == rows.currentId,
+            guard next.revision == rows.revision, next.currentId == rows.currentId,
                   next.revision >= state.revision, next.settingsRevision >= state.settingsRevision else { return }
             if refreshQueue {
                 if next.sourceCollectionID != state.sourceCollectionID || rows.entries.isEmpty { notices.queueNotice = nil }
@@ -244,11 +229,11 @@ extension MusicViewModel {
         }
     }
     func performSimilarMode(
-        _ operation: @escaping @MainActor (any MusicSimilarModeServing) async throws -> MusicSimilarModeResult
+        _ operation: @escaping @MainActor (NativeMusicService) async throws -> MusicSimilarModeResult
     ) async throws {
-        guard let provider = service as? any MusicSimilarModeServing else { throw MusicServiceError.unsupported }
+        let service = try requireService()
         let own = lifecycle, account = searchAccessGeneration
-        do { try await performRecommendation { try await operation(provider) } }
+        do { try await performRecommendation { try await operation(service) } }
         catch {
             if lifecycle == own, searchAccessGeneration == account, !Task.isCancelled { await loadRecommendationState() }
             throw error
@@ -275,20 +260,14 @@ extension MusicViewModel {
     }
     public func setFMContinue(_ enabled: Bool, sessionID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
-        guard !isClosed, fmPlayback?.id == sessionID,
-              !Task.isCancelled, let provider = service as? any MusicFMPlaybackServing else { return }
-        let submitted = settingsReceipts.submit(settings: enabled ? ["playback/mode"] : [],
-                                                operation: "保存漫游续播设置") {
-            try await provider.setFMContinue(enabled, sessionID: sessionID)
-        }
+        guard !isClosed, fmPlayback?.id == sessionID, !Task.isCancelled, let service else { return }
         do {
-            try await submitted.value
+            try await service.setFMContinue(enabled, sessionID: sessionID)
             try check(own)
             guard searchAccessGeneration == account else { return }
             await loadRecommendationState()
         } catch {
-            if (error as? MusicServiceError) != .commitUnconfirmed,
-               searchAccessGeneration == account, !Task.isCancelled {
+            if searchAccessGeneration == account, !Task.isCancelled {
                 report(error, epoch: own, operation: "保存漫游续播设置", kind: .settings)
             }
         }
@@ -336,21 +315,14 @@ extension MusicViewModel {
     }
     public func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
-        guard !isClosed, similarMode?.id == snapshotID,
-              !Task.isCancelled, let provider = service as? any MusicSimilarModeServing else { return }
-        let submitted = settingsReceipts.submit(
-            settings: ["queue/similar/" + snapshotID.uuidString + "/continue"] + (enabled ? ["playback/mode"] : []),
-            operation: "保存推荐续播设置") {
-                try await provider.setSimilarContinue(enabled, snapshotID: snapshotID)
-            }
+        guard !isClosed, similarMode?.id == snapshotID, !Task.isCancelled, let service else { return }
         do {
-            try await submitted.value
+            try await service.setSimilarContinue(enabled, snapshotID: snapshotID)
             try check(own)
             guard searchAccessGeneration == account else { return }
             await loadRecommendationState()
         } catch {
-            if (error as? MusicServiceError) != .commitUnconfirmed,
-               searchAccessGeneration == account, !Task.isCancelled {
+            if searchAccessGeneration == account, !Task.isCancelled {
                 report(error, epoch: own, operation: "保存推荐续播设置", kind: .settings)
             }
         }
@@ -363,11 +335,10 @@ extension MusicViewModel {
     }
     public func playQueueRecommendation(snapshotID: UUID, candidateID: String) async {
         let own = lifecycle, account = searchAccessGeneration
-        guard queueRecommendations?.id == snapshotID,
-              let provider = service as? any MusicQueueRecommendationServing else { return }
+        guard queueRecommendations?.id == snapshotID, let service else { return }
         do {
             try await performRecommendation(ordinary: true) {
-                try await provider.playQueueRecommendation(snapshotID: snapshotID, candidateID: candidateID)
+                try await service.playQueueRecommendation(snapshotID: snapshotID, candidateID: candidateID)
             }
             await loadRecommendationState()
         } catch {
@@ -378,30 +349,23 @@ extension MusicViewModel {
     }
     public func setQueueRecommendationContinue(_ enabled: Bool, snapshotID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
-        guard !isClosed, queueRecommendations?.id == snapshotID,
-              !Task.isCancelled, let provider = service as? any MusicQueueRecommendationServing else { return }
-        let submitted = settingsReceipts.submit(settings: enabled ? ["playback/mode"] : [],
-                                                operation: "保存推荐续播设置") {
-            try await provider.setQueueRecommendationContinue(enabled, snapshotID: snapshotID)
-        }
+        guard !isClosed, queueRecommendations?.id == snapshotID, !Task.isCancelled, let service else { return }
         do {
-            try await submitted.value
+            try await service.setQueueRecommendationContinue(enabled, snapshotID: snapshotID)
             try check(own)
             guard searchAccessGeneration == account else { return }
             await loadRecommendationState()
         } catch {
-            if (error as? MusicServiceError) != .commitUnconfirmed,
-               searchAccessGeneration == account, !Task.isCancelled {
+            if searchAccessGeneration == account, !Task.isCancelled {
                 report(error, epoch: own, operation: "保存推荐续播设置", kind: .settings)
             }
         }
     }
     public func retryQueueRecommendations(snapshotID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
-        guard queueRecommendations?.id == snapshotID,
-              let provider = service as? any MusicQueueRecommendationServing else { return }
+        guard queueRecommendations?.id == snapshotID, let service else { return }
         do {
-            try await performRecommendation(ordinary: true) { try await provider.retryQueueRecommendations(snapshotID: snapshotID) }
+            try await performRecommendation(ordinary: true) { try await service.retryQueueRecommendations(snapshotID: snapshotID) }
             await loadRecommendationState()
         } catch {
             guard searchAccessGeneration == account, !Task.isCancelled else { return }

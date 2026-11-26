@@ -137,8 +137,6 @@ public sealed partial class PanAccounts
                         var account = await settings.ReadAsync(session.Row.Provider, session.Cancellation.Token);
                         if (!Current(session)) return;
                         ValidateOnlineAccount(session.Row.Provider, reported, account);
-                        if (account.Revision is not > 0)
-                            throw new BridgeException("INVALID_RESPONSE");
                         session.Row.Publish(account with { Status = reported.Status });
                         session.Confirmed = true;
                         Notify("网盘登录成功");
@@ -189,8 +187,6 @@ public sealed partial class PanAccounts
                 if (!current() || !ReferenceEquals(login, session)) return;
                 var account = await settings.SaveAsync(session.Row.Provider, credentials, request.Token);
                 credentials.Clear();
-                if (account.ErrorCode is not null || account.Revision is not > 0)
-                    throw new BridgeException("INVALID_RESPONSE");
                 if (!current() || !ReferenceEquals(login, session)) return;
                 session.Row.Publish(account);
                 Notify("网盘凭据已保存");

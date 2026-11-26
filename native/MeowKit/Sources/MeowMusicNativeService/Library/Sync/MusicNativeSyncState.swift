@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
-import MeowMusicFeature
 import MeowMusicPlatform
 
 /// Durable write facts only. Live mutation tracks are request material, not a
@@ -8,27 +7,16 @@ import MeowMusicPlatform
 struct MusicNativeSyncMemberProof: Equatable, Sendable {
     let nativeID: String
     let occurrenceID: String
-    init(nativeID: String, occurrenceID: String) {
-        self.nativeID = nativeID; self.occurrenceID = occurrenceID
-    }
-    init(_ member: MusicLibrarySyncMember) {
-        nativeID = member.nativeID; occurrenceID = member.occurrenceID
-    }
+    init(nativeID: String, occurrenceID: String) { self.nativeID = nativeID; self.occurrenceID = occurrenceID }
+    init(_ member: MusicLibrarySyncMember) { nativeID = member.nativeID; occurrenceID = member.occurrenceID }
 }
 
 struct MusicNativeSyncCollectionProof: Equatable, Sendable {
-    let id: String
-    let name: String
-    let kind: MusicLibrarySyncKind
-    let writable: Bool
-    let canRename: Bool
-    let canDelete: Bool
-    let canOrder: Bool
-    let members: [MusicNativeSyncMemberProof]
-    let revision: String
-    init(id: String, name: String, kind: MusicLibrarySyncKind, writable: Bool,
-         canRename: Bool, canDelete: Bool, canOrder: Bool,
-         members: [MusicNativeSyncMemberProof], revision: String) {
+    let id: String, name: String, kind: MusicLibrarySyncKind
+    let writable: Bool, canRename: Bool, canDelete: Bool, canOrder: Bool
+    let members: [MusicNativeSyncMemberProof], revision: String
+    init(id: String, name: String, kind: MusicLibrarySyncKind, writable: Bool, canRename: Bool,
+         canDelete: Bool, canOrder: Bool, members: [MusicNativeSyncMemberProof], revision: String) {
         self.id = id; self.name = name; self.kind = kind; self.writable = writable
         self.canRename = canRename; self.canDelete = canDelete; self.canOrder = canOrder
         self.members = members; self.revision = revision
@@ -41,14 +29,10 @@ struct MusicNativeSyncCollectionProof: Equatable, Sendable {
 }
 
 struct MusicNativeSyncWriteProof: Equatable, Sendable {
-    let id: UUID
-    let action: MusicLibrarySyncMutation.Action
-    let collectionID: String?
-    let name: String?
-    let before: MusicNativeSyncCollectionProof?
-    let beforeSubscription: MusicLibrarySyncSubscription?
-    let directoryRevision: String
-    let members: [MusicNativeSyncMemberProof]
+    let id: UUID, action: MusicLibrarySyncMutation.Action
+    let collectionID: String?, name: String?
+    let before: MusicNativeSyncCollectionProof?, beforeSubscription: MusicLibrarySyncSubscription?
+    let directoryRevision: String, members: [MusicNativeSyncMemberProof]
     init(id: UUID, action: MusicLibrarySyncMutation.Action, collectionID: String?, name: String?,
          before: MusicNativeSyncCollectionProof?, beforeSubscription: MusicLibrarySyncSubscription?,
          directoryRevision: String, members: [MusicNativeSyncMemberProof]) {
@@ -142,34 +126,23 @@ struct MusicNativeSyncLedger: Equatable, Sendable {
     static func load(_ library: MusicLibraryState) throws -> Self {
         guard let record = library.sync else { return .init() }
         var value = Self()
-        guard let phase = MusicLibrarySyncState.Phase(rawValue: record.phase) else {
-            throw MusicServiceError.corruptStorage
-        }
-        value.phase = phase
-        value.selections = try record.manualSelections.map { row in
-            guard let platform = MusicAccountPlatform(rawValue: row.platform) else {
-                throw MusicServiceError.corruptStorage
+        value.phase = MusicLibrarySyncState.Phase(rawValue: record.phase) ?? .idle
+        value.selections = record.manualSelections.compactMap { row in
+            MusicAccountPlatform(rawValue: row.platform).map {
+                MusicLibrarySyncSelection(platform: $0, favorites: row.favorites, playlists: row.playlists)
             }
-            return MusicLibrarySyncSelection(platform: platform, favorites: row.favorites, playlists: row.playlists)
         }
         value.scopes = Dictionary(uniqueKeysWithValues: record.scopes.map { ($0.platform, $0.accountScope) })
-        value.issues = try record.issues.map { row in
-            let platform: MusicAccountPlatform?
-            if let raw = row.platform {
-                guard let parsed = MusicAccountPlatform(rawValue: raw) else { throw MusicServiceError.corruptStorage }
-                platform = parsed
-            } else {
-                platform = nil
-            }
-            return MusicLibrarySyncIssue(platform: platform, collectionID: row.collectionID, code: row.code)
+        value.issues = record.issues.map { row in
+            MusicLibrarySyncIssue(platform: row.platform.flatMap(MusicAccountPlatform.init(rawValue:)),
+                                  collectionID: row.collectionID, code: row.code)
         }
         value.automatic = MusicNativeAutomaticSyncPreferences(
             revision: record.autoRevision,
-            selections: try record.automaticSelections.map { row in
-                guard let platform = MusicAccountPlatform(rawValue: row.platform) else {
-                    throw MusicServiceError.corruptStorage
+            selections: record.automaticSelections.compactMap { row in
+                MusicAccountPlatform(rawValue: row.platform).map {
+                    MusicLibrarySyncSelection(platform: $0, favorites: row.favorites, playlists: row.playlists)
                 }
-                return MusicLibrarySyncSelection(platform: platform, favorites: row.favorites, playlists: row.playlists)
             },
             bindings: Dictionary(uniqueKeysWithValues: record.autoBindings.map {
                 ($0.platform, MusicNativeAutomaticSyncBinding(accountID: $0.accountID, scope: $0.bindingScope))
@@ -177,30 +150,23 @@ struct MusicNativeSyncLedger: Equatable, Sendable {
             intentRevision: record.autoIntentRevision,
             settledIntentRevision: record.autoSettledIntentRevision,
             orderOnly: record.autoOrderOnly,
-            relationshipPlatforms: try record.relationshipPlatforms.map { raw in
-                guard let platform = MusicAccountPlatform(rawValue: raw) else {
-                    throw MusicServiceError.corruptStorage
-                }
-                return platform
-            }
+            relationshipPlatforms: record.relationshipPlatforms.compactMap(MusicAccountPlatform.init(rawValue:))
         )
-        value.fences = try record.fences.map { row in
+        value.fences = record.fences.compactMap { row in
             guard let platform = MusicAccountPlatform(rawValue: row.platform),
                   let mutIDRaw = row.mutationID, let mutID = UUID(uuidString: mutIDRaw),
                   let actionRaw = row.mutationAction, let action = MusicLibrarySyncMutation.Action(rawValue: actionRaw) else {
-                throw MusicServiceError.corruptStorage
+                return nil
             }
-            let before: MusicNativeSyncCollectionProof?
-            if let b = row.before {
-                guard let kind = MusicLibrarySyncKind(rawValue: b.kind) else { throw MusicServiceError.corruptStorage }
-                before = MusicNativeSyncCollectionProof(
-                    id: b.id, name: b.name, kind: kind, writable: b.writable,
-                    canRename: b.canRename, canDelete: b.canDelete, canOrder: b.canOrder,
-                    members: b.members.map { MusicNativeSyncMemberProof(nativeID: $0.nativeID, occurrenceID: $0.occurrenceID ?? "") },
-                    revision: b.revision
-                )
-            } else {
-                before = nil
+            let before: MusicNativeSyncCollectionProof? = row.before.flatMap { b in
+                MusicLibrarySyncKind(rawValue: b.kind).map { kind in
+                    MusicNativeSyncCollectionProof(
+                        id: b.id, name: b.name, kind: kind, writable: b.writable,
+                        canRename: b.canRename, canDelete: b.canDelete, canOrder: b.canOrder,
+                        members: b.members.map { MusicNativeSyncMemberProof(nativeID: $0.nativeID, occurrenceID: $0.occurrenceID ?? "") },
+                        revision: b.revision
+                    )
+                }
             }
             let beforeSub: MusicLibrarySyncSubscription? = row.beforeSubscription.map {
                 MusicLibrarySyncSubscription(
@@ -220,72 +186,6 @@ struct MusicNativeSyncLedger: Equatable, Sendable {
                 directoryIDs: row.directoryIDs,
                 acknowledgedID: row.acknowledgedID, acknowledgedName: row.acknowledgedName
             )
-        }
-
-        guard value.selections.count <= 3,
-              Set(value.selections.map(\.platform)).count == value.selections.count,
-              value.scopes.count <= 3, value.scopes.keys.allSatisfy({ MusicAccountPlatform(rawValue: $0) != nil }),
-              Set(value.fences.map { $0.mutation.id }).count == value.fences.count else {
-            throw MusicServiceError.corruptStorage
-        }
-        try value.automatic.validate()
-        for fence in value.fences {
-            guard fence.localRevision >= 0, !fence.localID.isEmpty, !fence.accountID.isEmpty, !fence.scope.isEmpty,
-                  (fence.mutation.action.isSubscription
-                    ? library.networkReferences.contains(where: {
-                        $0.id == fence.localID && $0.platform == fence.platform.rawValue &&
-                            $0.remoteID == fence.mutation.collectionID
-                    })
-                    : library.collections.contains(where: { $0.id == fence.localID })),
-                  library.accountID(for: fence.platform.rawValue) == fence.accountID,
-                  value.scopes[fence.platform.rawValue] == fence.scope,
-                  Set(fence.mutation.before?.members.map(\.occurrenceID) ?? []).count == (fence.mutation.before?.members.count ?? 0) else {
-                throw MusicServiceError.corruptStorage
-            }
-            let mutation = fence.mutation
-            if mutation.action.isSubscription {
-                guard mutation.before == nil, mutation.members.isEmpty,
-                      mutation.collectionID?.isEmpty == false, !mutation.directoryRevision.isEmpty,
-                      fence.acknowledgedID == nil, fence.acknowledgedName == nil else { throw MusicServiceError.corruptStorage }
-                if mutation.action == .subscribe {
-                    guard mutation.beforeSubscription == nil, mutation.name?.isEmpty == false else { throw MusicServiceError.corruptStorage }
-                } else {
-                    guard let before = mutation.beforeSubscription, before.remoteID == mutation.collectionID,
-                          !before.relationID.isEmpty, mutation.name == nil else { throw MusicServiceError.corruptStorage }
-                }
-            } else if mutation.action == .create {
-                guard mutation.collectionID == nil, mutation.before == nil, mutation.members.isEmpty,
-                      mutation.beforeSubscription == nil,
-                      mutation.name?.isEmpty == false, !mutation.directoryRevision.isEmpty,
-                      fence.directoryIDs.allSatisfy({ !$0.isEmpty }),
-                      Set(fence.directoryIDs).count == fence.directoryIDs.count,
-                      fence.acknowledgedID == nil || fence.acknowledgedID?.isEmpty == false else { throw MusicServiceError.corruptStorage }
-            } else {
-                guard let before = mutation.before, before.id == mutation.collectionID, !before.id.isEmpty,
-                      before.writable, !before.revision.isEmpty,
-                      mutation.beforeSubscription == nil,
-                      fence.directoryIDs.isEmpty,
-                      fence.acknowledgedID == nil, fence.acknowledgedName == nil else { throw MusicServiceError.corruptStorage }
-                switch mutation.action {
-                case .create, .subscribe, .unsubscribe: break
-                case .delete:
-                    guard before.canDelete, mutation.members.isEmpty else { throw MusicServiceError.corruptStorage }
-                case .rename:
-                    guard before.canRename, mutation.name?.isEmpty == false, mutation.members.isEmpty else { throw MusicServiceError.corruptStorage }
-                case .order:
-                    guard before.canOrder,
-                          before.members.map(\.occurrenceID).sorted() == mutation.members.map(\.occurrenceID).sorted(),
-                          before.members.map(\.nativeID).sorted() == mutation.members.map(\.nativeID).sorted() else {
-                        throw MusicServiceError.corruptStorage
-                    }
-                case .add, .remove:
-                    guard (1...100).contains(mutation.members.count),
-                          Set(mutation.members.map(\.nativeID)).count == mutation.members.count else { throw MusicServiceError.corruptStorage }
-                }
-            }
-            for member in fence.mutation.members + (fence.mutation.before?.members ?? []) {
-                guard !member.nativeID.isEmpty, !member.occurrenceID.isEmpty else { throw MusicServiceError.corruptStorage }
-            }
         }
         return value
     }
@@ -365,34 +265,14 @@ struct MusicNativeAutomaticSyncPreferences: Equatable, Sendable {
     var settledIntentRevision = 0
     var orderOnly: String?
     var relationshipPlatforms: [MusicAccountPlatform] = []
-
-    func validate() throws {
-        try musicRequire((0...musicMaxSafeInteger).contains(revision) &&
-            (0...musicMaxSafeInteger).contains(intentRevision) &&
-            (0...intentRevision).contains(settledIntentRevision) &&
-            selections.count <= 3 && Set(selections.map(\.platform)).count == selections.count &&
-            selections.allSatisfy { !$0.kinds.isEmpty } &&
-            bindings.count <= 3 &&
-            bindings.keys.allSatisfy { key in selections.contains { $0.platform.rawValue == key } },
-            .corruptStorage)
-        try musicRequire(Set(relationshipPlatforms).count == relationshipPlatforms.count &&
-            relationshipPlatforms.allSatisfy { platform in selections.contains { $0.platform == platform && $0.playlists } } &&
-            (relationshipPlatforms.isEmpty || orderOnly == nil), .corruptStorage)
-        for binding in bindings.values {
-            try musicRequire(!binding.accountID.isEmpty && !binding.scope.isEmpty, .corruptStorage)
-        }
-        if let orderOnly {
-            try musicRequire(orderOnly == "favorites" ||
-                orderOnly.range(of: "^playlist:[1-9][0-9]*$", options: .regularExpression) != nil,
-                .corruptStorage)
-        }
-    }
 }
 
 struct MusicNativeSyncRound {
     let request: MusicLibrarySyncRequest
     let epoch: UUID
-    let port: any MusicNativeLibrarySyncProviding
+    let port: NativeMusicAccountService
+    var automaticBindings: [String: MusicNativeAutomaticSyncBinding]? = nil
+    var automaticAuthorization: MusicQueueAuthorization? = nil
     var sessions: [String: MusicLibrarySyncSession] = [:]
     var snapshots: [String: MusicLibrarySyncSnapshot] = [:]
     var library: MusicLibraryState
@@ -402,6 +282,52 @@ struct MusicNativeSyncRound {
     mutating func issue(_ code: String, platform: MusicAccountPlatform? = nil, collection: String? = nil) {
         let issue = MusicLibrarySyncIssue(platform: platform, collectionID: collection, code: code)
         if !ledger.issues.contains(issue) { ledger.issues.append(issue) }
+    }
+    func checkGuard() throws {
+        if let automaticAuthorization {
+            try automaticAuthorization.check()
+            try Task.checkCancellation()
+        }
+    }
+    func beginSession(platform: MusicAccountPlatform) async throws -> MusicLibrarySyncSession {
+        try checkGuard()
+        if let automaticBindings {
+            guard let binding = automaticBindings[platform.rawValue] else { throw MusicServiceError.verificationRequired }
+            let session = try await port.beginLibrarySync(platform: platform)
+            do {
+                try checkGuard()
+                guard session.platform == platform, binding.accountID == session.accountID,
+                      binding.scope == session.scope else { throw MusicServiceError.targetChanged }
+                try await port.checkLibrarySync(session); try checkGuard()
+                return session
+            } catch { await port.endLibrarySync(session); throw error }
+        }
+        return try await port.beginLibrarySync(platform: platform)
+    }
+    func checkSession(_ session: MusicLibrarySyncSession) async throws {
+        try checkGuard(); try await port.checkLibrarySync(session); try checkGuard()
+    }
+    func readSync(_ session: MusicLibrarySyncSession, kinds: [MusicLibrarySyncKind]) async throws -> MusicLibrarySyncSnapshot {
+        try await checkSession(session)
+        let value = try await port.readLibrarySync(session, kinds: kinds)
+        try await checkSession(session)
+        return value
+    }
+    func readSubscriptions(_ session: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot {
+        try await checkSession(session)
+        let value = try await port.readLibrarySubscriptions(session)
+        try await checkSession(session)
+        return value
+    }
+    func writeSync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
+        if automaticAuthorization != nil {
+            do { try await checkSession(session) }
+            catch { return .notDispatched(MusicServiceError.sanitized(error)) }
+        }
+        return try await port.writeLibrarySync(session, mutation: mutation)
+    }
+    func endSession(_ session: MusicLibrarySyncSession) async {
+        await port.endLibrarySync(session)
     }
 }
 
@@ -450,7 +376,6 @@ enum MusicNativeSyncLogic {
         case .revisionConflict, .staleRevision, .staleResult: return "conflict"
         case .authRequired, .verificationRequired: return "authRequired"
         case .sessionExpired: return "sessionExpired"
-        case .commitUnconfirmed: return "unconfirmed"
         case .limit: return "limit"
         default: return "failed"
         }

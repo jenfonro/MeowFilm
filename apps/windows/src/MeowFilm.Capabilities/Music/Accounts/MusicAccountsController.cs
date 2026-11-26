@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Core.Runtime;
 
@@ -11,7 +12,7 @@ public sealed record MusicPlatformAccount(string Platform, string Name, string S
     public string StateText => State switch
     {
         "none" => "未登录", "saved" => "会话已保存，待验证", "verified" => "会话验证成功",
-        "revoked" => "会话已撤销，退出结果待确认", _ => "未读取"
+        "revoked" => "会话已撤销", _ => "未读取"
     };
     public bool HasSession => State is "saved" or "verified" or "revoked";
 }
@@ -28,24 +29,34 @@ public sealed partial class MusicAccountsController : MusicController
         this.settings = settings;
         LibrarySync = new(
             application.LibrarySync,
-            Receipts,
             ConfirmResetSyncAccountAsync,
             () => stopping || disposed);
-        application.LibrarySyncChanged += LibrarySyncChanged;
+        application.Accounts.SessionChanged += OnAccountSessionChanged;
+        application.LibrarySync.StateChanged += LibrarySyncChanged;
+        settings.PropertyChanged += OnSettingsChanged;
         InitializePlatformSettings();
     }
 
     public MusicLibrarySyncViewModel LibrarySync { get; }
 
-    // Explicit cross-domain events wired at MusicCapability composition root.
-    internal event Action<string>? AccountUpdated;
-    internal event Action? AccountsReloaded;
-    internal event Action? AccountSessionChanging;
-    internal event Action? AccountSessionChanged;
-    internal event Action<bool>? AccountChangeSettled;
-    internal event Action? AccountCancelStarted;
-    internal event Action? AccountCancelSettled;
-    internal event Func<long, CancellationToken, Task>? LibrarySynced;
+    private void OnSettingsChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (!stopping && !disposed && e.PropertyName == nameof(MusicSettingsController.CanEditFeedback))
+            RefreshPlatformSettings();
+    }
+
+    private void OnAccountSessionChanged(string platform)
+    {
+        RecordPlatformObservation(platform);
+        accountsLoaded = false;
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (stopping || disposed) return;
+            PlatformSettings.FirstOrDefault(row => row.Platform == platform)?.InvalidateDetails();
+            _ = EnsureAccountsAsync();
+        });
+    }
 
     internal long RecordPlatformObservation(string platform)
     {
@@ -67,10 +78,9 @@ public sealed partial class MusicAccountsController : MusicController
     private Task accountSettlement = Task.CompletedTask;
     private string? accountOperationPlatform;
     private bool accountQrOperation;
-    private bool accountMayWrite, publishingAccounts;
+    private bool publishingAccounts;
     private long accountEpoch;
     private string accountStatus = "";
-    private bool accountSaveUncertain;
     private long accountObservation;
     private long loadedAccountObservation = -1;
     private CancellationTokenSource? accountReadCancellation;
@@ -78,7 +88,6 @@ public sealed partial class MusicAccountsController : MusicController
     private bool accountsLoaded;
 
     internal long AccountEpoch => accountEpoch;
-    internal bool AccountSaveUncertain => accountSaveUncertain;
     internal Task AccountReadTask => accountRead;
     internal Task AccountSettlementTask => accountSettlement;
     internal bool CanEditFeedback => settings.CanEditFeedback;
@@ -124,6 +133,7 @@ public sealed partial class MusicAccountsController : MusicController
 
     internal void AccountBindings()
     {
+        Changed(nameof(Accounts));
         Changed(nameof(SelectedAccount));
         Changed(nameof(AccountBusy));
         Changed(nameof(CanManageAccount));
@@ -135,24 +145,23 @@ public sealed partial class MusicAccountsController : MusicController
         AccountDetailsBindings();
     }
 
-    private static string AccountError(Exception error) => error switch
+    private static string AccountError(Exception error) => ErrorCode(error) switch
     {
-        MusicOperationException { Code: "AUTH_REQUIRED" or "AUTH_EXPIRED" } => "会话无效或已过期",
-        MusicOperationException { Code: "INVALID_CREDENTIALS" } => "会话格式无效",
-        MusicOperationException { Code: "FORBIDDEN" } => "账号访问被拒绝",
-        MusicOperationException { Code: "VERIFICATION_REQUIRED" } => "需要平台验证",
-        MusicOperationException { Code: "DEVICE_CONTEXT_REQUIRED" or "SIGNATURE_REQUIRED" } => "平台设备认证未通过",
-        MusicOperationException { Code: "DEVICE_LIMIT" } => "平台登录设备数已达上限",
-        MusicOperationException { Code: "STALE_SESSION" or "SESSION_CHANGED" or "IDENTITY_MISMATCH" or "SUPERSEDED" } => "账号会话已变更",
-        MusicOperationException { Code: "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" } => "保存结果未确认，请读取账号状态",
-        MusicOperationException { Code: "QR_EXPIRED" } => "二维码已过期",
-        MusicOperationException { Code: "BUSY" } => "登录请求尚未结束",
-        MusicOperationException { Code: "INVALID_CODE" } => "验证码无效或已过期",
-        MusicOperationException { Code: "INVALID_PHONE" } => "验证码发送失败，手机号无效",
-        MusicOperationException { Code: "ACCOUNT_SELECTION_REQUIRED" } => "该手机号关联多个账号，请使用二维码登录",
-        MusicOperationException { Code: "RATE_LIMITED" } => "请求过于频繁，请稍后重试",
-        MusicOperationException { Code: "SMS_SEND_UNCONFIRMED" } => "短信发送结果未确认",
-        MusicOperationException { Code: "UNSUPPORTED" } => "此账号协议尚未支持",
+        "AUTH_REQUIRED" or "AUTH_EXPIRED" => "会话无效或已过期",
+        "INVALID_CREDENTIALS" => "会话格式无效",
+        "FORBIDDEN" => "账号访问被拒绝",
+        "VERIFICATION_REQUIRED" => "需要平台验证",
+        "DEVICE_CONTEXT_REQUIRED" or "SIGNATURE_REQUIRED" => "平台设备认证未通过",
+        "DEVICE_LIMIT" => "平台登录设备数已达上限",
+        "STALE_SESSION" or "SESSION_CHANGED" or "IDENTITY_MISMATCH" or "SUPERSEDED" => "账号会话已变更",
+        "QR_EXPIRED" => "二维码已过期",
+        "BUSY" => "登录请求尚未结束",
+        "INVALID_CODE" => "验证码无效或已过期",
+        "INVALID_PHONE" => "验证码发送失败，手机号无效",
+        "ACCOUNT_SELECTION_REQUIRED" => "该手机号关联多个账号，请使用二维码登录",
+        "RATE_LIMITED" => "请求过于频繁，请稍后重试",
+        "SMS_SEND_UNCONFIRMED" => "短信发送结果未确认",
+        "UNSUPPORTED" => "此账号协议尚未支持",
         _ => ErrorText(error)
     };
 
@@ -188,8 +197,8 @@ public sealed partial class MusicAccountsController : MusicController
         if (!notify) return;
         // Publish after the collection replacement has finished its selection
         // transaction, otherwise ComboBox can clear the newly rebound selection.
+        RecordPlatformObservation(value.Platform);
         AccountBindings();
-        AccountUpdated?.Invoke(value.Platform);
     }
 
     internal async Task EnsureAccountsAsync()
@@ -248,27 +257,19 @@ public sealed partial class MusicAccountsController : MusicController
                 observation = Volatile.Read(ref accountObservation);
                 try
                 {
-                    var reply = await application.ListAccountsAsync(request.Token);
+                    var reply = await application.Accounts.ListAccountsAsync(request.Token);
                     var rows = reply.Items.Select(AccountRow).ToArray();
                     if (epoch != accountEpoch || observation != Volatile.Read(ref accountObservation) || stopping && !allowStopping) return;
                     foreach (var row in rows) UpdateAccount(row, notify: false);
                     accountsLoaded = true;
                     loadedAccountObservation = observation;
-                    accountSaveUncertain = false;
                     // Passive reconciliation must not consume an operation's result notice.
                     errorCode = null;
                     AccountBindings();
-                    AccountsReloaded?.Invoke();
                 }
                 catch (Exception error)
                 {
-                    errorCode = error switch
-                    {
-                        MusicOperationException known => known.Code,
-                        BridgeException known => known.Code,
-                        OperationCanceledException => "CANCELLED",
-                        _ => "INVALID_RESPONSE"
-                    };
+                    errorCode = ErrorCode(error) ?? "INVALID_RESPONSE";
                     if ((!stopping || allowStopping) && epoch == accountEpoch &&
                         observation == Volatile.Read(ref accountObservation) && (force || accountStatus.Length == 0))
                     {
@@ -290,13 +291,13 @@ public sealed partial class MusicAccountsController : MusicController
             current.UserId == account.UserId && current.State is "saved" or "verified");
 
     internal bool CanLogoutAccount(MusicPlatformAccount account) =>
-        !stopping && !disposed && !accountTransferBusy && !accountSaveUncertain && !AccountBusy && IsCurrentAccount(account);
+        !stopping && !disposed && !accountTransferBusy && !AccountBusy && IsCurrentAccount(account);
 
     public Task LogoutAccountAsync(MusicPlatformAccount account, bool confirmed)
     {
         if (!confirmed || !CanLogoutAccount(account)) return Task.CompletedTask;
         return ChangeAccountAsync(account.Platform, "logout",
-            token => application.LogoutAccountAsync(account.Platform, token),
+            token => application.Accounts.LogoutAccountAsync(account.Platform, token),
             status => status, account);
     }
 
@@ -314,10 +315,8 @@ public sealed partial class MusicAccountsController : MusicController
         accountQrOperation = operation.StartsWith("qr.", StringComparison.Ordinal);
         accountSmsOperation = operation.StartsWith("sms.", StringComparison.Ordinal);
         accountSmsSending = operation == "sms.send";
-        // KG begin durably establishes device identity before its first request.
-        accountMayWrite = operation != "sms.send" && (operation != "qr.begin" || platform == "kg");
         if (!accountSmsOperation) ClearAccountSmsQuiet();
-        if (operation != "qr.poll") { ClearAccountQrQuiet(); AccountSessionChanging?.Invoke(); }
+        if (operation != "qr.poll") { ClearAccountQrQuiet(); ctx.RetireCatalogSession(); }
         if (operation != "qr.poll") accountStatus = "";
         AccountBindings();
         try { await RunAsync(async () =>
@@ -339,10 +338,9 @@ public sealed partial class MusicAccountsController : MusicController
                 accountsLoaded = false;
                 changedAccount = true;
                 if (operation == "sms.login") ClearAccountSms();
-                accountSaveUncertain = false;
                 accountStatus = operation == "logout" ? "已退出" : "会话验证成功";
                 // Retire request authority, not the last successful home display.
-                AccountSessionChanged?.Invoke();
+                ctx.RetireCatalogSession();
             }
             catch (OperationCanceledException)
             {
@@ -354,10 +352,8 @@ public sealed partial class MusicAccountsController : MusicController
             }
             catch (Exception error)
             {
-                if (epoch == accountEpoch && error is MusicOperationException { Code: "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" })
-                    accountSaveUncertain = true;
                 bool retryablePoll = operation == "qr.poll" &&
-                    error is MusicOperationException { Code: "RATE_LIMITED" or "BUSY" };
+                    ErrorCode(error) is "RATE_LIMITED" or "BUSY";
                 if (epoch == accountEpoch && operation.StartsWith("qr.", StringComparison.Ordinal) && !retryablePoll) ClearAccountQr();
                 if (epoch == accountEpoch) accountStatus = AccountError(error);
             }
@@ -366,11 +362,15 @@ public sealed partial class MusicAccountsController : MusicController
         {
             if (ReferenceEquals(accountCancellation, cancellation))
             {
-                accountCancellation = null; accountOperationPlatform = null; accountQrOperation = false; accountMayWrite = false;
+                accountCancellation = null; accountOperationPlatform = null; accountQrOperation = false;
                 accountSmsOperation = false; accountSmsSending = false;
             }
             AccountBindings();
-            if (changedAccount) AccountChangeSettled?.Invoke(epoch == accountEpoch);
+            if (changedAccount)
+            {
+                ctx.BeginHomeAccountRecovery(epoch == accountEpoch);
+                if (epoch == accountEpoch) ctx.RestoreLyricsIfNeeded();
+            }
         }
     }
 
@@ -380,13 +380,12 @@ public sealed partial class MusicAccountsController : MusicController
         if (stopping || (accountOperationPlatform ?? accountQr?.Platform ?? (HasAccountSms ? "wy" : null)) is not { } platform)
             return Task.CompletedTask;
         bool sending = accountSmsSending;
-        if (accountOperationPlatform is not null && accountMayWrite) accountSaveUncertain = true;
         long epoch = ++accountEpoch;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         accountSettlement = completion.Task;
         accountCancellation?.Cancel(); ClearAccountQrQuiet(); ClearAccountSmsQuiet();
         accountStatus = sending ? "短信发送结果未确认" : "已取消";
-        AccountCancelStarted?.Invoke();
+        ctx.RetireCatalogSession();
         AccountBindings();
         _ = Settle();
         return completion.Task;
@@ -397,7 +396,7 @@ public sealed partial class MusicAccountsController : MusicController
             await Task.Yield(); // Publish the settlement task before cancellation callbacks can re-enter.
             try
             {
-                await application.CancelAccountAsync(platform, lifetime.Token);
+                await application.Accounts.CancelAccountAsync(platform, lifetime.Token);
                 if (epoch != accountEpoch) return;
                 AccountReadResult result;
                 bool joinedRead;
@@ -408,28 +407,22 @@ public sealed partial class MusicAccountsController : MusicController
                 }
                 while (epoch == accountEpoch && (result.Epoch != epoch ||
                     result.Observation != Volatile.Read(ref accountObservation) ||
-                    // An ordinary observation joined above can be retired by
-                    // shutdown. It is not the settlement's confirming receipt.
                     joinedRead && result.ErrorCode == "CANCELLED" && !lifetime.IsCancellationRequested));
                 if (epoch != accountEpoch) return;
                 if (result.ErrorCode is { } code) throw new MusicOperationException(code);
-                accountStatus = accountSaveUncertain ? "取消结果待核对，请读取账号状态" :
-                    sending ? "短信发送结果未确认" : "已取消";
+                accountStatus = sending ? "短信发送结果未确认" : "已取消";
                 settled = true;
             }
             catch
             {
                 if (epoch == accountEpoch)
-                {
-                    if (!sending) accountSaveUncertain = true;
-                    accountStatus = sending ? "短信发送结果未确认" : "取消结果待核对，请读取账号状态";
-                }
+                    accountStatus = sending ? "短信发送结果未确认" : "操作失败，请重试";
             }
             finally
             {
                 completion.TrySetResult();
                 AccountBindings();
-                if (settled && epoch == accountEpoch) AccountCancelSettled?.Invoke();
+                if (settled && epoch == accountEpoch) ctx.RestoreLyricsIfNeeded();
             }
         }
     }

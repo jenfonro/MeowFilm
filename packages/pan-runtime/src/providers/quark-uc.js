@@ -113,7 +113,7 @@ function shareInput(config, share) {
   let url;
   try { url = new URL(share.url); } catch { throw new PanError('INVALID_REQUEST'); }
   requireValue(['https:', 'http:'].includes(url.protocol) && url.hostname === config.host
-    && !url.username && !url.password && !url.port);
+    && !url.username && !url.password);
   const match = /^\/s\/([^/]+)\/?$/.exec(url.pathname);
   requireValue(match);
   let id;
@@ -263,8 +263,7 @@ async function directory(config, ctx, { share, token, parent = '0' } = {}) {
     const more = next > page || hasMore === true
       || (hasMore !== false && data.list.length > 0
         && (total !== undefined ? BigInt(seen.size) < total : data.list.length >= size));
-    if (!more) return items;
-    requireValue(added > 0, 'UPSTREAM_FORMAT');
+    if (!more || !added) return items;
     page = next > page ? next : page + 1;
   }
 }
@@ -288,7 +287,7 @@ async function list(config, { share: input }, ctx) {
           seenDirectories.add(id);
           queue.push({ id, path: `${current.path}/${name}` });
         }
-      } else if (/\.(mp4|mkv|mov|iso|flv)$/i.test(name.trim())) {
+      } else if (/\.(?:mp4|mkv|mov|iso|flv|ts|m2ts|avi|wmv|rmvb|webm|m4v|mpg|mpeg)$/i.test(name.trim())) {
         const fileToken = itemToken(item);
         requireValue(fileToken, 'UPSTREAM_FORMAT');
         if (seenFiles.has(id)) continue;

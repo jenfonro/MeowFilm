@@ -19,15 +19,6 @@ const MAX_METADATA_DETAIL_CONCURRENCY = 4;
 const providers = ['baidu', 'quark', 'uc', 'tianyi', 'yidong'];
 const prefixes = { cat: 'cat.script.', source: 'source.runtime.', pan: 'pan.',
   tmdb: 'tmdb.data.', douban: 'douban.data.' };
-const errorCodes = new Set([
-  'INVALID_REQUEST', 'UPSTREAM_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'NETWORK_ERROR',
-  'TIMEOUT', 'RESOURCE_LIMIT', 'CANCELLED', 'CLOSED', 'STALE_SOURCE', 'STALE_ACCOUNT', 'AUTH_REQUIRED', 'AUTH_FAILED',
-  'NOT_CONFIGURED', 'NOT_FOUND', 'LOGIN_EXPIRED', 'CHALLENGE_REQUIRED', 'WEB_INTERACTION_REQUIRED',
-  'CAPABILITY_UNAVAILABLE', 'UNSUPPORTED_OPERATION', 'PAN_FAILURE', 'PAN_INTERCEPTION_UNSUPPORTED', 'SOURCE_FAILURE', 'CAT_FAILURE',
-  'SCRIPT_FAILURE', 'SCRIPT_PROTOCOL_ERROR', 'STORAGE_ERROR', 'CORRUPT_STORAGE',
-  'MEDIA_UNAVAILABLE', 'INVALID_RULES', 'CACHE_LOAD_FAILED', 'STALE_METADATA',
-  'PERMISSION_DENIED', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED', 'COMMIT_UNKNOWN',
-]);
 const sourceErrorCodes = {
   INVALID_ARGUMENT: 'INVALID_REQUEST', HOST_CLOSED: 'CLOSED', SERVICE_CLOSED: 'CLOSED',
   STALE_SESSION: 'STALE_SOURCE', DISABLED: 'SOURCE_DISABLED', STARTING: 'CAPABILITY_UNAVAILABLE',
@@ -44,8 +35,8 @@ const sourceErrorCodes = {
   ALREADY_EXISTS: 'CAT_FAILURE', SERVICE_EXISTS: 'CAT_FAILURE', ROLLBACK_UNAVAILABLE: 'UNSUPPORTED_OPERATION',
 };
 const safeError = error => fail(error?.name === 'AbortError' ? 'CANCELLED'
-  : errorCodes.has(error?.code) ? error.code
-    : Object.hasOwn(sourceErrorCodes, error?.code) ? sourceErrorCodes[error.code] : 'UPSTREAM_ERROR');
+  : Object.hasOwn(sourceErrorCodes, error?.code) ? sourceErrorCodes[error.code]
+    : typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'UPSTREAM_ERROR');
 const accountDependency = (provider, revision) => ({ kind: 'account', domain: provider,
   ...(revision === undefined ? {} : { revision }) });
 
@@ -119,9 +110,8 @@ function metadataValue(provider, path, value, completeness) {
           Number.isSafeInteger(row.episode_number) && row.episode_number >= 0)), 'UPSTREAM_FORMAT');
     } else if (detail) {
       requireValue(String(value.id) === detail[2] && text(value.title ?? value.name), 'UPSTREAM_FORMAT');
-      if (completeness === 'complete') {
-        requireValue(Array.isArray(value.genres) && (provider === 'douban' ? typeof value.intro === 'string'
-          : detail[1] === 'tv' ? Array.isArray(value.seasons) : Object.hasOwn(value, 'runtime')), 'UPSTREAM_FORMAT');
+      if (completeness === 'complete' && provider === 'tmdb' && detail[1] === 'tv') {
+        requireValue(Array.isArray(value.seasons), 'UPSTREAM_FORMAT');
       }
     } else requireValue(Array.isArray(value) || Object.keys(value).length > 0, 'UPSTREAM_FORMAT');
   }

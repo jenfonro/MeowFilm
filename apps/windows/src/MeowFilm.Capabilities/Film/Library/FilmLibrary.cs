@@ -75,8 +75,6 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
             record.Year,
             Tmdb: tmdb,
             Douban: douban);
-        try { entry.Validate(); }
-        catch (FilmPlaybackException) { throw new StorageException(StorageError.Corrupt); }
 
         return new FilmCardItem(record.FavoriteId, record.Title, record.Poster, record.Score)
         {

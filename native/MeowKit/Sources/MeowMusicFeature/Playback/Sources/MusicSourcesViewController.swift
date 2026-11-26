@@ -15,7 +15,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     private let table = UITableView(frame: .zero, style: .plain)
     private let more = UIButton(type: .system)
     private let emptyLabel = UILabel()
-    private var session: (any MusicSourceInspectionSession)?
+    private nonisolated(unsafe) var session: MusicNativeSourceInspection?
     private var snapshot: MusicResolvedSourcesSnapshot?
     private var request = UUID()
     private var loading = false
@@ -108,7 +108,7 @@ final class MusicSourcesViewController: MusicPageViewController,
                 guard !Task.isCancelled, self?.request == own, self?.admitted == true else { return }
                 let value = try await model.inspectSources(for: target.ref)
                 guard !Task.isCancelled, self?.request == own, self?.admitted == true else {
-                    await value.close()
+                    await value.closeInspection()
                     return
                 }
                 self?.session = value
@@ -137,7 +137,7 @@ final class MusicSourcesViewController: MusicPageViewController,
                     }
                 }
                 if self?.request == own {
-                    await value.close()
+                    await value.closeInspection()
                     if self?.request == own { self?.session = nil }
                 }
             } catch {
@@ -158,7 +158,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     private func closeInspection() {
         request = UUID()
         cancelPageTask(key: "inspect")
-        if let session { Task { await session.close() } }
+        if let session { Task { await session.closeInspection() } }
         session = nil; inspecting = false
     }
 
@@ -322,9 +322,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     }
 
     nonisolated deinit {
-        MainActor.assumeIsolated {
-            if let session { Task { await session.close() } }
-        }
+        if let session { Task { await session.closeInspection() } }
     }
 }
 

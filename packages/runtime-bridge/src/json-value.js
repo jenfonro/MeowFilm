@@ -31,6 +31,9 @@ export function createJSONCodec(invalid) {
 
   function parseJSONText(text, depth = 0) {
     if (typeof text !== 'string') invalid();
+    if (!/\d(?:\.?\d){15}|-0(?![0-9.])|[eE]/.test(text)) {
+      try { return JSON.parse(text); } catch { invalid(); }
+    }
     let index = 0;
     const number = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
     function whitespace() {
@@ -52,7 +55,6 @@ export function createJSONCodec(invalid) {
       whitespace();
       const char = text[index];
       if (char === '{' || char === '[') {
-        // Wire envelopes may add two containers; business values are checked at 64.
         if (depth >= 66) invalid();
         const array = char === '[', value = array ? [] : {}, end = array ? ']' : '}';
         index++;
@@ -93,49 +95,47 @@ export function createJSONCodec(invalid) {
     return value;
   }
 
-  function checkJSON(value, depth = 0, ancestors = new Set(), budget = depth === -Infinity ? null : { nodes: 0 }) {
-    if (depth > 64) invalid();
-    if (budget && ++budget.nodes > 1_048_576) invalid();
-    if (value === null || typeof value === 'string' || typeof value === 'boolean' || isRawJSON(value)) return;
-    if (typeof value === 'number') {
-      if (!Number.isFinite(value)) invalid();
-      return;
-    }
-    if (typeof value !== 'object' || ancestors.has(value)) invalid();
-    const array = Array.isArray(value);
-    const prototype = Object.getPrototypeOf(value);
-    if (!array && prototype !== Object.prototype && prototype !== null) invalid();
-    if (Object.getOwnPropertySymbols(value).length) invalid();
-    ancestors.add(value);
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (array && key === 'length') continue;
-      if (array && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length)) invalid();
-      if (!descriptor.enumerable || descriptor.get || descriptor.set) invalid();
-      checkJSON(descriptor.value, depth + 1, ancestors, budget);
-    }
-    if (array && Object.keys(descriptors).length !== value.length + 1) invalid();
-    ancestors.delete(value);
-  }
-
-  function stringifyJSONValue(value, depth = 0) {
-    checkJSON(value, depth);
-    function write(value) {
-      if (isRawJSON(value)) return tokens.get(value);
-      if (value === null || typeof value !== 'object') return Object.is(value, -0) ? '-0' : JSON.stringify(value);
-      if (Array.isArray(value)) return `[${value.map(write).join(',')}]`;
-      return `{${Object.keys(value).map(key => `${JSON.stringify(key)}:${write(value[key])}`).join(',')}}`;
+  function stringifyJSONValue(value) {
+    const ancestors = new Set();
+    function write(current) {
+      if (isRawJSON(current)) return tokens.get(current);
+      if (current === null || typeof current === 'boolean' || typeof current === 'string') {
+        return JSON.stringify(current);
+      }
+      if (typeof current === 'number') {
+        if (!Number.isFinite(current)) invalid();
+        return Object.is(current, -0) ? '-0' : JSON.stringify(current);
+      }
+      if (typeof current !== 'object' || ancestors.has(current)) invalid();
+      ancestors.add(current);
+      try {
+        if (Array.isArray(current)) return `[${current.map(write).join(',')}]`;
+        return `{${Object.keys(current).map(key => `${JSON.stringify(key)}:${write(current[key])}`).join(',')}}`;
+      } finally {
+        ancestors.delete(current);
+      }
     }
     return write(value);
   }
 
-  function cloneJSONValue(value, depth = 0) {
-    return parseJSONText(stringifyJSONValue(value, depth), depth);
+  function cloneJSONValue(value) {
+    if (value === null || typeof value !== 'object' || isRawJSON(value)) return value;
+    if (Array.isArray(value)) return value.map(cloneJSONValue);
+    const copy = {};
+    for (const key of Object.keys(value)) {
+      const next = cloneJSONValue(value[key]);
+      if (key === '__proto__') {
+        Object.defineProperty(copy, key, { value: next, enumerable: true, configurable: true, writable: true });
+      } else {
+        copy[key] = next;
+      }
+    }
+    return copy;
   }
 
-  return { parseJSONText, stringifyJSONValue, cloneJSONValue, checkJSON, isRawJSON, rawJSON };
+  return { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON, rawJSON };
 }
 
 export const {
-  parseJSONText, stringifyJSONValue, cloneJSONValue, checkJSON, isRawJSON, rawJSON,
+  parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON, rawJSON,
 } = createJSONCodec(() => { throw new BridgeError('INVALID_REQUEST'); });

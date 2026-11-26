@@ -1,9 +1,11 @@
 import * as vm from 'node:vm';
 import { posix as path } from 'node:path';
 import { createFetch } from './node-http-realm.js';
-import { Headers, FormData } from './node-web-values.js';
+import { loadCatWebValues } from './native-loader.js';
 import { discoverSourceRoutes, createLocalStartupLookup, startupWrapperTarget } from './cat-source-routes.js';
 import { fault, requireValue } from './errors.js';
+
+const { Headers, FormData } = loadCatWebValues();
 
 /** A naming context for CommonJS globals in this Worker's V8 isolate. This is
  * not a security sandbox; the loader projects the supported module/path API. */

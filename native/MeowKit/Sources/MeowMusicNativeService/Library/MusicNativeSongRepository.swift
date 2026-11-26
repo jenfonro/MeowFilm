@@ -1,5 +1,5 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 extension NativeMusicService {
     /// The only persistent song store. Sources keep their first registered
@@ -13,9 +13,8 @@ extension NativeMusicService {
         guard !input.isEmpty else { return [] }
         let preferences = try playback ?? read().playback
         guard let writer = activeSongWriter else { throw MusicServiceError.storageConflict }
-        let store: any MusicNativeLibraryReading = writer
         let proposedInput = try input.map(MusicModel.cleanSong)
-        var sourceOwners = try store.sourceOwners(keys: Set(proposedInput.flatMap { $0.sources.map(\.sourceKey) }))
+        var sourceOwners = try writer.sourceOwners(keys: Set(proposedInput.flatMap { $0.sources.map(\.sourceKey) }))
         let evidenceByInput = proposedInput.map { raw -> MusicRecordingIdentity? in
             guard !raw.sources.isEmpty else { return nil }
             return MusicModel.descriptor(raw)
@@ -29,13 +28,12 @@ extension NativeMusicService {
         var previous: (input: MusicSongRecord, id: String)?
         for (inputIndex, raw) in input.enumerated() {
             if acceptObservation == nil, let previous, previous.input == raw {
-                try access.check()
                 result.append(previous.id)
                 continue
             }
             let proposed = proposedInput[inputIndex], incoming = proposed.sources
             let explicit = proposed.songID
-            if !authoritative, !explicit.isEmpty, let stored = try store.song(id: explicit) {
+            if !authoritative, !explicit.isEmpty, let stored = try writer.song(id: explicit) {
                 project?(explicit, stored)
                 result.append(explicit)
                 previous = (raw, explicit)
@@ -46,18 +44,18 @@ extension NativeMusicService {
             let evidence = evidenceByInput[inputIndex] ?? MusicModel.descriptor(proposed)
             let id: String
             if let knownOwner { id = knownOwner }
-            else if try !explicit.isEmpty && store.containsSong(id: explicit) { id = explicit }
+            else if try !explicit.isEmpty && writer.containsSong(id: explicit) { id = explicit }
             else {
                 let matches = try evidence.lookupKey.map { key in
                     try candidateIDs[key, default: []].filter { candidate in
-                        guard let stored = try store.song(id: candidate) else { return false }
+                        guard let stored = try writer.song(id: candidate) else { return false }
                         return MusicModel.descriptor(stored).matches(evidence)
                     }
                 } ?? []
                 id = matches.count == 1 ? matches[0] : UUID().uuidString.lowercased()
             }
 
-            let existing = try store.song(id: id)
+            let existing = try writer.song(id: id)
             if let existing, acceptObservation?(id) == false {
                 project?(id, existing)
                 result.append(id)
@@ -117,7 +115,6 @@ extension NativeMusicService {
 
     func saveRepositorySong(_ song: MusicSongRecord) throws {
         guard let writer = activeSongWriter else { throw MusicServiceError.storageConflict }
-        try MusicLibraryValidation.validateSong(song, id: song.songID)
         let evidence = MusicModel.descriptor(song)
         let query = MusicRecordingIdentity.normalize(song.title + " " + song.artist)
         var normalized = song
@@ -145,7 +142,7 @@ extension NativeMusicService {
 
     func registeredSongID(_ value: MusicNativeTrackData) throws -> String {
         let key = try MusicModel.sourceKey(fromTrackData: value)
-        guard let id = try repositoryReader.sourceOwner(key: key) else { throw MusicServiceError.notFound }
+        guard let id = try database.sourceOwner(key: key) else { throw MusicServiceError.notFound }
         return id
     }
 
@@ -155,18 +152,17 @@ extension NativeMusicService {
 
     func repositoryTrack(_ song: MusicSongRecord, occurrence: String? = nil, sourcePosition: Int? = nil) throws -> MusicRemoteTrack {
         let current = try repositorySong(song.songID, read())
-        return try MusicModel.track(current, .init(kind: .library, id: current.songID, occurrence: occurrence),
-                                    sourcePosition: sourcePosition)
+        return MusicModel.track(current, .init(kind: .library, id: current.songID, occurrence: occurrence),
+                                sourcePosition: sourcePosition)
     }
 
     func adoptSongs(_ input: [MusicSongRecord], authoritative: Bool = false) throws -> [MusicSongRecord] {
         guard !input.isEmpty else { return [] }
-        return try transaction([.library], reportingCancellationAfterCommit: false) { state in
+        return try transaction([.library]) { state in
             var projected: [String: MusicSongRecord] = [:]
             let ids = try registerSongs(input, library: &state.library, authoritative: authoritative, playback: state.playback,
                                         project: { projected[$0] = $1 })
             return try ids.map { id in
-                try access.check()
                 guard let song = projected[id] else { throw MusicServiceError.storageConflict }
                 return song
             }
@@ -219,7 +215,6 @@ extension NativeMusicService {
         let songs = try state.songRows.songs(ids: Set(references.map(\.songID)))
         var previous: (reference: MusicQueueTrackReference, data: Data)?
         return try references.map { reference in
-            try access.check()
             if let previous, previous.reference.songID == reference.songID,
                previous.reference.sourceKey == reference.sourceKey,
                previous.reference.recommendation == reference.recommendation {
@@ -239,9 +234,8 @@ extension NativeMusicService {
         let state = try read()
         let songs = try state.songRows.songs(ids: Set(page.items.map(\.songID)))
         return .init(items: try page.items.map { reference in
-            try access.check()
             guard let song = songs[reference.songID] else { throw MusicServiceError.notFound }
-            return try MusicModel.track(
+            return MusicModel.track(
                 song,
                 .init(kind: .library, id: reference.songID, occurrence: reference.occurrenceID),
                 sourcePosition: reference.sourcePosition
@@ -284,12 +278,12 @@ extension NativeMusicService {
     }
 }
 
-extension NativeMusicService: MusicSongRepositoryReading {
+extension NativeMusicService {
     public func repositoryTracks(songIDs: Set<String>) async throws -> [String: MusicRemoteTrack] {
         let state = try read()
         let batch = try state.songRows.songs(ids: songIDs)
-        return try Dictionary(uniqueKeysWithValues: batch.map { id, song in
-            (id, try MusicModel.track(song, .init(kind: .library, id: id)))
+        return Dictionary(uniqueKeysWithValues: batch.map { id, song in
+            (id, MusicModel.track(song, .init(kind: .library, id: id)))
         })
     }
 

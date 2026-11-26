@@ -134,13 +134,8 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
         return scope.Trim() == scope;
     }
 
-    private static MusicLibraryRevision ReadRevision(DatabaseSession db, string scope)
-    {
-        var rev = db.Revision(OwnerKey(scope));
-        if (rev.Revision is < 0 or > MaxSafeInteger)
-            throw new StorageException(StorageError.Corrupt);
-        return new MusicLibraryRevision(rev.Revision);
-    }
+    private static MusicLibraryRevision ReadRevision(DatabaseSession db, string scope) =>
+        new(db.Revision(OwnerKey(scope)).Revision);
 
     public Task<MusicLibraryRevision> ReadRevisionAsync(string scope, CancellationToken cancellationToken = default)
     {
@@ -297,10 +292,6 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
         if (expected.Generation is < 0 or >= MaxSafeInteger)
             throw new StorageException(StorageError.InvalidRequest);
 
-        foreach (var song in commit.Songs)
-            ValidateSongRecord(song.Record);
-
-        int bytes = EstimateCommitBytes(commit);
         string owner = OwnerKey(scope);
         var expectedStorageRev = new StorageRevision(expected.Generation);
 
@@ -316,15 +307,6 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
                 var next = mutation.Record;
                 var previous = mutation.Previous;
                 if (next.ContentEquals(previous)) continue;
-                if (previous is not null)
-                {
-                    if (previous.BaselineDuration is not null &&
-                        !NullableDoubleEqual(previous.BaselineDuration, next.BaselineDuration))
-                        throw new StorageException(StorageError.Conflict);
-                    var nextKeys = next.Sources.Select(s => s.SourceKey).ToHashSet(StringComparer.Ordinal);
-                    if (previous.Sources.Any(s => !nextKeys.Contains(s.SourceKey)))
-                        throw new StorageException(StorageError.Conflict);
-                }
                 var prevKeys = previous is null ? null : previous.Sources.Select(s => s.SourceKey).ToHashSet(StringComparer.Ordinal);
                 foreach (var source in next.Sources)
                 {
@@ -391,20 +373,7 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
 
             var committed = db.CommitRevision(owner, expectedStorageRev);
             return new MusicLibraryRevision(committed.Revision);
-        }, cancellationToken, bytes);
-    }
-
-    private static void ValidateSongRecord(MusicSongRecord song)
-    {
-        if (!Guid.TryParseExact(song.SongId, "D", out var parsed) || song.SongId != parsed.ToString("D"))
-            throw new StorageException(StorageError.InvalidRequest);
-        var keys = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var src in song.Sources)
-        {
-            if (string.IsNullOrEmpty(src.SourceKey) || string.IsNullOrEmpty(src.Platform) ||
-                src.InfoSource != src.Platform || !keys.Add(src.SourceKey))
-                throw new StorageException(StorageError.InvalidRequest);
-        }
+        }, cancellationToken);
     }
 
     public ValueTask DisposeAsync()

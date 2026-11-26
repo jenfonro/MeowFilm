@@ -19,7 +19,7 @@ internal sealed class MusicChorusCache(IStorageDatabase database)
     {
         if (string.IsNullOrEmpty(key.Scope) || string.IsNullOrEmpty(key.Platform) || string.IsNullOrEmpty(key.NativeId) ||
             !double.IsFinite(key.RecordingDuration) || key.RecordingDuration <= 0)
-            throw MusicPlaybackCacheDataException.Corrupt();
+            return null;
         try
         {
             (double Start, double End)? Read(DatabaseSession db)
@@ -61,10 +61,10 @@ internal sealed class MusicChorusCache(IStorageDatabase database)
                     """,
                     ("$limit", MaximumEntries));
                 return ((double Start, double End)?)value;
-            }, token, 512).ConfigureAwait(false);
+            }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return null; }
+        catch (StorageException) { return null; }
     }
 
     internal async Task ClearAsync(string? platform, CancellationToken token)
@@ -77,7 +77,7 @@ internal sealed class MusicChorusCache(IStorageDatabase database)
             else
                 db.Execute("DELETE FROM cached_music_chorus WHERE platform=$platform", ("$platform", platform));
             return true;
-        }, token, 256).ConfigureAwait(false);
+        }, token).ConfigureAwait(false);
     }
 
     internal async Task<(int EntryCount, int MaximumEntries)> GetStatsAsync(CancellationToken token = default)

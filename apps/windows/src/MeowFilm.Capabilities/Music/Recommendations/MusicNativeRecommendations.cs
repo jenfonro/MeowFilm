@@ -7,7 +7,6 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicNativeApplication
 {
-    private readonly MusicRecommendationQueuePort recommendationQueue;
     private readonly MusicRecommendationCoordinator recommendations;
     private readonly MusicFmPreferences fmPreferences;
     private RecommendationBinding? recommendationBinding;
@@ -18,12 +17,6 @@ public sealed partial class MusicNativeApplication
     private Task? recommendationCancellation;
     private int recommendationPreludes;
     private TaskCompletionSource recommendationPreludesDrained = Completed();
-
-    public event Action<MusicRecommendationSnapshot>? Changed
-    {
-        add => recommendations.Changed += value;
-        remove => recommendations.Changed -= value;
-    }
 
     /// <summary>
     /// Exactly one media consumer. Disposal fences its callbacks immediately,
@@ -63,8 +56,6 @@ public sealed partial class MusicNativeApplication
         }
         try
         {
-            // Invalidate only fences and schedules cancellation. It does not wait
-            // for an admitted selection callback; the coordinator retains that work.
             recommendations.Invalidate();
         }
         finally { lock (gate) recommendationBindingChanges--; }
@@ -79,7 +70,7 @@ public sealed partial class MusicNativeApplication
         {
             if (!selection.IsCurrent()) return false;
             lock (gate)
-                return !closed && !stopping && !recommendationPreparing && !accountReceiptUnknown && recommendationBindingChanges == 0 &&
+                return !closed && !stopping && !recommendationPreparing && recommendationBindingChanges == 0 &&
                     Volatile.Read(ref binding.Revoked) == 0 && ReferenceEquals(recommendationBinding, binding) &&
                     recommendationBindingEpoch == binding.Epoch;
         }
@@ -90,22 +81,6 @@ public sealed partial class MusicNativeApplication
         return accepted && guarded.IsCurrent() && !token.IsCancellationRequested;
     }
 
-    public Task OnPlaybackAsync(MusicRecommendationPlaybackState state, CancellationToken ct = default)
-    {
-        ArgumentNullException.ThrowIfNull(state);
-        return RecommendationCallAsync(async token =>
-        {
-            await recommendations.OnPlaybackAsync(state, token).ConfigureAwait(false);
-            return true;
-        }, ct);
-    }
-
-    public Task<bool> TryAdvanceAsync(string entryId, bool naturalEnd, bool play, CancellationToken ct = default)
-    {
-        ArgumentNullException.ThrowIfNull(entryId);
-        return RecommendationCallAsync(token => recommendations.TryAdvanceAsync(entryId, naturalEnd, play, token), ct);
-    }
-
     public MusicRecommendationFeedback? GetFeedback(string entryId)
     {
         if (string.IsNullOrEmpty(entryId)) return null;
@@ -114,7 +89,7 @@ public sealed partial class MusicNativeApplication
         if (binding is null) return null;
         var feedback = recommendations.GetFeedback(entryId);
         lock (gate)
-            return closed || stopping || recommendationPreparing || accountReceiptUnknown ||
+            return closed || stopping || recommendationPreparing ||
                 !ReferenceEquals(recommendationBinding, binding) || recommendationBindingChanges != 0 ||
                 Volatile.Read(ref binding.Revoked) != 0 ? null : feedback;
     }
@@ -150,26 +125,6 @@ public sealed partial class MusicNativeApplication
         catch (AggregateException) { /* Callback errors cannot undo cancellation or leak into diagnostics. */ }
     }
 
-    private async Task<T> RecommendationCallAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken token)
-    {
-        CancellationToken generation, recommendationGeneration;
-        lock (gate)
-        {
-            if (closed || stopping || recommendationPreparing) throw new MusicOperationException("CLOSED");
-            if (accountReceiptUnknown) throw new MusicOperationException("COMMIT_UNKNOWN");
-            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            generation = lifetime.Token;
-            recommendationGeneration = recommendationLifetime.Token;
-        }
-        try
-        {
-            using var request = CancellationTokenSource.CreateLinkedTokenSource(token, generation, recommendationGeneration);
-            request.Token.ThrowIfCancellationRequested();
-            return await operation(request.Token).ConfigureAwait(false);
-        }
-        finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
-    }
-
     public Task<MusicRecommendationSnapshot> StartRecommendationAsync(MusicRecommendationStartRequest input, CancellationToken cancellationToken = default) =>
         RunAdmittedAsync(async token =>
         {
@@ -178,7 +133,6 @@ public sealed partial class MusicNativeApplication
             lock (gate)
             {
                 if (closed || stopping || recommendationPreparing) throw new MusicOperationException("CLOSED");
-                if (accountReceiptUnknown) throw new MusicOperationException("COMMIT_UNKNOWN");
                 if (recommendationBindingChanges != 0) throw new MusicOperationException("BUSY");
                 if (recommendationBinding is null || Volatile.Read(ref recommendationBinding.Revoked) != 0)
                     throw new MusicOperationException("PLAYBACK_UNAVAILABLE");
@@ -242,45 +196,6 @@ public sealed partial class MusicNativeApplication
             return started;
         }, cancellationToken);
 
-    public Task<MusicRecommendationSnapshot> GetRecommendationAsync(string? id = null, CancellationToken cancellationToken = default) =>
-        RunRecommendationCommandAsync(allowWhenReceiptUnknown: true, token => recommendations.GetAsync(id, token), cancellationToken);
-
-    public Task<MusicRecommendationSnapshot> CancelRecommendationAsync(string id, CancellationToken cancellationToken = default) =>
-        RunRecommendationCommandAsync(allowWhenReceiptUnknown: true, token => recommendations.CancelAsync(id, token), cancellationToken);
-
-    public Task<MusicRecommendationSnapshot> ReturnRecommendationAsync(string id, CancellationToken cancellationToken = default) =>
-        RunRecommendationCommandAsync(allowWhenReceiptUnknown: false, token => recommendations.ReturnAsync(id, token), cancellationToken);
-
-    public Task<MusicRecommendationSnapshot> SetRecommendationContinueAsync(string id, bool enabled, CancellationToken cancellationToken = default) =>
-        RunRecommendationCommandAsync(allowWhenReceiptUnknown: false, token => recommendations.SetContinueAsync(id, enabled, token), cancellationToken);
-
-    public Task<MusicRecommendationSnapshot> RetryRecommendationAsync(string id, CancellationToken cancellationToken = default) =>
-        RunRecommendationCommandAsync(allowWhenReceiptUnknown: false, token => recommendations.RetryAsync(id, token), cancellationToken);
-
-    public Task<MusicRecommendationSnapshot> ChooseRecommendationCandidateAsync(string id, string candidateId, CancellationToken cancellationToken = default) =>
-        RunRecommendationCommandAsync(allowWhenReceiptUnknown: false, token => recommendations.ChooseAsync(id, candidateId, token), cancellationToken);
-
-    public Task<MusicRecommendationSnapshot> ReconcileRecommendationAsync(string id, CancellationToken cancellationToken = default) =>
-        RunRecommendationCommandAsync(allowWhenReceiptUnknown: false, async token =>
-        {
-            var result = await recommendations.ReconcileAsync(id, token).ConfigureAwait(false);
-            if (result.Mode.Length > 0)
-                await SaveFmSelectionAsync(null, null, result, token).ConfigureAwait(false);
-            return result;
-        }, cancellationToken);
-
-    private Task<MusicRecommendationSnapshot> RunRecommendationCommandAsync(bool allowWhenReceiptUnknown,
-        Func<CancellationToken, Task<MusicRecommendationSnapshot>> action, CancellationToken cancellationToken) =>
-        RunAdmittedAsync(async token =>
-        {
-            lock (gate)
-            {
-                if (closed || stopping) throw new MusicOperationException("CLOSED");
-                if (accountReceiptUnknown && !allowWhenReceiptUnknown) throw new MusicOperationException("COMMIT_UNKNOWN");
-            }
-            return await action(token).ConfigureAwait(false);
-        }, cancellationToken);
-
     private void RequireRecommendationStartGate(RecommendationBinding binding)
     {
         lock (gate) RequireRecommendationStartGateLocked(binding);
@@ -289,7 +204,6 @@ public sealed partial class MusicNativeApplication
     private void RequireRecommendationStartGateLocked(RecommendationBinding binding)
     {
         if (closed || stopping || recommendationPreparing) throw new MusicOperationException("CLOSED");
-        if (accountReceiptUnknown) throw new MusicOperationException("COMMIT_UNKNOWN");
         if (recommendationBindingChanges != 0 || !ReferenceEquals(recommendationBinding, binding) ||
             Volatile.Read(ref binding.Revoked) != 0) throw new MusicOperationException("PLAYBACK_UNAVAILABLE");
     }
@@ -321,7 +235,6 @@ public sealed partial class MusicNativeApplication
         lock (gate)
         {
             if (closed || stopping || recommendationPreparing) throw new MusicPlatformException("CLOSED", request.Platform, request.Method);
-            if (accountReceiptUnknown) throw new MusicPlatformException("COMMIT_UNKNOWN", request.Platform, request.Method);
         }
         token.ThrowIfCancellationRequested();
         using var frame = sessions.Begin(awaitPhysical: true, inheritLease: true);
@@ -335,21 +248,4 @@ public sealed partial class MusicNativeApplication
     }
 
     private void RecommendationAccountChanged(string platform) => recommendations.Invalidate(platform);
-
-    private Task<MusicQueuePositionResult> CommitCatalogPlaylistInRecommendationLaneAsync(
-        string token, string action, long expectedVersion, int index, string? memberId, string? songId, int memberOccurrence,
-        CancellationToken ct)
-    {
-        MusicRecommendationQueueChange? change = action switch
-        {
-            "play" => MusicRecommendationQueueChange.Replace,
-            "next" => MusicRecommendationQueueChange.PlayNext,
-            _ => null
-        };
-        return change is { } kind
-            ? recommendationQueue.ExecuteExternalAsync(kind,
-                inner => nativeCatalog.CommitPlaylistAsync(token, action, expectedVersion, index, memberId, songId, memberOccurrence, inner), ct)
-            : recommendationQueue.InLaneAsync((_, inner) =>
-                nativeCatalog.CommitPlaylistAsync(token, action, expectedVersion, index, memberId, songId, memberOccurrence, inner), ct);
-    }
 }

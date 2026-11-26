@@ -74,11 +74,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         appearance: MusicAppearancePreferencesStore,
         router: any MusicUIRouting
     ) {
-        let page = MusicCollectionViewModel(
-            model: model,
-            collectionID: collectionID,
-            currentQueueCollectionID: { model.state.sourceCollectionID }
-        )
+        let page = MusicCollectionViewModel(model: model, collectionID: collectionID)
         self.init(model: model, content: .local(page), appearance: appearance, router: router)
     }
 
@@ -94,45 +90,23 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     public convenience init(
         model: MusicViewModel,
         collection: MusicPublicBrowseCollection,
-        browser: any MusicPublicBrowsing,
+        service: NativeMusicService,
         appearance: MusicAppearancePreferencesStore,
         router: any MusicUIRouting
     ) {
-        let page = MusicPublicBrowseViewModel(
-            service: browser,
-            request: .detail(collection),
-            queuePage: { [weak model] source, cursor in
-                guard let model else { throw MusicServiceError.closed }
-                return try await model.remoteQueuePage(source, cursor: cursor)
-            },
-            releaseSource: { [weak model] source in
-                model?.releaseRemoteQueueSource(source)
-            }
-        )
-        self.init(
-            model: model,
-            content: .remote(collection, page),
-            appearance: appearance,
-            router: router
-        )
+        let page = MusicPublicBrowseViewModel(service: service, request: .detail(collection), owner: model)
+        self.init(model: model, content: .remote(collection, page), appearance: appearance, router: router)
     }
 
     public convenience init(
         model: MusicViewModel,
         recommendation request: MusicPublicBrowseRequest,
-        browser: any MusicPublicBrowsing,
+        service: NativeMusicService,
         appearance: MusicAppearancePreferencesStore,
         router: any MusicUIRouting
     ) {
         precondition(request.dailyPlatform != nil)
-        let page = MusicPublicBrowseViewModel(
-            service: browser, request: request,
-            queuePage: { [weak model] source, cursor in
-                guard let model else { throw MusicServiceError.closed }
-                return try await model.remoteQueuePage(source, cursor: cursor)
-            },
-            releaseSource: { [weak model] in model?.releaseRemoteQueueSource($0) }
-        )
+        let page = MusicPublicBrowseViewModel(service: service, request: request, owner: model)
         self.init(model: model, content: .remote(nil, page), appearance: appearance, router: router)
     }
 
@@ -276,7 +250,6 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
                 page.$request.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             ])
             observe(remoteState.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.renderState() }
-            observe(model.accessChanges) { [weak self] in self?.activateRemotePage() }
             if let favorites {
                 observe(favorites.favoriteChanges, whenVisible: true) { [weak self] in
                     self?.updateVisibleCells(force: true)

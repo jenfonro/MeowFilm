@@ -56,13 +56,6 @@ extension MeowfilmDebugNavigator {
                     "message": .string(err)
                 ]))
             }
-            for receipt in music.settingsReceipts.unknown {
-                notices.append(.object([
-                    "id": .string(receipt.id.uuidString),
-                    "level": .string("warn"),
-                    "message": .string(receipt.message)
-                ]))
-            }
         }
         if assembly?.startupFailed == true {
             notices.append(.object([

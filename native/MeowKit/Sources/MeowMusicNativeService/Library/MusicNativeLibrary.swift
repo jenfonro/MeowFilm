@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Native port of music-core/library.js; local mutations originate in iWebPlus.
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
-enum MusicLibraryValidation {
-    static func validateSong(_ song: MusicSongRecord, id: String) throws {
-        try musicRequire(UUID(uuidString: id) != nil && song.songID == id, .songIDConflict)
-        _ = try MusicModel.sources(song)
-    }
-}
-
-extension NativeMusicService: MusicCollectionMembershipServing {
+extension NativeMusicService {
     func collection(_ id: String, _ d: MusicDomainState) throws -> MusicCollectionRecord {
         guard let c = d.library.collections.first(where: { $0.id == id && !$0.deleted }) else {
             throw MusicServiceError.notFound
@@ -30,9 +23,8 @@ extension NativeMusicService: MusicCollectionMembershipServing {
 
     func saveCollection(_ c: MusicCollectionRecord, _ d: inout MusicDomainState) throws {
         try musicRequire((0...musicMaxSafeInteger).contains(c.revision), .limit)
-        let positions = d.library.collections.indices.filter { d.library.collections[$0].id == c.id }
-        try musicRequire(positions.count <= 1, .corruptStorage)
-        if let i = positions.first { d.library.collections[i] = c } else { d.library.collections.append(c) }
+        if let i = d.library.collections.firstIndex(where: { $0.id == c.id }) { d.library.collections[i] = c }
+        else { d.library.collections.append(c) }
         d.library.libraryRevision += 1
         d.library.revision += 1
     }
@@ -64,17 +56,15 @@ extension NativeMusicService: MusicCollectionMembershipServing {
         let songsByID = try d.projectSongs(c.order)
         return try c.order.map { id in
             guard let song = songsByID[id] else { throw MusicServiceError.notFound }
-            return try MusicModel.track(song, .init(kind: .library, id: id))
+            return MusicModel.track(song, .init(kind: .library, id: id))
         }
     }
 
     public func createPlaylist(name: String, refs: [MusicReference]) async throws -> MusicCollection {
         _ = try musicText(name)
         let result = try transaction([.library]) { d in
-            try musicRequire(d.library.nextID > 0 && d.library.nextID <= musicMaxSafeInteger, .corruptStorage)
             try musicRequire(d.library.nextID < musicMaxSafeInteger, .limit)
             let newID = "playlist:\(d.library.nextID)"
-            try musicRequire(!d.library.collections.contains { $0.id == newID }, .corruptStorage)
             let ids = try collectionSongIDs(refs, state: d)
             var c = MusicModel.freshCollection(newID, name)
             d.library.nextID += 1
@@ -147,9 +137,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
             case .library:
                 id = ref.id
             case .queue:
-                let entries = state.queue.entries.filter { $0.id == ref.id }
-                guard let entry = entries.first else { throw MusicServiceError.notFound }
-                try musicRequire(entries.count == 1, .corruptStorage)
+                guard let entry = state.queue.entries.first(where: { $0.id == ref.id }) else { throw MusicServiceError.notFound }
                 id = entry.songID
             }
             guard seen.insert(id).inserted else { continue }
@@ -157,8 +145,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
             ids.append(id)
         }
         if !ids.isEmpty {
-            let reader: any MusicNativeLibraryReading = activeSongWriter ?? repositoryReader
-            let existing = try reader.containsSongs(ids: Set(ids))
+            let existing = try activeSongWriter?.containsSongs(ids: Set(ids)) ?? database.containsSongs(ids: Set(ids))
             for id in ids {
                 try musicRequire(existing.contains(id), .notFound)
             }

@@ -38,7 +38,7 @@ public struct RuntimePayload: Sendable, Equatable {
 
 /// A private socketpair transfers trusted startup and native settings frames.
 /// EOF requests shutdown; business calls use ordinary HTTP.
-public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendable {
+public final class RuntimeEmbeddedLauncher: @unchecked Sendable {
     public typealias Start = @Sendable (_ arguments: [String]) -> Int32
     private let payload: @Sendable () throws -> RuntimePayload
     private let dataDirectory: URL

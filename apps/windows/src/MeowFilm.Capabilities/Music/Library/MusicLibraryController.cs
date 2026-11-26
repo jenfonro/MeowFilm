@@ -5,82 +5,72 @@ using MeowFilm.Desktop;
 namespace MeowFilm.Capabilities;
 
 /// <summary>
-/// Standalone Layer-7 owner for music local playlists, favorites, history, archives, content-detail
-/// presentation, song selection, and library navigation items.
+/// Standalone owner for music local playlists, favorites, history, archives,
+/// local song selection, and library navigation items. Zero reference to <see cref="MusicCatalogController"/>.
 /// </summary>
 public sealed partial class MusicLibraryController : MusicController
 {
-    private readonly MusicCatalogController catalog;
     private readonly MusicPlaybackController playbackController;
     private readonly MusicQueueController queue;
-    private readonly MusicCatalogActionState catalogActions;
-    private readonly MusicContentState contentState;
     private PlaylistRow? collection;
+    private SongRow? selectedSong;
+    private string heading = "发现音乐";
+    private int total;
     private CancellationTokenSource? collectionPageCancellation;
     private long libraryRead, libraryRevision = -1;
+    private bool syncRefreshQueued, syncRefreshRequested;
 
     internal MusicLibraryController(
         MusicRuntimeContext ctx,
-        MusicCatalogController catalog,
         MusicPlaybackController playbackController,
-        MusicQueueController queue,
-        MusicCatalogActionState catalogActions,
-        MusicContentState contentState) : base(ctx)
+        MusicQueueController queue) : base(ctx)
     {
-        this.catalog = catalog;
         this.playbackController = playbackController;
         this.queue = queue;
-        this.catalogActions = catalogActions;
-        this.contentState = contentState;
-
-        contentState.SelectionChanged += OnSelectionChanged;
-        contentState.SelectionRejected += OnSelectionRejected;
-        contentState.SelectionCleared += OnSelectionCleared;
-        contentState.DetailBindingsInvalidated += NotifyDetailBindings;
-        contentState.SummaryChanged += OnSummaryChanged;
-        contentState.SelectionBindingInvalidated += NotifySelectionChanged;
-    }
-
-    private void OnSelectionChanged(SongRow? _)
-    {
-        Changed(nameof(CatalogSelectedSong));
-        Changed(nameof(SelectedSong));
-        Changed(nameof(HasSelection));
-        Changed(nameof(CanRemoveSelection));
-    }
-
-    private void OnSelectionRejected() => Changed(nameof(SelectedSong));
-
-    private void OnSelectionCleared()
-    {
-        Changed(nameof(SelectedSong));
-        Changed(nameof(CatalogSelectedSong));
-    }
-
-    private void OnSummaryChanged()
-    {
-        Changed(nameof(Heading));
-        Changed(nameof(CountText));
+        application.LibrarySync.StateChanged += OnLibrarySyncChanged;
     }
 
     internal void Unsubscribe()
     {
-        contentState.SelectionChanged -= OnSelectionChanged;
-        contentState.SelectionRejected -= OnSelectionRejected;
-        contentState.SelectionCleared -= OnSelectionCleared;
-        contentState.DetailBindingsInvalidated -= NotifyDetailBindings;
-        contentState.SummaryChanged -= OnSummaryChanged;
-        contentState.SelectionBindingInvalidated -= NotifySelectionChanged;
+        application.LibrarySync.StateChanged -= OnLibrarySyncChanged;
     }
 
-    public ObservableCollection<PlaylistRow> Playlists => contentState.Playlists;
-    public ObservableCollection<PlaylistRow> NetworkPlaylists => contentState.NetworkPlaylists;
-    public ObservableCollection<SongRow> CatalogSongsSource => contentState.CatalogSongsSource;
+    private void OnLibrarySyncChanged()
+    {
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (stopping || disposed) return;
+            syncRefreshRequested = true;
+            if (syncRefreshQueued) return;
+            syncRefreshQueued = true;
+            _ = RunAsync(async () =>
+            {
+                try
+                {
+                    while (syncRefreshRequested && !stopping && !disposed)
+                    {
+                        syncRefreshRequested = false;
+                        long origin = ctx.LoadGeneration;
+                        await RefreshPlaylists(lifetime.Token);
+                        var route = ctx.CurrentRoute;
+                        if (origin == ctx.LoadGeneration && ctx.LoadCancellation is null &&
+                            (route is "favorites" or "search" || route.StartsWith("playlist/", StringComparison.Ordinal)))
+                            await LoadAsync(ctx.CaptureLocation(), lifetime.Token, publishStatus: false);
+                    }
+                }
+                finally { syncRefreshQueued = false; }
+            }, publishStatus: false);
+        });
+    }
+
+    public ObservableCollection<PlaylistRow> Playlists { get; } = [];
+    public ObservableCollection<PlaylistRow> NetworkPlaylists { get; } = [];
+    public ObservableCollection<SongRow> LibrarySongsSource { get; } = [];
     public ObservableCollection<string> HistoryDates { get; } = [];
     public ObservableCollection<ArchivedPlaylist> Archives { get; } = [];
 
     internal event Action? SongFavoritesChanged;
-    internal event Func<Task>? ActiveSurfaceRefreshRequested;
     internal long LoadGeneration => ctx.LoadGeneration;
     internal ObservableCollection<SongRow> ActiveSongs => ctx.ActiveSongs;
     internal void ReportUiError(Exception error)
@@ -88,11 +78,7 @@ public sealed partial class MusicLibraryController : MusicController
         if (!ctx.Stopping && !ctx.Disposed) ctx.SetStatus(MusicRuntimeContext.ErrorText(error));
     }
 
-    public MusicContentPage ContentPage => contentState.IsDiscovery ? MusicContentPage.Discovery :
-        IsArchives ? MusicContentPage.Archives : contentState.IsSearchSongs ? MusicContentPage.SearchSongs :
-        ShowsSongTable ? MusicContentPage.Songs : MusicContentPage.Catalog;
-
-    public string Heading => contentState.Heading;
+    public string Heading => heading;
     public string Status => ctx.Status;
     public bool IsHistory => ctx.CurrentRoute == "history";
     public bool IsArchives => ctx.CurrentRoute == "archives";
@@ -100,74 +86,67 @@ public sealed partial class MusicLibraryController : MusicController
         ctx.CurrentRoute.StartsWith("playlist/", StringComparison.Ordinal);
     public bool IsLocalLibraryPage => IsSongList || IsArchives;
     public bool IsCollectionPage => IsSongList && collection is not null;
-    public bool IsContentDetailPage => IsCollectionPage || catalog.IsCatalogDetailPage;
-    public bool ShowsSongTable => IsSongList || catalog.IsCatalogDetailPage || contentState.IsSearchSongs;
     public bool ShowSongPager => IsSongList && !IsCollectionPage;
     public string? HistoryDate => ctx.CurrentLocation.Date;
     public bool HasCollection => collection is not null;
     internal PlaylistRow? CurrentCollection => collection;
     public bool CanDeleteCollection => HasCollection && collection!.Kind != "favorites";
     public bool CanPreviousPage => CanEdit && IsSongList && !IsCollectionPage && ctx.CurrentLocation.Offset > 0;
-    public bool CanNextPage => CanEdit && IsSongList && !IsCollectionPage && ctx.CurrentLocation.Offset + ctx.ActiveSongs.Count < contentState.Total;
-    public string CountText => catalog.IsCatalogPage ? "" : IsArchives ? $"{Archives.Count} 个歌单" : $"{contentState.Total} 首歌曲";
-    public string PageText => !IsSongList || IsCollectionPage || ctx.ActiveSongs.Count == 0 ? "" :
-        $"{ctx.CurrentLocation.Offset + 1}–{ctx.CurrentLocation.Offset + ctx.ActiveSongs.Count} / {contentState.Total}";
-    public string CollectionArtwork => IsCollectionPage ? ctx.ActiveSongs.FirstOrDefault(row => row.Cover.Length > 0)?.Cover ?? "" : "";
-    public bool CanPlayCollection => CanEdit && IsCollectionPage && contentState.Total > 0;
-    public string DetailArtwork => catalog.IsCatalogDetailPage
-        ? (catalog.CatalogArtwork.Length > 0 ? catalog.CatalogArtwork : ctx.ActiveSongs.FirstOrDefault(row => row.Cover.Length > 0)?.Cover ?? "")
-        : CollectionArtwork;
-    public string DetailCountText => catalog.IsCatalogDetailPage
-        ? catalog.CatalogSummaryCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? ""
-        : IsContentDetailPage ? contentState.Total.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
-    public string DetailSectionTitle => catalog.IsCatalogArtist ? "热门歌曲" : "歌曲";
-    public string DetailArtworkName => catalog.IsCatalogArtist ? "歌手头像" : "歌单封面";
-    public string DetailSubtitle => catalog.DetailSubtitle;
-    public bool ShowDetailLoading => catalog.ShowDetailLoading;
-    public bool CanPlayContentDetail => catalog.IsCatalogDetailPage ? catalog.CanPlayCatalogPlaylist : CanPlayCollection;
-    public bool HasSelection => CanEdit && contentState.SelectedSong is not null;
+    public bool CanNextPage => CanEdit && IsSongList && !IsCollectionPage && ctx.CurrentLocation.Offset + LibrarySongsSource.Count < total;
+    public string CountText => IsArchives ? $"{Archives.Count} 个歌单" : IsSongList ? $"{total} 首歌曲" : "";
+    public string PageText => !IsSongList || IsCollectionPage || LibrarySongsSource.Count == 0 ? "" :
+        $"{ctx.CurrentLocation.Offset + 1}–{ctx.CurrentLocation.Offset + LibrarySongsSource.Count} / {total}";
+    public string CollectionArtwork => IsCollectionPage ? LibrarySongsSource.FirstOrDefault(row => row.Cover.Length > 0)?.Cover ?? "" : "";
+    public bool CanPlayCollection => CanEdit && IsCollectionPage && total > 0;
+    public bool HasSelection => CanEdit && selectedSong is not null;
     public bool CanRemoveSelection => HasSelection && HasCollection;
     public bool CanReorderPlaylist => CanEdit && HasCollection && IsSongList;
-    public bool CanLoadMoreCollection => CanEdit && IsCollectionPage && ctx.ActiveSongs.Count < contentState.Total &&
+    public bool CanLoadMoreCollection => CanEdit && IsCollectionPage && LibrarySongsSource.Count < total &&
         collectionPageCancellation is null;
-    internal int Total => contentState.Total;
-
-    public SongRow? CatalogSelectedSong
-    {
-        get => contentState.IsSearchPage ? null : contentState.SelectedSong;
-        set { if (!contentState.IsSearchPage) SelectedSong = value; }
-    }
+    internal int Total => total;
 
     public SongRow? SelectedSong
     {
-        get => contentState.SelectedSong;
-        set => contentState.SetSelectedSong(value);
+        get => selectedSong;
+        set
+        {
+            if (value is not null && !LibrarySongsSource.Any(row => ReferenceEquals(row, value)))
+            {
+                Changed();
+                return;
+            }
+            if (ReferenceEquals(selectedSong, value)) return;
+            selectedSong = value;
+            Changed();
+            Changed(nameof(HasSelection));
+            Changed(nameof(CanRemoveSelection));
+        }
+    }
+
+    internal void ClearSelectionOnly()
+    {
+        if (selectedSong is null) return;
+        selectedSong = null;
+        Changed(nameof(SelectedSong));
+        Changed(nameof(HasSelection));
+        Changed(nameof(CanRemoveSelection));
     }
 
     private static readonly string[] AvailabilityProperties =
     [
-        nameof(CatalogSelectedSong), nameof(Heading), nameof(Status), nameof(IsCollectionPage),
+        nameof(SelectedSong), nameof(Heading), nameof(Status), nameof(IsCollectionPage),
         nameof(ShowSongPager), nameof(HistoryDate), nameof(HasSelection), nameof(CanRemoveSelection),
         nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection),
         nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText),
-        nameof(CollectionArtwork), nameof(DetailArtwork), nameof(CanPlayCollection),
-        nameof(IsContentDetailPage), nameof(DetailCountText), nameof(DetailSectionTitle),
-        nameof(DetailArtworkName), nameof(DetailSubtitle), nameof(ShowDetailLoading), nameof(CanPlayContentDetail)
-    ];
-
-    private static readonly string[] DetailBindingProperties =
-    [
-        nameof(IsContentDetailPage), nameof(DetailArtwork), nameof(DetailCountText), nameof(DetailSectionTitle),
-        nameof(DetailArtworkName), nameof(DetailSubtitle), nameof(ShowDetailLoading), nameof(CanPlayContentDetail)
+        nameof(CollectionArtwork), nameof(CanPlayCollection)
     ];
 
     private static readonly string[] RouteBindingProperties =
     [
-        nameof(ContentPage), nameof(IsHistory), nameof(IsArchives), nameof(IsSongList),
-        nameof(IsLocalLibraryPage), nameof(ShowsSongTable), nameof(IsCollectionPage),
-        nameof(IsContentDetailPage), nameof(ShowSongPager), nameof(HistoryDate),
-        nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(DetailArtwork),
-        nameof(DetailCountText), nameof(DetailSubtitle), nameof(ShowDetailLoading), nameof(CanPlayContentDetail)
+        nameof(IsHistory), nameof(IsArchives), nameof(IsSongList),
+        nameof(IsLocalLibraryPage), nameof(IsCollectionPage),
+        nameof(ShowSongPager), nameof(HistoryDate),
+        nameof(CollectionArtwork), nameof(CanPlayCollection), nameof(CountText)
     ];
 
     internal override void RefreshAvailability()
@@ -177,13 +156,7 @@ public sealed partial class MusicLibraryController : MusicController
     }
 
     internal void NotifyStatusChanged() => Changed(nameof(Status));
-    internal void NotifyArtworkChanged() { Changed(nameof(CollectionArtwork)); Changed(nameof(DetailArtwork)); }
-    internal void NotifySelectionChanged() => Changed(nameof(CatalogSelectedSong));
-
-    internal void NotifyDetailBindings()
-    {
-        foreach (var name in DetailBindingProperties) Changed(name);
-    }
+    internal void NotifyArtworkChanged() => Changed(nameof(CollectionArtwork));
 
     internal void NotifyRouteChanged()
     {
@@ -217,59 +190,51 @@ public sealed partial class MusicLibraryController : MusicController
         }
     }
 
-    internal void SetLocationState(string? nextHeading, bool clearLibrary, bool clearCatalogSongs,
-        bool clearSelection, bool clearTotal, bool clearCollection)
+    internal void SetLocationState(string? nextHeading, bool clearLibrary, bool clearSelection, bool clearTotal, bool clearCollection)
     {
         if (clearLibrary || clearCollection) collection = null;
-        if (nextHeading is not null) contentState.Heading = nextHeading;
-        if (clearLibrary || clearTotal) contentState.Total = 0;
-        if (clearLibrary || clearCatalogSongs) CatalogSongsSource.Clear();
+        if (nextHeading is not null && heading != nextHeading) { heading = nextHeading; Changed(nameof(Heading)); }
+        if ((clearLibrary || clearTotal) && total != 0) { total = 0; Changed(nameof(CountText)); }
         if (clearLibrary)
         {
+            LibrarySongsSource.Clear();
             HistoryDates.Clear();
             Archives.Clear();
         }
-        if (clearLibrary || clearSelection) contentState.ClearSelectionOnly();
+        if (clearLibrary || clearSelection) ClearSelectionOnly();
     }
 
     internal void ApplyLoadedLocation(PlaylistRow? detail, string title, int count,
         SongRow[] rows, string[] dates, ArchivedPlaylist[] archives, string? selectedKey)
     {
-        collection = detail; contentState.Heading = title; contentState.Total = count;
-        contentState.ClearSelectionOnly();
-        MusicRuntimeContext.ReconcileSongRows(ctx.ActiveSongs, rows);
+        collection = detail;
+        heading = title;
+        total = count;
+        ClearSelectionOnly();
+        MusicRuntimeContext.ReconcileSongRows(LibrarySongsSource, rows);
         ReconcileKeyed(HistoryDates, dates, static d => d, StringComparer.Ordinal);
         ReconcileKeyed(Archives, archives, static a => a.Id, StringComparer.Ordinal);
-        SelectedSong = ctx.ActiveSongs.FirstOrDefault(row => row.SelectionKey == selectedKey);
+        SelectedSong = LibrarySongsSource.FirstOrDefault(row => row.SelectionKey == selectedKey);
+        Changed(nameof(Heading));
+        Changed(nameof(CountText));
+        NotifyArtworkChanged();
     }
 
     internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, MusicSongRecord?> read, long publication)
     {
-        foreach (var song in CatalogSongsSource.Append(contentState.SelectedSong).OfType<SongRow>().Where(song => ids.Contains(song.Id)))
+        foreach (var song in LibrarySongsSource.Append(selectedSong).OfType<SongRow>().Where(song => ids.Contains(song.Id)))
             song.ApplyRepository(read(song.Id), publication);
         NotifyArtworkChanged();
     }
 
     internal void CancelCollectionPage() => collectionPageCancellation?.Cancel();
 
-    private (MusicPlayContextRecord? Context, MusicQueueSourceRecord? Source) CaptureFeedbackContext()
-    {
-        if (contentState.IsSearchPage && contentState.SearchKeyword.Length > 0)
-        {
-            return (
-                MusicPlayContextRecord.Empty with { SourceType = "search", SearchKeyword = contentState.SearchKeyword },
-                new MusicQueueSourceRecord("search", "搜索结果", "search", null));
-        }
-        return (catalog.CaptureCatalogFeedbackContext(), null);
-    }
-
     public Task OpenPlaylistAsync(string id) => RequestNavigationAsync(NetworkPlaylists.FirstOrDefault(p => p.Id == id)?.Route
         ?? (id == "favorites" ? "favorites" : "playlist/" + id));
 
     public Task RefreshAsync()
     {
-        if (contentState.IsDiscovery || contentState.IsSearchPage || catalog.IsCatalogPage)
-            return ActiveSurfaceRefreshRequested?.Invoke() ?? Task.CompletedTask;
+        if (!IsLocalLibraryPage) return ctx.RefreshActiveSurfaceAsync();
         var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
@@ -280,11 +245,10 @@ public sealed partial class MusicLibraryController : MusicController
 
     public Task PageAsync(int direction)
     {
-        if (direction is not (-1 or 1)) return Task.CompletedTask;
-        if (IsCollectionPage) return Task.CompletedTask;
+        if (direction is not (-1 or 1) || IsCollectionPage) return Task.CompletedTask;
         var origin = ctx.LoadGeneration;
         var target = ctx.CaptureLocation() with { Offset = Math.Max(0, ctx.CurrentLocation.Offset + direction * 100), Selected = null, Scroll = 0 };
-        if (!IsSongList || direction > 0 && target.Offset >= contentState.Total) return Task.CompletedTask;
+        if (!IsSongList || direction > 0 && target.Offset >= total) return Task.CompletedTask;
         return RunAsync(async () => { if (origin == ctx.LoadGeneration) await ctx.LoadAsync(target, lifetime.Token); });
     }
 
@@ -298,7 +262,7 @@ public sealed partial class MusicLibraryController : MusicController
         await RunAsync(async () =>
         {
             if (name.Length == 0) { ctx.SetStatusQuiet("请输入歌单名称"); return; }
-            var reply = await application.CreatePlaylistAsync(name, ct: lifetime.Token);
+            var reply = await application.Library.CreatePlaylistAsync(name, cancellationToken: lifetime.Token);
             created = true;
             await RefreshPlaylists(lifetime.Token);
             if (origin == ctx.LoadGeneration) await RequestNavigationAsync("playlist/" + reply.Id);
@@ -313,7 +277,7 @@ public sealed partial class MusicLibraryController : MusicController
         {
             if (selected is null || selected.Kind == "favorites") return;
             if (!await ConfirmAsync("删除此歌单？", "删除歌单", lifetime.Token)) return;
-            await application.RemoveCollectionAsync(selected.Id, selected.Revision, lifetime.Token);
+            await application.Library.RemoveCollectionAsync(selected.Id, selected.Revision, lifetime.Token);
             await RefreshPlaylists(lifetime.Token);
             if (origin == ctx.LoadGeneration) await RequestNavigationAsync("favorites");
         });
@@ -326,7 +290,7 @@ public sealed partial class MusicLibraryController : MusicController
         {
             if (selected is null || selected.Kind == "favorites") return;
             if (name.Length == 0) { ctx.SetStatusQuiet("请输入歌单名称"); return; }
-            await application.EditCollectionAsync(selected.Id, selected.Revision, name: name, ct: lifetime.Token);
+            await application.Library.EditCollectionAsync(selected.Id, selected.Revision, name: name, cancellationToken: lifetime.Token);
             await RefreshAfterEdit(origin);
         });
     }
@@ -334,7 +298,7 @@ public sealed partial class MusicLibraryController : MusicController
     internal async Task RefreshAfterEdit(long origin, bool refreshFavorite = true)
     {
         await RefreshPlaylists(lifetime.Token, refreshFavorite);
-        if (origin == ctx.LoadGeneration && !catalog.IsCatalogPage) await ctx.LoadAsync(ctx.CaptureLocation(), lifetime.Token);
+        if (origin == ctx.LoadGeneration && IsLocalLibraryPage) await ctx.LoadAsync(ctx.CaptureLocation(), lifetime.Token);
     }
 
     public Task SelectHistoryDateAsync(string date)
@@ -345,11 +309,11 @@ public sealed partial class MusicLibraryController : MusicController
 
     public Task RestoreArchiveAsync(string id)
     {
-        catalog.InvalidateCatalogAction();
+        ctx.InvalidateCatalogAction();
         var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
-            await playbackController.QueueCallAsync(token => application.RestoreHistoryPlaylistAsync(id, token), clearsSearchRecommendation: true);
+            await playbackController.QueueCallAsync(token => application.Library.RestoreHistoryPlaylistAsync(id, token), clearsSearchRecommendation: true);
             await playbackController.StopOwnedPlayback(); await playbackController.ReadQueue(lifetime.Token);
             if (origin == ctx.LoadGeneration) await ctx.OpenPlayQueueAsync();
         });
@@ -360,7 +324,7 @@ public sealed partial class MusicLibraryController : MusicController
         var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
-            await application.RemoveHistoryPlaylistAsync(id, lifetime.Token);
+            await application.Library.RemoveHistoryPlaylistAsync(id, lifetime.Token);
             if (origin == ctx.LoadGeneration) await ctx.LoadAsync(ctx.CaptureLocation(), lifetime.Token);
         });
     }
@@ -375,19 +339,19 @@ public sealed partial class MusicLibraryController : MusicController
             var grants = await files.GrantAsync(paths, lifetime.Token);
             if (stopping || origin != ctx.LoadGeneration || selected != collection) return;
             var songs = grants.Select(file => NativeMusicSong.CreateLocal(file.Id, file.Title)).ToArray();
-            await application.AddSongsToCollectionAsync(selected.Id, selected.Revision, songs, lifetime.Token);
+            await application.Library.AddSongsToCollectionAsync(selected.Id, selected.Revision, songs, lifetime.Token);
             await RefreshAfterEdit(origin);
         });
     }
 
     public Task RemoveSongAsync()
     {
-        catalogActions.Invalidate();
-        var song = contentState.SelectedSong; var selected = collection; var origin = ctx.LoadGeneration;
+        ctx.InvalidateCatalogAction();
+        var song = selectedSong; var selected = collection; var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
             if (song is null || selected is null) return;
-            await application.RemoveSongFromCollectionAsync(selected.Id, selected.Revision, song.Id, lifetime.Token);
+            await application.Library.RemoveSongFromCollectionAsync(selected.Id, selected.Revision, song.Id, lifetime.Token);
             await RefreshAfterEdit(origin);
         });
     }
@@ -398,21 +362,21 @@ public sealed partial class MusicLibraryController : MusicController
         return RunAsync(async () =>
         {
             if (song is null || destination is null) return;
-            await application.AddSongsToCollectionAsync(destination.Id, destination.Revision, [song.Record], lifetime.Token);
+            await application.Library.AddSongsToCollectionAsync(destination.Id, destination.Revision, [song.Record], lifetime.Token);
             await RefreshAfterEdit(origin);
         });
     }
 
-    public Task FavoriteAsync() => FavoriteSongAsync(contentState.SelectedSong);
+    public Task FavoriteAsync() => FavoriteSongAsync(selectedSong);
 
     internal Task FavoriteSongAsync(SongRow? song)
     {
         var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
-            if (song is null || catalog.IsDailyStyle && !ctx.ActiveSongs.Any(row => ReferenceEquals(row, song))) return;
-            var favorite = await application.GetCollectionDetailAsync("favorites", 0, 1, lifetime.Token);
-            await application.AddSongsToCollectionAsync(
+            if (song is null) return;
+            var favorite = await application.Library.GetCollectionDetailAsync("favorites", 0, 1, lifetime.Token);
+            await application.Library.AddSongsToCollectionAsync(
                 "favorites", favorite.Collection.Revision, [song.Record], lifetime.Token);
             await RefreshAfterEdit(origin);
             SongFavoritesChanged?.Invoke();
@@ -425,7 +389,7 @@ public sealed partial class MusicLibraryController : MusicController
         try
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
-            var result = await application.GetCollectionMembershipAsync("favorites", song.Record, linked.Token);
+            var result = await application.Library.GetCollectionMembershipAsync("favorites", song.Record, linked.Token);
             return result.Present;
         }
         catch (OperationCanceledException) { return false; }
@@ -442,28 +406,27 @@ public sealed partial class MusicLibraryController : MusicController
         var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
-            if (song is null || catalog.IsDailyStyle && !ctx.ActiveSongs.Any(row => ReferenceEquals(row, song))) return;
-            var membership = await application.GetCollectionMembershipAsync("favorites", song.Record, lifetime.Token);
+            if (song is null) return;
+            var membership = await application.Library.GetCollectionMembershipAsync("favorites", song.Record, lifetime.Token);
             if (membership.Present)
-                await application.RemoveSongFromCollectionAsync("favorites", membership.Revision, membership.SongId!, lifetime.Token);
+                await application.Library.RemoveSongFromCollectionAsync("favorites", membership.Revision, membership.SongId!, lifetime.Token);
             else
-                await application.AddSongsToCollectionAsync("favorites", membership.Revision, [song.Record], lifetime.Token);
+                await application.Library.AddSongsToCollectionAsync("favorites", membership.Revision, [song.Record], lifetime.Token);
             await RefreshAfterEdit(origin, refreshFavorite: false);
             await playbackController.RefreshCurrentFavoriteAsync();
             SongFavoritesChanged?.Invoke();
         });
     }
 
-    public Task AppendNextAsync() => AppendSongNextAsync(contentState.SelectedSong);
+    public Task AppendNextAsync() => AppendSongNextAsync(selectedSong);
 
-    internal Task AppendSongNextAsync(SongRow? song)
+    internal Task AppendSongNextAsync(SongRow? song, MusicPlayContextRecord? queueContext = null)
     {
-        catalogActions.Invalidate();
-        var (queueContext, _) = CaptureFeedbackContext();
+        ctx.InvalidateCatalogAction();
         return RunAsync(async () =>
         {
-            if (song is null || catalog.IsDailyStyle && !ctx.ActiveSongs.Any(row => ReferenceEquals(row, song))) return;
-            await playbackController.QueueCallAsync(token => application.AppendQueueAsync([song.Record], queueContext, next: true, ct: token));
+            if (song is null) return;
+            await playbackController.QueueCallAsync(token => application.Library.AppendQueueAsync([song.Record], queueContext, next: true, cancellationToken: token));
             await playbackController.ReadQueue(lifetime.Token);
             queue.InvalidateQueueSurface();
         });
@@ -471,20 +434,32 @@ public sealed partial class MusicLibraryController : MusicController
 
     public Task PlaySelectionAsync()
     {
+        var song = selectedSong; var selected = collection;
+        var index = song is null ? -1 : ctx.CurrentLocation.Offset + LibrarySongsSource.IndexOf(song);
+        if (song is null || index < 0) return Task.CompletedTask;
         playbackController.TrackMusicRecovery(playbackController.RetireMusicRecovery());
-        catalogActions.Invalidate();
+        ctx.InvalidateCatalogAction();
         playbackController.CancelOnline();
-        var song = contentState.SelectedSong; var selected = collection;
-        bool searchDirect = contentState.IsSearchPage;
-        var (queueContext, queueSource) = CaptureFeedbackContext();
-        var index = song is null ? -1 : ctx.CurrentLocation.Offset + ctx.ActiveSongs.IndexOf(song);
         return RunPlaybackActionAsync(async generation =>
         {
-            if (song is null || index < 0) return;
             if (selected is not null)
-                await playbackController.QueueCallAsync(token => application.PlayCollectionAsync(selected.Id, selected.Revision, index, token), clearsSearchRecommendation: true);
+                await playbackController.QueueCallAsync(token => application.Library.PlayCollectionAsync(selected.Id, selected.Revision, index, token), clearsSearchRecommendation: true);
             else
-                await playbackController.QueueCallAsync(token => application.ReplaceQueueAsync([song.Record], 0, queueContext, queueSource, ct: token), clearsSearchRecommendation: true);
+                await playbackController.QueueCallAsync(token => application.Library.ReplaceQueueAsync([song.Record], 0, cancellationToken: token), clearsSearchRecommendation: true);
+            await playbackController.ReadQueue(lifetime.Token);
+            if (generation != ctx.PlaybackActionGeneration) return;
+            await playbackController.StartCurrent(lifetime.Token, admission: () => generation == ctx.PlaybackActionGeneration);
+        }, supersede: true);
+    }
+
+    internal Task PlaySingleSongAsync(SongRow song, bool searchDirect, MusicPlayContextRecord? queueContext, MusicQueueSourceRecord? queueSource)
+    {
+        playbackController.TrackMusicRecovery(playbackController.RetireMusicRecovery());
+        ctx.InvalidateCatalogAction();
+        playbackController.CancelOnline();
+        return RunPlaybackActionAsync(async generation =>
+        {
+            await playbackController.QueueCallAsync(token => application.Library.ReplaceQueueAsync([song.Record], 0, queueContext, queueSource, cancellationToken: token), clearsSearchRecommendation: true);
             await playbackController.ReadQueue(lifetime.Token);
             if (generation != ctx.PlaybackActionGeneration) return;
             long searchPlayback = -1;
@@ -508,29 +483,17 @@ public sealed partial class MusicLibraryController : MusicController
     public Task PlayCollectionAsync()
     {
         playbackController.TrackMusicRecovery(playbackController.RetireMusicRecovery());
-        catalog.InvalidateCatalogAction();
+        ctx.InvalidateCatalogAction();
         playbackController.CancelOnline();
         var selected = collection;
         return RunPlaybackActionAsync(async generation =>
         {
             if (selected is null || selected.Count == 0) return;
-            await playbackController.QueueCallAsync(token => application.PlayCollectionAsync(selected.Id, selected.Revision, 0, token), clearsSearchRecommendation: true);
+            await playbackController.QueueCallAsync(token => application.Library.PlayCollectionAsync(selected.Id, selected.Revision, 0, token), clearsSearchRecommendation: true);
             await playbackController.ReadQueue(lifetime.Token);
             if (generation != ctx.PlaybackActionGeneration) return;
             await playbackController.StartCurrent(lifetime.Token, admission: () => generation == ctx.PlaybackActionGeneration);
         }, supersede: true);
-    }
-
-    public Task PlayContentDetailAsync() =>
-        catalog.IsCatalogDetailPage ? catalog.PlayCatalogPlaylistAsync() : PlayCollectionAsync();
-
-    public Task PlayContentSelectionAsync()
-    {
-        if (!catalog.IsCatalogDetailPage) return PlaySelectionAsync();
-        var song = contentState.SelectedSong;
-        var card = song is null ? null : catalog.CatalogSections.SelectMany(section => section.Items)
-            .FirstOrDefault(item => ReferenceEquals(item.Song, song));
-        return card is null ? Task.CompletedTask : catalog.OpenCatalogCardAsync(card);
     }
 
     private async Task<(PlaylistRow[] Rows, long Revision)> FetchPlaylists(CancellationToken token)
@@ -539,7 +502,7 @@ public sealed partial class MusicLibraryController : MusicController
         long revision = -1;
         while (true)
         {
-            var reply = await application.ListCollectionsAsync(rows.Count, 100, token);
+            var reply = await application.Library.ListCollectionsAsync(rows.Count, 100, token);
             if (revision >= 0 && revision != reply.Revision) throw new MusicOperationException("REVISION_CONFLICT");
             revision = reply.Revision;
             var page = reply.Items.Select(PlaylistRow.FromSummary).ToArray();
@@ -568,7 +531,6 @@ public sealed partial class MusicLibraryController : MusicController
         ReconcileKeyed(Playlists, local, static row => row.Id, StringComparer.Ordinal);
         ReconcileKeyed(NetworkPlaylists, network, static row => row.Id, StringComparer.Ordinal);
         RebuildNavigation(); Changed(nameof(CountText));
-        catalog.NetworkPlaylistBindings();
         if (refreshFavorite) _ = playbackController.RefreshCurrentFavoriteAsync();
     }
 
@@ -581,7 +543,6 @@ public sealed partial class MusicLibraryController : MusicController
             ..Playlists.Where(item => item.Kind == "playlist").Select(item =>
                 new NavigationItem("playlist/" + item.Id, item.Name, "\uE8D6", "我的")),
             ..NetworkPlaylists.Select(item => new NavigationItem(item.Route, item.Name, "\uE8D6", "网络歌单")),
-            // Declared routes remain reachable from content/settings and public-page handoff.
             new("catalog-discovery", "搜索发现", "\uE721", ShowInSidebar: false),
             new("catalog-personal", "平台歌单", "\uE8D6", ShowInSidebar: false),
             new("catalog-daily", "每日推荐", "\uE734", ShowInSidebar: false),

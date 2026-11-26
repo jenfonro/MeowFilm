@@ -1,28 +1,32 @@
 import Foundation
 import MeowAccounts
 import MeowDebug
-import MeowMusicFeature
 
-extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
+extension NativeMusicAccountService {
+    static func identityKey(_ identity: AccountIdentity) -> String {
+        "\(identity.source.installationID.uuidString.lowercased()):\(identity.source.siteKey):\(identity.accountID.uuidString.lowercased())"
+    }
+
     func nativeRecordScope(identity: AccountIdentity,
                            revision: AccountCredentialUpdateRevision) throws -> String {
-        struct Key: Encodable {
-            let version: Int
-            let identity: AccountIdentity
-            let record: UUID
+        musicSHA256Hex("v1:\(Self.identityKey(identity)):\(revision.cacheScopeID.uuidString.lowercased())")
+    }
+
+    private func logScopeCheckError(_ error: Error, platform: String, event: String) {
+        let failure = safe(error)
+        if ![.cancelled, .staleResult].contains(failure) {
+            DebugRuntime.logError(.musicAccount, sub: platform, event: event, error: failure)
         }
-        return try musicSHA256Hex(encoding: Key(version: 1, identity: identity, record: revision.cacheScopeID))
     }
 
     private func enqueueCacheLifecycle(_ event: MusicNativeCacheLifecycleEvent) {
         guard let callback = cacheLifecycle else { return }
         let previous = cacheLifecycleTail?.task, id = UUID()
-        let task = Task<Void, Never> { [weak self] in
+        cacheLifecycleTail = (id, Task<Void, Never> { [weak self] in
             if let previous { await previous.value }
             await callback(event)
             await self?.finishCacheLifecycle(id)
-        }
-        cacheLifecycleTail = (id, task)
+        })
     }
 
     private func finishCacheLifecycle(_ id: UUID) {
@@ -41,8 +45,14 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
                 playbackAuthorizations.removeValue(forKey: key)?.revoke()
             }
             if platform == nil || platform == .netease { guestAudioGrants.removeAll() }
-            audioRequests.cancel(excludingCurrent: preservingCurrentRequest) { platform == nil || $0.cache.platform == platform?.rawValue }
-            capabilityRequests.cancel(excludingCurrent: preservingCurrentRequest) { platform == nil || $0.platform == platform }
+            if !preservingCurrentRequest {
+                let ar = audioRequests, cr = capabilityRequests, lr = localCacheReads
+                Task {
+                    await ar.invalidate()
+                    await cr.invalidate()
+                    await lr.invalidate()
+                }
+            }
         }
         if event == .accountChanged {
             do { try urlCache.clear(platform: platform) }
@@ -69,7 +79,7 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
         defer { notifyAccountSession(platform) }
         guard !transitions.contains(platform), login?.platform != platform,
               !localCacheRestoring.contains(platform) else { throw MusicServiceError.busy }
-        guard !requiresExplicitRestore.contains(platform) else { throw MusicServiceError.commitUnconfirmed }
+        guard !requiresExplicitRestore.contains(platform) else { throw MusicServiceError.storageFailed }
         if tokens[platform] == nil {
             guard !restoring.contains(platform) else { throw MusicServiceError.busy }
             localCacheRestoring.insert(platform)
@@ -134,28 +144,18 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
     func localCacheAccountChanged(_ platform: MusicAccountPlatform) async {
         if let value = localCacheBindings[platform]?.value {
             do { try await checkLocalCacheScope(value, platform: platform) }
-            catch {
-                let failure = safe(error)
-                if ![.cancelled, .staleResult].contains(failure) {
-                    DebugRuntime.logError(.musicAccount, sub: platform.rawValue, event: "localCacheScope.checkFailed", error: failure)
-                }
-            }
+            catch { logScopeCheckError(error, platform: platform.rawValue, event: "localCacheScope.checkFailed") }
         }
         if let value = aggregateCacheBinding?.value {
             do { try await checkNativeCacheScope(value) }
-            catch {
-                let failure = safe(error)
-                if ![.cancelled, .staleResult].contains(failure) {
-                    DebugRuntime.logError(.musicAccount, sub: platform.rawValue, event: "nativeCacheScope.checkFailed", error: failure)
-                }
-            }
+            catch { logScopeCheckError(error, platform: platform.rawValue, event: "nativeCacheScope.checkFailed") }
         }
     }
 
     func localCacheScope(platform: MusicAccountPlatform) async throws -> MusicNativeCacheScope? {
         try check()
         let key = LocalCacheReadKey(platform: platform, epoch: epoch, cacheEpoch: localCacheEpoch)
-        let value = try await localCacheReads.value(for: key) { [self] in
+        let value = try await localCacheReads.value(for: key, lifetime: 0) { [self] in
             try await readLocalCacheScope(key)
         }
         try check(key.epoch)
@@ -204,7 +204,7 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
             if localCacheBindings[platform]?.value == value, ![.cancelled, .busy].contains(safe(error)) {
                 let failure = safe(error)
                 let changed = failure.isAuthenticationFailure || [.staleResult, .verificationRequired].contains(failure)
-                revokeLocalCacheScopes(platform, event: changed ? .accountChanged : .accessChanged)
+                revokeLocalCacheScopes(platform, event: changed ? .accountChanged : nil)
             }
             throw safe(error)
         }
@@ -225,9 +225,9 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
             guard localCacheEpoch == cacheEpoch, cacheLifecycleTail == nil else {
                 throw MusicServiceError.staleResult
             }
-            struct Part: Encodable { let platform: String; let identity: AccountIdentity; let record: String? }
-            let key = platforms.map { Part(platform: $0.rawValue, identity: scopes[$0]!, record: parts[$0]?.scope) }
-            let digest = try musicSHA256Hex(encoding: key)
+            let key = platforms.map { "\($0.rawValue):\(Self.identityKey(scopes[$0]!)):\(parts[$0]?.scope ?? "-")" }
+                .joined(separator: "|")
+            let digest = musicSHA256Hex(key)
             if let current = aggregateCacheBinding, current.epoch == own, current.parts == parts,
                current.value.authorization.isActive { return current.value }
             aggregateCacheBinding?.value.authorization.revoke()
@@ -256,14 +256,14 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
                 value.authorization.revoke(); aggregateCacheBinding = nil
                 let failure = safe(error)
                 let changed = failure.isAuthenticationFailure || [.staleResult, .verificationRequired].contains(failure)
-                enqueueCacheLifecycle(changed ? .accountChanged : .accessChanged)
+                if changed { enqueueCacheLifecycle(.accountChanged) }
             }
             throw safe(error)
         }
     }
 }
 
-extension NativeMusicAccountService: MusicNativeHomeDisplayProviding {
+extension NativeMusicAccountService {
     public func nativeHomeDisplayScope() async throws -> MusicNativeCacheScope {
         do {
             try check()
@@ -277,7 +277,7 @@ extension NativeMusicAccountService: MusicNativeHomeDisplayProviding {
             let scope: String, guest: AccountSnapshot?
             if let local {
                 guard let record = localCacheBindings[.netease], record.value == local else { throw MusicServiceError.staleResult }
-                scope = try nativeHomeScope(identity: identity, credentialRevision: record.credentialRevision)
+                scope = nativeHomeScope(identity: identity, credentialRevision: record.credentialRevision)
                 guest = nil
             } else {
                 let snapshot = await accounts.snapshot(for: identity)
@@ -288,7 +288,7 @@ extension NativeMusicAccountService: MusicNativeHomeDisplayProviding {
                 case (.signedOut, nil), (.invalidated, .invalidated?), (.failed, .login?): break
                 default: throw MusicServiceError.staleResult
                 }
-                scope = try nativeHomeScope(identity: identity, credentialRevision: nil)
+                scope = nativeHomeScope(identity: identity, credentialRevision: nil)
                 guest = snapshot
             }
             try check(own)
@@ -329,7 +329,7 @@ extension NativeMusicAccountService: MusicNativeHomeDisplayProviding {
     }
 }
 
-extension NativeMusicAccountService: MusicNativeHomeProviding {
+extension NativeMusicAccountService {
     func notifyNativeHome(_ platform: MusicAccountPlatform? = nil) {
         guard platform == nil || platform == .netease else { return }
         for observer in homeObservers.values { observer.yield(()) }
@@ -360,21 +360,11 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
         await localCacheAccountChanged(.netease)
         if let display = homeDisplayBinding?.value {
             do { try await checkNativeHomeDisplayScope(display) }
-            catch {
-                let failure = safe(error)
-                if ![.cancelled, .staleResult].contains(failure) {
-                    DebugRuntime.logError(.musicAccount, sub: "wy", event: "homeDisplayScope.checkFailed", error: failure)
-                }
-            }
+            catch { logScopeCheckError(error, platform: "wy", event: "homeDisplayScope.checkFailed") }
         }
         guard let binding = homeBinding?.value else { return }
         do { try await checkNativeHomeBinding(binding) }
-        catch {
-            let failure = safe(error)
-            if ![.cancelled, .staleResult].contains(failure) {
-                DebugRuntime.logError(.musicAccount, sub: "wy", event: "homeBinding.checkFailed", error: failure)
-            }
-        }
+        catch { logScopeCheckError(error, platform: "wy", event: "homeBinding.checkFailed") }
     }
 
     public func nativeHomeChanges() -> AsyncStream<Void> {
@@ -394,8 +384,8 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
         homeObservers.removeValue(forKey: id)
     }
 
-    private func nativeHomeScope(identity: AccountIdentity, credentialRevision: AccountCredentialUpdateRevision?) throws -> String {
-        let namespace = try musicSHA256Hex(encoding: identity)
+    private func nativeHomeScope(identity: AccountIdentity, credentialRevision: AccountCredentialUpdateRevision?) -> String {
+        let namespace = musicSHA256Hex(Self.identityKey(identity))
         let record = credentialRevision?.cacheScopeID.uuidString.lowercased() ?? "guest"
         return "wy-home-v1:" + namespace + ":" + record
     }
@@ -439,7 +429,7 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
                 }
                 return existing.value
             }
-            let value = MusicNativeHomeBinding(scope: try nativeHomeScope(identity: identity, credentialRevision: lease.revision),
+            let value = MusicNativeHomeBinding(scope: nativeHomeScope(identity: identity, credentialRevision: lease.revision),
                                                revision: id, loggedIn: true)
             homeBinding = .init(value: value, epoch: own, accountEpoch: account, revision: revision,
                                 token: token, credentialRevision: lease.revision, guestSnapshot: nil)
@@ -466,7 +456,7 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
             }
             return existing.value
         }
-        let value = MusicNativeHomeBinding(scope: try nativeHomeScope(identity: identity, credentialRevision: nil),
+        let value = MusicNativeHomeBinding(scope: nativeHomeScope(identity: identity, credentialRevision: nil),
                                            revision: id, loggedIn: false)
         homeBinding = .init(value: value, epoch: own, accountEpoch: account, revision: revision,
                             token: nil, credentialRevision: nil, guestSnapshot: snapshot)
@@ -540,7 +530,7 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
     }
 }
 
-extension NativeMusicAccountService: MusicNativeFMProviding {
+extension NativeMusicAccountService {
     public func nativeFMPreferenceScope(_ value: MusicNativeHomeBinding) async throws -> String {
         try await checkNativeHomeBinding(value)
         let binding = try requireNativeHomeBinding(value)
@@ -548,7 +538,7 @@ extension NativeMusicAccountService: MusicNativeFMProviding {
         let lease = try await nativeHomeCredential(value)
         defer { lease.revoke() }
         guard let provider = providers[.netease] else { throw MusicServiceError.unsupported }
-        let uid = try await provider.nativeID(lease.credential)
+        let uid = await provider.nativeID(lease.credential)
         try await checkNativeHomeBinding(value)
         return "wy-fm:" + musicSHA256Hex(uid)
     }

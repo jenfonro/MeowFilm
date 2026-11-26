@@ -105,11 +105,8 @@ public sealed partial class MusicSettingsController
 
     internal void AcceptQuality(MusicQualitySettingsResult result)
     {
-        var priorSignature = savedQualitySignature;
         savedQualityPolicy = result.Settings;
         savedQualitySignature = result.Signature;
-        bool signatureChanged = priorSignature.Length > 0 && priorSignature != savedQualitySignature;
-        QualityPolicyAccepted?.Invoke(savedQualitySignature, signatureChanged);
         PublishQualitySettings();
         qualityLoaded = true;
         NotifyQualityBindings();
@@ -214,8 +211,7 @@ public sealed partial class MusicSettingsController
         if (!QualityCurrent(generation) || qualityLoaded || qualitySurfaces == QualitySettingsSurface.None) return;
         await BeginQuality(async (token, currentGen) =>
         {
-            var result = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-                ct => application.GetQualityPolicyAsync(ct), token);
+            var result = await application.Library.GetQualityPolicyAsync(token);
             token.ThrowIfCancellationRequested();
             if (!QualityCurrent(currentGen)) return;
             AcceptQuality(result);
@@ -237,30 +233,20 @@ public sealed partial class MusicSettingsController
         {
             token.ThrowIfCancellationRequested();
             ctx.CancelOnlinePlayback();
-            var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-                ct => application.SaveQualityPolicyAsync(desired.Revision, desired.Request,
-                    desired.QualityOrder, desired.QualityEnabled, desired.SpatialOrder, desired.SpatialEnabled, ct),
-                token);
+            var saved = await application.Library.SaveQualityPolicyAsync(desired.Revision, desired.Request,
+                desired.QualityOrder, desired.QualityEnabled, desired.SpatialOrder, desired.SpatialEnabled, token);
             if (!QualityCurrent(generation)) return;
             AcceptQuality(saved); qualityStatus = "";
-            var online = await application.GetOnlineSettingsAsync(token);
-            if (!QualityCurrent(generation)) return;
-            OnlineLyricsEnabledChanged?.Invoke(online.LyricsEnabled);
         }
-        catch (MusicOperationException error) when (error.Code is
-            "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
+        catch (Exception error) when (ErrorCode(error) is "STORAGE_CONFLICT" or "REVISION_CONFLICT")
         {
             if (!QualityCurrent(generation)) return;
             bool matches;
             try
             {
-                var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-                    ct => application.GetQualityPolicyAsync(ct), lifetime.Token);
+                var current = await application.Library.GetQualityPolicyAsync(lifetime.Token);
                 if (!QualityCurrent(generation)) return;
                 AcceptQuality(current);
-                var online = await application.GetOnlineSettingsAsync(lifetime.Token);
-                if (!QualityCurrent(generation)) return;
-                OnlineLyricsEnabledChanged?.Invoke(online.LyricsEnabled);
                 matches = QualitySettingsMatch(desired);
             }
             catch
@@ -269,7 +255,7 @@ public sealed partial class MusicSettingsController
                 throw;
             }
             if (matches) qualityStatus = "";
-            else if (error.Code == "REVISION_CONFLICT") qualityStatus = "音质设置已更新";
+            else if (ErrorCode(error) == "REVISION_CONFLICT") qualityStatus = "音质设置已更新";
             else throw;
         }
     }, saving: true);
@@ -285,15 +271,15 @@ public sealed partial class MusicSettingsController
         {
             try { await action(request.Token, generation); }
             catch (OperationCanceledException) { if (QualityCurrent(generation)) qualityStatus = "已取消"; }
-            catch (MusicOperationException error) when (error.Code == "CANCELLED")
+            catch (Exception error) when (ErrorCode(error) == "CANCELLED")
             { if (QualityCurrent(generation)) qualityStatus = "已取消"; }
-            catch (MusicOperationException error)
+            catch (Exception error) when (ErrorCode(error) is { } code)
             {
                 if (!QualityCurrent(generation)) return;
-                qualityStatus = error.Code switch
+                qualityStatus = code switch
                 {
                     "INVALID_REQUEST" => "音质设置无效",
-                    "PENDING_WRITE" or "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" => saving ? "音质设置保存失败" : "音质设置加载失败",
+                    "STORAGE_CONFLICT" => saving ? "音质设置保存失败" : "音质设置加载失败",
                     _ => saving ? "音质设置操作失败" : "音质设置加载失败"
                 };
             }
@@ -315,7 +301,7 @@ public sealed partial class MusicSettingsController
 
     private async Task ReloadExclusionsAsync(CancellationToken token)
     {
-        var list = await application.ListSourceExclusionsAsync(ct: token);
+        var list = await application.Library.ListSourceExclusionsAsync(cancellationToken: token);
         bool editable = CanEdit;
         var incoming = list.Items.Reverse()
             .Select(item => new MusicSourceExclusionRow(
@@ -358,11 +344,9 @@ public sealed partial class MusicSettingsController
             try
             {
                 if (row.RecordingSourceKey is { } sourceKey)
-                    await application.RemoveRecordingExclusionAsync(row.SongId, sourceKey, row.Platform, lifetime.Token);
+                    await application.Library.RemoveRecordingExclusionAsync(row.SongId, sourceKey, row.Platform, lifetime.Token);
                 else
-                    await application.RemoveSourceExclusionAsync(row.SongId, row.Provider, row.Platform, lifetime.Token);
-                if (SourceExclusionRemoved is { } removed)
-                    await removed(row.SongId, lifetime.Token);
+                    await application.Library.RemoveSourceExclusionAsync(row.SongId, row.Provider, row.Platform, lifetime.Token);
             }
             finally { await ReloadExclusionsAsync(lifetime.Token); }
         });
@@ -378,7 +362,7 @@ public sealed partial class MusicSettingsController
             int offset = 0, total;
             do
             {
-                var page = await application.GetQueueAsync(offset, 100, lifetime.Token);
+                var page = await application.Library.GetQueueAsync(offset, 100, lifetime.Token);
                 if (queueVersion is not null && queueVersion != page.Version)
                     throw new MusicOperationException("REVISION_CONFLICT");
                 queueVersion = page.Version;
@@ -394,10 +378,10 @@ public sealed partial class MusicSettingsController
             var providers = new List<MusicExclusionOption> { new(MusicLibraryOwner.OfficialProvider, "官方音源") };
             try
             {
-                var list = await application.ListSourcesAsync(lifetime.Token);
+                var list = await application.Scripts.ListSourcesAsync(lifetime.Token);
                 foreach (var item in list.Items) providers.Add(new(item.InstallationId, item.Name));
             }
-            catch (MusicOperationException error) when (error.Code == "SCRIPT_RUNTIME_UNAVAILABLE") { }
+            catch (Exception error) when (ErrorCode(error) == "SCRIPT_RUNTIME_UNAVAILABLE") { }
 
             exclusionSongs.Clear();
             ExclusionSongs.Clear();
@@ -418,14 +402,13 @@ public sealed partial class MusicSettingsController
         if (song is null || provider is null || platform is null || stopping ||
             !exclusionSongs.TryGetValue(song.Key, out var row) || !ExclusionProviders.Contains(provider) ||
             !ExclusionPlatforms.Contains(platform)) return Task.CompletedTask;
-        SourceExclusionAdmitted?.Invoke(row.Id, provider.Key, platform.Key);
+        ctx.AdmitSourceExclusion(row.Id, provider.Key, platform.Key);
         string name = provider.Key == MusicLibraryOwner.OfficialProvider ? MusicSourceRow.OfficialName(platform.Key) : provider.Name;
         return RunAsync(async () =>
         {
             try
             {
-                await application.AddSourceExclusionAsync(row.Id, provider.Key, platform.Key, name, row.Title, row.Artist, lifetime.Token);
-                SourceExclusionAdded?.Invoke(row.Id, provider.Key, platform.Key);
+                await application.Library.AddSourceExclusionAsync(row.Id, provider.Key, platform.Key, name, row.Title, row.Artist, lifetime.Token);
             }
             finally { await ReloadExclusionsAsync(lifetime.Token); }
         });

@@ -5,34 +5,31 @@ import Foundation
 /// The coordinator adopts their receipts into the shared library state.
 @MainActor
 final class MusicLibraryActions {
-    private let service: (any MusicServing)?
-    private let access: MusicAccessState
+    private weak var owner: MusicViewModel?
     private let state: MusicLibraryState
 
-    init(service: (any MusicServing)?, access: MusicAccessState, state: MusicLibraryState) {
-        self.service = service
-        self.access = access
+    init(owner: MusicViewModel, state: MusicLibraryState) {
+        self.owner = owner
         self.state = state
     }
 
-    private func begin() throws -> any MusicServing {
-        guard !access.isClosed else { throw MusicServiceError.closed }
-        guard let service else { throw MusicServiceError.unavailable }
+    private func begin() throws -> NativeMusicService {
+        guard let owner, !owner.isClosed else { throw MusicServiceError.closed }
+        guard let service = owner.service else { throw MusicServiceError.unavailable }
         try Task.checkCancellation()
         return service
     }
 
     private func check() throws {
         try Task.checkCancellation()
-        guard !access.isClosed else {
+        guard let owner, !owner.isClosed else {
             throw MusicServiceError.cancelled
         }
     }
 
     func add(_ tracks: [MusicRemoteTrack], to collection: MusicCollection) async throws -> [MusicCollection] {
         let service = try begin()
-        guard let membership = service as? any MusicCollectionMembershipServing else { throw MusicServiceError.unsupported }
-        _ = try await membership.changeCollectionMembership(collection, adding: tracks.map(\.ref), removing: [])
+        _ = try await service.changeCollectionMembership(collection, adding: tracks.map(\.ref), removing: [])
         try check()
         let values = try await service.collections()
         try check()

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 /// The source caches its first page; only its existing nextFMReferences call
 /// asks this reader again, which marks subsequent reads as live continuations.
@@ -38,7 +38,7 @@ actor MusicNativeFMRead {
     }
 }
 
-extension NativeMusicService: MusicFMPreviewServing {
+extension NativeMusicService {
     public func fmPreview(_ action: MusicHomeAction) async throws -> MusicFMPreview? {
         try check(); try requirePlatform("wy")
         guard let key = action.fmConfiguration else { throw MusicServiceError.invalidRequest }
@@ -65,7 +65,7 @@ extension NativeMusicService: MusicFMPreviewServing {
     private func loadFM(_ action: MusicHomeAction, preview: Bool, unplaySongIds: [String] = [],
                         binding: MusicNativeHomeBinding, epoch own: UUID) async throws -> MusicNativeFMResponse {
         try await checkHomeBinding(binding, epoch: own)
-        let owner = accounts as? any MusicNativeFMProviding, port = publicPlatforms
+        let owner = accounts, port = publicPlatforms
         let value = try await work(label: "musicFM", draining: true) {
             if let owner { return try await owner.nativeFM(action, preview: preview, unplaySongIds: unplaySongIds, binding: binding) }
             return try await port.homeAction(action, preview: preview, unplaySongIds: unplaySongIds)
@@ -86,7 +86,6 @@ extension NativeMusicService: MusicFMPreviewServing {
             let unplay = isContinuation ? try await self.fmKnownSongIDs() : []
             return try await self.loadFM(action, preview: false, unplaySongIds: unplay, binding: binding, epoch: own)
         }
-        access.register(id) { authorization.revoke(); Task { await reader.close() } }
         fmQueues[id] = (key, authorization, reader)
         let source = MusicRemoteQueueSource(context: context, authorization: authorization,
             loadPage: { try await reader.page($0) },
@@ -103,7 +102,6 @@ extension NativeMusicService: MusicFMPreviewServing {
         } catch { await source.close(); throw error }
     }
     private func releaseFMQueue(_ id: UUID) {
-        access.remove(id)
         if let entry = fmQueues.removeValue(forKey: id) {
             entry.1.revoke()
             retainSimilarDrain(Task { await entry.2.close() })

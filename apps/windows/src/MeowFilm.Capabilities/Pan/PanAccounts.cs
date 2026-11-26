@@ -163,9 +163,6 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
             await before;
             if (!current()) return;
             var account = await settings.ClearAsync(row.Provider, request.Token);
-            if (account.ErrorCode is not null || account.Revision is not > 0 ||
-                account.Configured != false || account.Status != "signedOut")
-                throw new BridgeException("INVALID_RESPONSE");
             if (current()) { row.Publish(account); Notify("已退出网盘账号"); }
         });
     }
@@ -224,11 +221,8 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
         if (reported.Provider != provider) throw new BridgeException("INVALID_RESPONSE");
         if (reported.ErrorCode is { } code) throw new PanAccountException(code);
         if (saved.ErrorCode is { } savedCode) throw new PanAccountException(savedCode);
-        if (reported.Revision is null || saved.Revision is null || reported.Fields is null || saved.Fields is null)
-            throw new BridgeException("INVALID_RESPONSE");
         if (reported.Revision != saved.Revision) throw new PanAccountException("STALE_ACCOUNT");
-        if (reported.Configured != saved.Configured || !reported.Fields.Order().SequenceEqual(saved.Fields.Order()) ||
-            reported.Status != "signedIn" || saved.Configured != true)
+        if (reported.Status != "signedIn" || saved.Configured != true)
             throw new BridgeException("INVALID_RESPONSE");
     }
 

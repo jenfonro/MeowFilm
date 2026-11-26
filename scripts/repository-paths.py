@@ -17,7 +17,7 @@ def output_path(name, root=ROOT):
             info = path.lstat()
         except FileNotFoundError:
             return Path(root).resolve(strict=True).joinpath(*OUTPUTS[name])
-        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        if stat.S_ISLNK(info.st_mode):
             raise ValueError("Repository output must not be a link: " + name)
         if not stat.S_ISDIR(info.st_mode):
             raise ValueError("Repository output is not a directory: " + name)

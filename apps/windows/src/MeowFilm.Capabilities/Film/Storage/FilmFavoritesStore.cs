@@ -132,12 +132,6 @@ internal static class FilmFavoritesStore
         string? doubanId = row.GetNullableString(12);
         long addedAtMs = row.GetInt64(13);
 
-        if (string.IsNullOrWhiteSpace(favoriteId) || string.IsNullOrWhiteSpace(keyword) || string.IsNullOrWhiteSpace(title) ||
-            contentKind is not (null or "movie" or "tv") ||
-            (tmdbKind is null) != (tmdbId is null) ||
-            (doubanKind is null) != (doubanId is null))
-            throw new StorageException(StorageError.Corrupt);
-
         return new FilmFavoriteRecord(
             favoriteId, keyword, title, poster, score, textBadge, subtitle,
             contentKind, year, tmdbKind, tmdbId, doubanKind, doubanId, addedAtMs);

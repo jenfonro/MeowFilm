@@ -162,8 +162,7 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 | `apps/ios/Presentation/MeowfilmDockView.swift`、`MeowfilmPrimaryShellViewController.swift`、`MeowfilmSidebarView.swift` | A1：现有原生容器、小说底栏／发现书源选择 |
 | `apps/ios/runtime/entries/aggregate.mjs` | A4：正式 source 装配传入 dataRoot |
 | `scripts/generate-ios-project.py`、`scripts/check-source-scope.py` | A1/A5/A9：product 装配、明确源码边界、App 全局 ATS HTTP 配置 |
-| `scripts/ios-node-preflight/probe.mjs` | A4：source@0.3.0／source.runtime.v2 预期 |
-| `docs/ios/music.md`、`runtime-preflight.md`、`novel.md` | A1/A4–A10：版本、端侧行为与验证边界 |
+| `docs/ios/music.md`、`novel.md` | A1/A4–A10：版本、端侧行为与验证边界 |
 
 生成的 `apps/ios/Meowfilm.xcodeproj/project.pbxproj`、共享 schemes、
 `Info-Meowfilm.plist` 和 `Meowfilm-Simulator.entitlements` 沿用生成器和既有位置，

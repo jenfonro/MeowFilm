@@ -84,7 +84,14 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
         await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         bool failed = false;
         try { lifetime.Cancel(); } catch { failed = true; }
-        try { await Task.WhenAll(accepted.Select(lease => lease.CloseForAuthorityAsync())).ConfigureAwait(false); }
+        try
+        {
+            await Task.WhenAll(accepted.Select(async lease =>
+            {
+                try { await lease.DisposeAsync().ConfigureAwait(false); }
+                finally { Released(lease); }
+            })).ConfigureAwait(false);
+        }
         catch { failed = true; }
         finally
         {
@@ -101,9 +108,9 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
         private readonly object sync = new();
         private readonly RuntimeMediaAuthority owner;
         private readonly Func<string, ValueTask> releaseResource;
-        private readonly CancellationTokenSource lifetime;
+        private CancellationTokenSource? lifetime;
         private Task? release;
-        private bool released, lifetimeCancelled, lifetimeDisposed;
+        private bool released;
         internal string Id { get; }
         public Uri Address { get; }
         public IReadOnlyDictionary<string, string> Headers => NoHeaders;
@@ -116,8 +123,9 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
             this.releaseResource = releaseResource;
             Id = id;
             Address = address;
-            lifetime = CancellationTokenSource.CreateLinkedTokenSource(owner.revoked, scope);
-            Revoked = lifetime.Token;
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(owner.revoked, scope);
+            lifetime = cts;
+            Revoked = cts.Token;
         }
 
         public ValueTask DisposeAsync()
@@ -130,54 +138,24 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
             }
         }
 
-        internal async Task CloseForAuthorityAsync()
-        {
-            try { await DisposeAsync().ConfigureAwait(false); }
-            finally
-            {
-                // Detach authority accounting and local CTS even if remote RPC release failed;
-                // `released` stays false so a caller-held retry can still invoke releaseResource(Id).
-                owner.Released(this);
-                DisposeLifetimeOnce();
-            }
-        }
-
-        private void DisposeLifetimeOnce()
-        {
-            lock (sync)
-            {
-                if (lifetimeDisposed) return;
-                lifetimeDisposed = true;
-            }
-            lifetime.Dispose();
-        }
-
         private async Task ReleaseAsync()
         {
             await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
-            bool shouldCancel, cancelFailed = false;
-            lock (sync)
+            bool cancelFailed = false;
+            if (Interlocked.Exchange(ref lifetime, null) is { } cts)
             {
-                shouldCancel = !lifetimeCancelled && !lifetimeDisposed;
-                lifetimeCancelled = true;
-            }
-            if (shouldCancel)
-            {
-                try { lifetime.Cancel(); }
-                catch (ObjectDisposedException) { }
+                try { cts.Cancel(); }
                 catch { cancelFailed = true; }
+                finally { cts.Dispose(); }
             }
-            bool resourceFailed = false;
             try { await releaseResource(Id).ConfigureAwait(false); }
-            catch { resourceFailed = true; }
-            if (resourceFailed)
+            catch
             {
                 lock (sync) release = null;
                 owner.LogReleaseFailed(this);
                 throw new PlaybackException(PlaybackError.ReleaseFailed);
             }
             lock (sync) released = true;
-            DisposeLifetimeOnce();
             owner.Released(this);
             if (cancelFailed) throw new PlaybackException(PlaybackError.ReleaseFailed);
         }

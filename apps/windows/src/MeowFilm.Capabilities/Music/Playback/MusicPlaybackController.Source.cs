@@ -139,10 +139,9 @@ public sealed partial class MusicPlaybackController
 
     private async Task<MusicSourceSession> BeginSourceSessionAsync(SongRow song, CancellationToken token, bool officialOnly = false)
     {
-        var qualityResult = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-            ct => application.GetQualityPolicyAsync(ct), token);
+        var qualityResult = await application.Library.GetQualityPolicyAsync(token);
         settings.AcceptQuality(qualityResult);
-        var officials = await application.GetOfficialSourcesAsync(token);
+        var officials = await application.Library.GetOfficialSourcesAsync(token);
         var enabled = officials.Enabled.ToHashSet(StringComparer.Ordinal);
         string? platform = recordingPlatforms.GetValueOrDefault(song.Id);
         string? key = platform is null ? null : recordingChoices.GetValueOrDefault(song.Id + "\0" + platform);
@@ -186,8 +185,7 @@ public sealed partial class MusicPlaybackController
                     SourceKey = authority.SourceKey, QualityCacheSignature = signature,
                     Quality = info.Quality!, RecordingSong = knownSong
                 };
-                var policy = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-                    ct => application.GetQualityPolicyAsync(ct), token);
+                var policy = await application.Library.GetQualityPolicyAsync(token);
                 if (policy.Signature != target.QualityPolicySignature)
                     throw new MusicOperationException("QUALITY_POLICY_CHANGED");
                 return new(null, new Dictionary<string, string>(), cachedTarget, Receipt: info);
@@ -199,8 +197,7 @@ public sealed partial class MusicPlaybackController
             target.Generation, target.QualityPolicySignature, target.ManualSource,
             cacheOnly: urlCacheOnly, refresh: !initial || refresh, cancellationToken: token);
         token.ThrowIfCancellationRequested();
-        var currentPolicy = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-            ct => application.GetQualityPolicyAsync(ct), token);
+        var currentPolicy = await application.Library.GetQualityPolicyAsync(token);
         token.ThrowIfCancellationRequested();
         if (currentPolicy.Signature != target.QualityPolicySignature)
             throw new MusicOperationException("QUALITY_POLICY_CHANGED");
@@ -223,7 +220,7 @@ public sealed partial class MusicPlaybackController
     {
         var recordingSong = KnownOfficialSong(song, target.RecordingSong);
         string installationId = target.Installation ?? throw new MusicOperationException("TARGET_REQUIRED");
-        var response = await application.ResolveOnlineAudioAsync(
+        var response = await application.Scripts.ResolveOnlineAsync(
             installationId,
             target.Platform,
             recordingSong,
@@ -236,8 +233,7 @@ public sealed partial class MusicPlaybackController
         token.ThrowIfCancellationRequested();
         if (response.Duration is { } seconds && MediaDurationMismatch(song, seconds))
             throw new MusicOperationException("RECORDING_MISMATCH");
-        var qualityReply = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
-            ct => application.GetQualityPolicyAsync(ct), token);
+        var qualityReply = await application.Library.GetQualityPolicyAsync(token);
         token.ThrowIfCancellationRequested();
         if (qualityReply.Signature != response.QualityPolicySignature)
             throw new MusicOperationException("QUALITY_POLICY_CHANGED");

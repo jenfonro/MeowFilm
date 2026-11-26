@@ -1,7 +1,7 @@
 import CoreFoundation
 import Foundation
 import MeowJSON
-import MeowMusicFeature
+import MeowMusicPlatform
 import MeowRuntime
 import MeowStorage
 

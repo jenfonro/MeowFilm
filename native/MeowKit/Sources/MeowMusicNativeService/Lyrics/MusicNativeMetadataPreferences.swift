@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // iWebPlus b900c259: account-settings.js:4,90-100,127-140; player.js:47-63,83-84.
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 /// Playback preferences. Present malformed fields are never repaired by a read
 /// or overwritten by an unrelated preference update.
@@ -10,14 +10,11 @@ private struct NativeMetadataPreferences {
     var enabled: Set<MusicPublicBrowsePlatform>
     private static let defaults: [MusicPublicBrowsePlatform] = [.netease, .qq, .kugou, .kuwo, .migu]
 
-    init(_ playback: MusicPlaybackSettingsState) throws {
-        func decode(_ values: [String]) throws -> [MusicPublicBrowsePlatform] {
-            let platforms = values.compactMap(MusicPublicBrowsePlatform.init(rawValue:))
-            try musicRequire(platforms.count == values.count && Set(platforms).count == platforms.count, .corruptStorage)
-            return platforms
-        }
-        order = try decode(playback.metadataPlatforms)
-        enabled = Set(try decode(playback.metadataEnabled))
+    init(_ playback: MusicPlaybackSettingsState) {
+        var seen = Set<MusicPublicBrowsePlatform>()
+        order = playback.metadataPlatforms.compactMap(MusicPublicBrowsePlatform.init(rawValue:))
+            .filter { seen.insert($0).inserted }
+        enabled = Set(playback.metadataEnabled.compactMap(MusicPublicBrowsePlatform.init(rawValue:)))
     }
 
     func visible(revision: Int, available: Set<MusicPublicBrowsePlatform>) -> MusicMetadataPreferences {
@@ -54,7 +51,7 @@ private struct NativeMetadataPreferences {
 extension NativeMusicService {
     public func metadataPreferences() async throws -> MusicMetadataPreferences {
         let own = epoch, d = try read()
-        let value = try NativeMetadataPreferences(d.playback)
+        let value = NativeMetadataPreferences(d.playback)
             .visible(revision: d.playback.revision, available: enabledPlatforms)
         try check(own)
         return value
@@ -64,33 +61,27 @@ extension NativeMusicService {
         try check()
         try musicRequire((0...musicMaxSafeInteger).contains(change.ifRevision))
         if change.platforms == nil && change.enabledPlatforms == nil {
-            let d = try read(), prefs = try NativeMetadataPreferences(d.playback)
+            let d = try read(), prefs = NativeMetadataPreferences(d.playback)
             try musicRequire(d.playback.revision == change.ifRevision, .staleRevision)
             try check()
             return prefs.visible(revision: change.ifRevision, available: enabledPlatforms)
         }
-        let result: (MusicMetadataPreferences, Bool)
-        do {
-            result = try transaction([.playback, .library]) { d -> (MusicMetadataPreferences, Bool) in
-                try musicRequire(d.playback.revision == change.ifRevision, .staleRevision)
-                try musicRequire(change.ifRevision < musicMaxSafeInteger, .limit)
-                var prefs = try NativeMetadataPreferences(d.playback)
-                let before = prefs
-                try prefs.apply(change, available: enabledPlatforms, to: &d.playback)
-                d.playback.revision = change.ifRevision + 1
-                if before.order != prefs.order || before.enabled != prefs.enabled {
-                    for id in try d.songRows.allSongIDs() {
-                        var song = try d.song(id)
-                        selectSongArtwork(&song, playback: d.playback, force: true)
-                        try saveRepositorySong(song)
-                    }
+        let result = try transaction([.playback, .library]) { d -> (MusicMetadataPreferences, Bool) in
+            try musicRequire(d.playback.revision == change.ifRevision, .staleRevision)
+            try musicRequire(change.ifRevision < musicMaxSafeInteger, .limit)
+            var prefs = NativeMetadataPreferences(d.playback)
+            let before = prefs
+            try prefs.apply(change, available: enabledPlatforms, to: &d.playback)
+            d.playback.revision = change.ifRevision + 1
+            if before.order != prefs.order || before.enabled != prefs.enabled {
+                for id in try d.songRows.allSongIDs() {
+                    var song = try d.song(id)
+                    selectSongArtwork(&song, playback: d.playback, force: true)
+                    try saveRepositorySong(song)
                 }
-                return (prefs.visible(revision: change.ifRevision + 1, available: enabledPlatforms),
-                        before.order != prefs.order || before.enabled != prefs.enabled)
             }
-        } catch MusicServiceError.commitUnconfirmed {
-            lyricEpoch = UUID(); cancelWork("lyrics")
-            throw MusicServiceError.commitUnconfirmed
+            return (prefs.visible(revision: change.ifRevision + 1, available: enabledPlatforms),
+                    before.order != prefs.order || before.enabled != prefs.enabled)
         }
         if result.1 {
             lyricEpoch = UUID(); cancelWork("lyrics")
@@ -103,10 +94,10 @@ extension NativeMusicService {
         let d = try read()
         try musicRequire(d.queue.currentID == occurrenceID, .targetChanged)
         let ref = MusicReference(kind: .queue, id: occurrenceID)
-        let song = try self.song(ref, d), track = try MusicModel.track(song, ref)
-        let prefs = try NativeMetadataPreferences(d.playback)
+        let song = try self.song(ref, d), track = MusicModel.track(song, ref)
+        let prefs = NativeMetadataPreferences(d.playback)
             .visible(revision: d.playback.revision, available: enabledPlatforms)
-        let sources = try MusicModel.sources(song)
+        let sources = MusicModel.sources(song)
         let rows = song.sources.filter { platformEnabled($0.platform) }
         var candidates: [MusicMetadataCandidate] = []
         for platform in prefs.platforms where prefs.enabledPlatforms.contains(platform) {
@@ -126,7 +117,7 @@ extension NativeMusicService {
     private static let metadataSortLocale = Locale(identifier: "en_US")
 }
 
-extension NativeMusicService: MusicArtworkSelecting {
+extension NativeMusicService {
     public func failedArtwork(songID: String, url: URL, attempted: Set<URL>) throws -> URL? {
         try transaction([.library]) { state in
             var song = try repositorySong(songID, state)
@@ -151,7 +142,7 @@ extension NativeMusicService: MusicArtworkSelecting {
                       ($0.sourceKey == song.artworkSourceKey || $0.img == requested.absoluteString)
                           && platformEnabled($0.platform)
                   }) else { return MusicModel.artworkURL(song.coverURL) }
-            let preferences = try NativeMetadataPreferences(state.playback)
+            let preferences = NativeMetadataPreferences(state.playback)
             guard let platform = MusicPublicBrowsePlatform(rawValue: row.platform),
                   preferences.enabled.contains(platform) else { return MusicModel.artworkURL(song.coverURL) }
             song.artworkSourceKey = row.sourceKey

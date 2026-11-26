@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 extension NativeMusicService {
     func syncConfirm(_ fence: MusicNativeSyncFence, snapshot: MusicLibrarySyncSnapshot,
@@ -14,7 +14,7 @@ extension NativeMusicService {
         }
         var c = round.library.collections[index]
         guard let target = fence.resolvedTargetID(in: snapshot) else {
-            throw MusicServiceError.commitUnconfirmed
+            throw MusicServiceError.upstreamFailed
         }
         let bindingIndex = c.bindings.firstIndex {
             $0.platform == fence.platform.rawValue && $0.accountID == fence.accountID && $0.remoteID == target
@@ -28,7 +28,7 @@ extension NativeMusicService {
                 }
             }
         } else {
-            guard let remote = snapshot.collections.first(where: { $0.id == target }) else { throw MusicServiceError.commitUnconfirmed }
+            guard let remote = snapshot.collections.first(where: { $0.id == target }) else { throw MusicServiceError.upstreamFailed }
             var b = bindingIndex.map { c.bindings[$0] } ?? MusicCollectionBindingRecord(
                 platform: fence.platform.rawValue,
                 accountID: fence.accountID,
@@ -84,7 +84,7 @@ extension NativeMusicService {
             throw error
         }
         do {
-            let result = try await round.port.writeLibrarySync(session, mutation: mutation)
+            let result = try await round.writeSync(session, mutation: mutation)
             switch result {
             case .notDispatched(let reason), .rejected(let reason):
                 round.ledger.fences.removeAll { $0.mutation.id == mutation.id }
@@ -102,7 +102,7 @@ extension NativeMusicService {
                 if mutation.action == .create {
                     if let id, !id.isEmpty {
                         guard round.snapshots[session.platform.rawValue]?.collections.contains(where: { $0.id == id }) == false else {
-                            throw MusicServiceError.commitUnconfirmed
+                            throw MusicServiceError.upstreamFailed
                         }
                         fence.acknowledgedID = id; fence.acknowledgedName = name
                         let index = round.ledger.fences.firstIndex { $0.mutation.id == mutation.id }!

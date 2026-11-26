@@ -1,6 +1,5 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
 import MeowStorage
 
 struct MusicCachedAudio: Equatable, Sendable {

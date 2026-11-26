@@ -19,10 +19,9 @@ public final class MusicDailyStyleViewController: PageViewController {
     public init(
         page: MusicPublicBrowseViewModel,
         source: MusicRemoteQueueSource,
-        receipts: MusicSettingsReceiptOwner,
         appearance: MusicAppearancePreferencesStore
     ) {
-        model = MusicDailyStyleViewModel(page: page, source: source, receipts: receipts)
+        model = MusicDailyStyleViewModel(page: page, source: source)
         super.init(themeProvider: appearance)
         pageTitle = "选择推荐风格"
     }

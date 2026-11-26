@@ -1,18 +1,14 @@
 # Runtime HTTP v1
 
-`@meowfilm/runtime-bridge@0.2.0` 提供标准 Node HTTP(S) client／HTTP server、JSON 保真编解码和 HTTP 请求生命周期；业务路由由 `apps/runtime` 装配。iOS 与 Windows 均使用相同公开契约及原生 HTTP 客户端；iOS 平台载体与验证边界见[iOS 运行底座](../ios/runtime-preflight.md)，Windows 的私密启动和 HTTP 消费者见[Windows 接入](../windows/app-runtime.md)。公共契约通过不代表全平台应用验证。
+`@meowfilm/runtime-bridge@0.2.0` 提供标准 Node HTTP server、JSON 保真编解码和 HTTP 请求生命周期；业务路由由 `apps/runtime` 装配。iOS 与 Windows 均使用相同公开契约及原生 HTTP 客户端；Windows 的私密启动和 HTTP 消费者见[Windows 接入](../windows/app-runtime.md)。公共契约通过不代表全平台应用验证。
 
 ## 会话与公共入口
 
-`apps/runtime/entry.mjs` 导出 `createRuntime(config)` 和 `startRuntime(config)`。App 启动方提供生命周期 `sessionId`（UUID）及应用专用 `dataRoot`；各持久化业务 owner 分别管理自己的私有目录。`createRuntime` 返回 `{start(),close(),baseUrl}`，`startRuntime` 返回已监听的同一对象。生命周期 session 由启动方持有，作为运行代次和处理器上下文，不作为 HTTP 访问凭据。调用方持有会话存活句柄并负责终止时调用 `close()`；一次 HTTP keep-alive 断开不代表整个会话结束。
+`apps/runtime/entry.mjs` 导出 `assembleAppModules(config)` 与 `createAppRuntime(config)`。App 启动方提供生命周期 `sessionId`（UUID）及应用专用 `dataRoot`；各持久化业务 owner 分别管理自己的私有目录。`createAppRuntime` 返回 `{start(),close(),baseUrl}`。生命周期 session 由启动方持有，作为运行代次和处理器上下文，不作为 HTTP 访问凭据。调用方持有会话存活句柄并负责终止时调用 `close()`；一次 HTTP keep-alive 断开不代表整个会话结束。
 
-监听系统分配的端口，绑定全部可用接口；返回的 `baseUrl` 使用本机 `http://127.0.0.1:<port>`，外部可用设备地址和同一端口访问。普通外部请求无需启动密钥、session 或认证头，服务端不按域名、Host 或 Origin 拒绝请求。
+监听系统分配的回环端口，返回的 `baseUrl` 使用本机 `http://127.0.0.1:<port>`。普通请求无需启动密钥、session 或认证头，服务端不按域名、Host 或 Origin 拒绝请求。
 
-调用方可传 `X-Meow-Request-Id: <UUID>`，缺失时由服务端生成，响应通过同名头回传并允许浏览器读取。显式畸形 ID 和重复进行中的 ID 按协议错误拒绝；已完成 ID 不保留历史结果或做自动重放。内部单调序号用于请求归属，HTTP ID 不是授权凭据。
-
-`apps/runtime/client.mjs` 的 `createRuntimeClient({baseUrl,timeout?})` 接受合法 HTTP(S) 根端点，包括域名、非回环和默认端口；不要求访问凭据。它提供 `call(logicalMethod,params,options)`、`upload(module,id,sourceRevision,bytes,{basename?,signal?,timeout?})`、`describe()`、`shutdown()` 和本地 `close()`。`call` 在本地将明确逻辑业务名映射到 HTTP 路由，不提供第二套 wire 协议。
-
-普通请求保留默认 30000ms 截止及显式 `timeout`（1 至 300000ms 正安全整数）。仅 `source.runtime.rules.process` 使用无批次 deadline 入口，不应用客户端默认或单次 `options.timeout`；调用方通过 `signal` 取消，客户端 `close()` 撤销其传输，规则实际执行预算仍由 Node owner 逐条控制。
+调用方可传 `X-Meow-Request-Id: <UUID>`，缺失时由服务端生成，响应通过同名头回传。内部单调序号用于请求归属，HTTP ID 不是授权凭据。
 
 ## 路由与 JSON
 
@@ -24,11 +20,11 @@
 | `POST /v1/settings/changed` | `{block}`，仅显式注入 `settingsChanged` 的装配提供 | `{notified:true}`；重读已保存配置，不提交设置值 |
 | `POST /v1/close` | `{}` | 停止全部模块、取消其他交换并等待实际排空，成功值为 `{closed:true,cleanupComplete:true}` |
 
-设置通知不传设置值或凭据，不授予 HTTP 客户端原生读写能力，也不声明异步装载完成。现行消费者为 [Windows 原生设置适配](../windows/native-settings.md#私密配置能力)与 [iOS 原生设置适配](../ios/runtime-preflight.md#原生设置私密通道)；通用默认入口未装配此通知路由，模块版本与 describe 方法清单不因此改变。
+设置通知不传设置值或凭据，不授予 HTTP 客户端原生读写能力，也不声明异步装载完成。现行消费者为 [Windows 原生设置适配](../windows/native-settings.md#私密配置能力)与 iOS 原生设置 socketpair 通道；通用默认入口未装配此通知路由，模块版本与 describe 方法清单不因此改变。
 
-成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。只读取信封实际所需成员，不因额外字段拒绝响应。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.3.0/source.runtime.v2`。iOS／Windows 正式 App 按此前三项、`pan@0.1.0/pan.runtime.v1`、`tmdb@0.1.0/tmdb.data.v1`、`douban@0.1.0/douban.data.v1`、`film@0.1.0/film.playback.v1`、`netease@0.1.0/netease.token.v1`、`music-platform@0.1.0/music.platform.v1` 的顺序精确装配九模块；元数据见[元数据契约](metadata-data.md)，影视会话与媒体见[影视播放契约](film-playback.md)，实时 token 见[网易订阅 token](netease-token.md)，共同音乐配方见[音乐平台](music-platform.md)。
+成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。只读取信封实际所需成员，不因额外字段拒绝响应。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。iOS／Windows 正式 App 按 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.3.0/source.runtime.v2`、`pan@0.1.0/pan.runtime.v1`、`tmdb@0.1.0/tmdb.data.v1`、`douban@0.1.0/douban.data.v1`、`film@0.1.0/film.playback.v1`、`netease@0.1.0/netease.token.v1`、`music-platform@0.1.0/music.platform.v1` 的顺序精确装配九模块；元数据见[元数据契约](metadata-data.md)，影视会话与媒体见[影视播放契约](film-playback.md)，实时 token 见[网易订阅 token](netease-token.md)，共同音乐配方见[音乐平台](music-platform.md)。
 
-受信 Node 装配可经公共 `apps/runtime/entry.mjs` 与 `@meowfilm/pan-runtime` 显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。可通过 `createAppRuntime` 单独装配 `createPanRuntimeModule`，或经 `createRuntime({...,pan:{}})` 共用 aggregate HTTP 会话。通用默认 `createRuntime()` 不装配 pan；正式 App 显式装配它。双端平台握手确认应用实际依赖的九模块及其版本、契约和必要方法存在，缺项或同一所需模块的歧义身份仍失败；未使用的额外模块、方法与描述字段不阻断启动。
+受信 Node 装配经公共 `apps/runtime/entry.mjs` 与 `@meowfilm/pan-runtime` 显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。双端平台握手确认应用实际依赖的九模块及其版本、契约和必要方法存在，缺项或同一所需模块的歧义身份仍失败；未使用的额外模块、方法与描述字段不阻断启动。
 
 合法请求正文与成功业务值各自按现有 64 层 JSON 契约校验；调用器的位置参数列表和内部结果信封不占业务值深度。普通业务对象即使包含 `ok/value` 字段也不豁免计深，65 层仍拒绝。此格式边界不同于脚本执行的真实栈限制。
 
@@ -42,7 +38,7 @@
 
 `apps/runtime/native-settings.mjs` 为受信启动通道提供设置快照适配，完整设置帧不设字节配额，仍验证 UTF-8、JSON、块身份及 CAS 指纹：启动时读齐七块（`cat.sources`、`pan.accounts`、`tmdb`、`douban`、`film.rules`、`film.preferences`、`film.video-sources`），业务模块只读该原生值；后续通知重新读取对应块。元数据、影视规则和偏好的 HTTP 写设置方法在注入模式返回 `PERMISSION_DENIED`，Cat 来源意图也不由 HTTP 安装／编辑接口写入。pan 的在线凭据通过受限私密 CAS 能力写回同一原生 owner，不在公开 HTTP 增加读秘密的接口。各模块的确切读写接口见对应契约。
 
-该能力不由公共 HTTP 授予，不向脚本提供；原生密钥及存储路径不进入公开通知。iOS 使用既有受信 socketpair，帧及生命周期见 [iOS 启动边界](../ios/runtime-preflight.md#原生设置私密通道)。私密帧按完整 JSON 行传输，不设字节配额，也不恢复旧分块协议。
+该能力不由公共 HTTP 授予，不向脚本提供；原生密钥及存储路径不进入公开通知。iOS 使用既有受信 socketpair。私密帧按完整 JSON 行传输，不设字节配额，也不恢复旧分块协议。
 
 未注入时，通用独立入口保持原有 Node 设置文档和管理接口，不探测原生目录、不隐式迁移，也不静默从原生失败回退到 Node 文件。平台接入情况及验证分别记录，不能由可选公共能力推断全部平台已切换。
 
@@ -74,10 +70,6 @@
 
 `dispose()` 的真实拒绝保留为本会话清理失败，不保存底层异常或请求历史。之后每次 `abortActive()` 和 `close()` 都在实际工作 settle 后以 `BridgeError('INVALID_RESPONSE')` 拒绝，即使当时 `state.active` 已为 0；`close()` 仍执行一次 `onClose` 并等待其完成。普通上游、流传输及响应格式错误不记为会话清理失败。由此 HTTP `/v1/close` 可报告标准失败信封，不能在清理已失败时返回 `cleanupComplete:true`；完整图片仍保持已送达的原始成功响应，不二次发送 JSON。
 
-`createHttpClient` 保持 JSON 客户端契约，不提供原始流消费能力；原始流调用方使用其平台 HTTP API；请求 ID 可用于相关性，不需要会话认证。
-
-`request(options)` 应用默认或显式 `timeout`；`requestWithoutDeadline(options)` 明确不创建批次截止 timer，不应用 `timeout`，仅保留调用方 `signal`、客户端关闭及真实传输失败的终止路径。两个入口共用同一传输、响应校验、取消和排空流程，不以超时哨兵值切换策略，也不在共享 transport 中识别业务路由。请求 settle 和客户端 `close()` 等待本地传输及响应读取排空；远端 handler 的实际完成仍由服务端 owner 排空，不能用本地关闭代替。
-
 ## 完整源码候选
 
 上传不启动脚本、不修改 enabled 状态，也不建立持久来源事实源。只在 body 完整且格式有效后按 `(session,module,installationId,sourceRevision)` 发布完整候选；中断上传销毁本次缓冲，不影响旧完整候选。
@@ -94,7 +86,7 @@
 
 音乐私有 KV 由运行器管理，不再通过客户端反向存储 RPC；公共装配不要求反向 listener、callback key 或 grant。脚本仍只在有效处理器请求内使用 `context.storage`，校验 installation/site/generation、请求当前性与取消；旧 context 不获得后续请求的权限。客户端可以保存来源列表、检测结果等界面快照，但运行器安装与私有数据仍是唯一事实来源。
 
-共享 `@meowfilm/runtime-bridge` 的 `createHttpServer` / `createHttpClient` 是通用 HTTP 能力，可由各自调用方组合；其中没有音乐存储分派或客户端缓存策略。
+共享 `@meowfilm/runtime-bridge` 的 `createHttpServer` 是通用 HTTP 服务端能力，可由各自调用方组合；其中没有音乐存储分派或客户端缓存策略。
 
 ## 错误
 

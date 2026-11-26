@@ -56,7 +56,6 @@ internal static class FilmPlaybackError
         "INVALID_PREFERENCES" or "INVALID_RULES" => "播放设置无效",
         "STORAGE_ERROR" => "本地存储失败",
         "CORRUPT_STORAGE" => "本地数据已损坏",
-        "COMMIT_UNKNOWN" => "保存结果未确认，请核对",
         "CACHE_LOAD_FAILED" => "缓存读取失败",
         "STORAGE_CHANGED" => "本地数据已变更，请重试",
         "LIBRARY_UPDATE_FAILED" => "媒体库更新失败",

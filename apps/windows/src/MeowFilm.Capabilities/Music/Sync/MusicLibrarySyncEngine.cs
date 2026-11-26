@@ -118,7 +118,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
     };
 
     private static bool Fatal(Exception e) => Error(e) is "CANCELLED" or "STALE_SESSION" or "CLOSED" or "SYNC_SUPERSEDED" or
-        "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "AUTH_REQUIRED" or "FORBIDDEN" or "CONFIRMATION_REQUIRED";
+        "STORAGE_CONFLICT" or "PENDING_WRITE" or "AUTH_REQUIRED" or "FORBIDDEN" or "CONFIRMATION_REQUIRED";
 
     internal async Task<MusicLibrarySyncResult> RunAsync(string? networkPlatform = null)
     {
@@ -243,7 +243,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
 
     private async Task Confirm(string code, int count, Action<Utf8JsonWriter> writeEvidence)
     {
-        var envelope = MusicNodeSongCodec.BuildObject(w =>
+        string digest = MusicNodeSongCodec.HashJsonObject(w =>
         {
             w.WriteString("code", code);
             w.WritePropertyName("evidence");
@@ -274,7 +274,6 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
             }
             w.WriteEndArray();
         });
-        string digest = MusicRules.CanonicalDigest(envelope);
         if (state.Approved?.Token == digest) return;
         DebugLog.Warn(DebugCategories.MusicLibrary, "sync", "sync_confirmation_required",
             new { code, count });

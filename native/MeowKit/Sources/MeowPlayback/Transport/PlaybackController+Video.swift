@@ -45,8 +45,6 @@ extension PlaybackController {
         videoAdmission == admission && videoAdmissionOwner == owner
     }
 
-    func revokeVideoAdmission() { lifetime.revokeVideoAdmission() }
-
     var videoReplacementPosition: Double {
         sampleCurrentProgress()
         return videoTransport?.position ?? state.snapshot.position

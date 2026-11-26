@@ -60,12 +60,6 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
         }
 
         observe(model.settingsChanges) { [weak state] in state?.reconcileSettings() }
-        observe(model.accessChanges) { [weak self] in
-            guard let self, model.isClosed else { return }
-            cancelPageTask(key: "edit")
-            state.reconcileAccess()
-            render()
-        }
         let listChanges = Publishers.MergeMany([
             state.$official.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$scripts.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),

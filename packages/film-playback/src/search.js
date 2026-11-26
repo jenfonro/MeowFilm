@@ -6,7 +6,7 @@ import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
 import { createSnapshotStream } from './sse.js';
 import { mapWithConcurrency } from './concurrency.js';
 import { clone, codeOf, normalizeWorkKey, object, requireValue, text } from './identity.js';
-import { filmRuleFailure, validRuleText } from './rules.js';
+import { filmRuleFailure } from './rules.js';
 
 const require = createRequire(import.meta.url);
 const MAX_SITE_CONCURRENCY = 6;
@@ -25,8 +25,6 @@ const displayIdentity = key => key.startsWith('group:') ? `group:${JSON.stringif
 
 function wireValue(value) {
   if (isRawJSON(value)) return clone(value);
-  if (typeof value === 'string') return validRuleText(value) ? value
-    : Array.from({ length: value.length }, (_, index) => value.charCodeAt(index));
   if (Array.isArray(value)) return value.map(wireValue);
   if (object(value)) return Object.fromEntries(Object.entries(value).map(([key, child]) =>
     [key, key === 'displayKey' || key === 'id' && typeof child === 'string' && child.startsWith('group:')

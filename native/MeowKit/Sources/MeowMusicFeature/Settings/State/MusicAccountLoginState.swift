@@ -97,7 +97,7 @@ final class MusicAccountLoginState: ObservableObject {
 
     init(
         owner: MusicViewModel,
-        service: any MusicAccountsServing,
+        service: NativeMusicAccountService,
         platform: MusicAccountPlatform
     ) {
         self.owner = owner; self.platform = platform
@@ -202,13 +202,7 @@ final class MusicAccountLoginState: ObservableObject {
         guard let token = loginTransitionToken else { return }
         loginTransitionToken = nil
         let owner = self.owner
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { owner.endAccountLoginTransition(token) }
-        } else {
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { owner.endAccountLoginTransition(token) }
-            }
-        }
+        Task { @MainActor in owner.endAccountLoginTransition(token) }
     }
 
     private func finishAccountCheck() {

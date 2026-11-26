@@ -11,15 +11,16 @@ public sealed class MusicSearchController : MusicController
     internal const string SearchOverview = "overview";
     private readonly MusicSettingsController settings;
     private readonly MusicAccountsController accounts;
-    private readonly MusicCatalogActionState catalogActions;
-    private readonly MusicContentState contentState;
+    private readonly ObservableCollection<MusicCatalogSection> songSections = [];
     private readonly Dictionary<string, ObservableCollection<MusicCatalogSection>> searchSections;
     private readonly Dictionary<string, MusicSearchSnapshot> searchSnapshots = [];
     private readonly Dictionary<string, SearchCardsCache> searchCardCache = [];
     private readonly Dictionary<string, double> searchScroll = [];
     private readonly Dictionary<string, string> searchIds = [];
+    private SongRow? searchSelectedSong;
     private string? searchSelectedKey;
-    private string searchKeyword = "", searchKind = "songs", searchView = SearchOverview;
+    private string searchKeyword = "", searchKind = "songs", searchView = SearchOverview, searchKindLabel = "歌曲";
+    private int searchTotal;
     private long searchEpoch, searchAccountEpoch;
     private bool searchStarting, searchRefresh;
     private Task searchStartTail = Task.CompletedTask;
@@ -37,46 +38,37 @@ public sealed class MusicSearchController : MusicController
     internal MusicSearchController(
         MusicRuntimeContext ctx,
         MusicSettingsController settings,
-        MusicAccountsController accounts,
-        MusicCatalogActionState catalogActions,
-        MusicContentState contentState) : base(ctx)
+        MusicAccountsController accounts) : base(ctx)
     {
         this.settings = settings;
         this.accounts = accounts;
-        this.catalogActions = catalogActions;
-        this.contentState = contentState;
         searchSections = new()
         {
-            [SearchOverview] = contentState.SearchOverviewSections,
-            ["songs"] = contentState.SearchSongSections,
-            ["playlists"] = contentState.SearchPlaylistSections
+            [SearchOverview] = OverviewSections,
+            ["songs"] = songSections,
+            ["playlists"] = PlaylistSections
         };
-        application.SearchChanged += SearchChanged;
-        contentState.SelectionChanged += OnContentSelectionChanged;
-        contentState.SelectionCleared += NotifySelectionChanged;
+        application.Search.Changed += SearchChanged;
+        application.Library.SearchPolicyChanged += OnSearchPolicyChanged;
+        application.Accounts.SessionChanged += OnAccountSessionChanged;
     }
-
-    internal event Action? CatalogPreviewSurfaceRetiring;
-    internal event Action<string, string>? SearchSessionStarted;
-    internal event Action<string, string>? SearchMetadataPublished;
-    internal event Action? CatalogTagsClearing;
 
     private bool CanBrowse => !stopping && commands == 0;
 
     public string[] SearchKinds { get; } = ["歌曲", "歌单"];
     public string SearchKindLabel
     {
-        get => contentState.SearchKindLabel;
+        get => searchKindLabel;
         set
         {
-            if (contentState.SearchKindLabel == value) return;
-            contentState.SearchKindLabel = value;
+            if (searchKindLabel == value) return;
+            searchKindLabel = value;
             Changed();
         }
     }
 
-    public ObservableCollection<MusicCatalogSection> OverviewSections => contentState.SearchOverviewSections;
-    internal ObservableCollection<MusicCatalogSection> PlaylistSections => contentState.SearchPlaylistSections;
+    public ObservableCollection<MusicCatalogSection> OverviewSections { get; } = [];
+    internal ObservableCollection<MusicCatalogSection> PlaylistSections { get; } = [];
     internal ObservableCollection<MusicCatalogSection> ActiveSections => searchSections[searchView];
     internal IEnumerable<MusicCatalogSection> AllSearchSections => searchSections.Values.SelectMany(value => value);
 
@@ -88,10 +80,18 @@ public sealed class MusicSearchController : MusicController
     public ObservableCollection<SongRow> SearchSongsSource { get; } = [];
     public SongRow? SearchSelectedSong
     {
-        get => IsSearchPage ? contentState.SelectedSong : SearchSongsSource.FirstOrDefault(song => song.SelectionKey == searchSelectedKey);
-        set { if (IsSearchPage) contentState.SetSelectedSong(value); }
+        get => IsSearchPage ? searchSelectedSong : SearchSongsSource.FirstOrDefault(song => song.SelectionKey == searchSelectedKey);
+        set { if (IsSearchPage) SetSelectedSong(value); }
     }
-    internal string SearchKeyword => searchKeyword;
+    internal void SetSelectedSong(SongRow? value)
+    {
+        if (ReferenceEquals(searchSelectedSong, value) && searchSelectedKey == value?.SelectionKey) return;
+        searchSelectedSong = value;
+        searchSelectedKey = value?.SelectionKey;
+        Changed(nameof(SearchSelectedSong));
+    }
+    public int SearchTotal => searchTotal;
+    public string SearchKeyword => searchKeyword;
     internal string SearchView => searchView;
     internal long SearchAccountEpoch => searchAccountEpoch;
 
@@ -112,25 +112,29 @@ public sealed class MusicSearchController : MusicController
     public bool ShowSearchLoading => IsSearchSongs && SearchSongsLoading && SearchSongsSource.Count == 0;
     public string SearchStatus { get; private set; } = "";
 
-    private void SyncSharedState()
+    private void OnSearchPolicyChanged(MusicSearchPolicyRecord policy)
     {
-        contentState.SearchKeyword = searchKeyword;
-        contentState.SearchView = searchView;
-        contentState.SearchAccountEpoch = searchAccountEpoch;
-        contentState.HasSearchSession = HasSearchSession;
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (!stopping && !disposed) _ = RetireAndClearForPolicyChangeAsync();
+        });
     }
 
-    private void OnContentSelectionChanged(SongRow? value)
+    private void OnAccountSessionChanged(string platform)
     {
-        if (IsSearchPage) searchSelectedKey = value?.SelectionKey;
-        Changed(nameof(SearchSelectedSong));
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (!stopping && !disposed) RetireSearchTracked();
+        });
     }
 
     internal void Unsubscribe()
     {
-        application.SearchChanged -= SearchChanged;
-        contentState.SelectionChanged -= OnContentSelectionChanged;
-        contentState.SelectionCleared -= NotifySelectionChanged;
+        application.Search.Changed -= SearchChanged;
+        application.Library.SearchPolicyChanged -= OnSearchPolicyChanged;
+        application.Accounts.SessionChanged -= OnAccountSessionChanged;
     }
 
     internal void CancelForShutdown() => searchEpoch++;
@@ -160,7 +164,6 @@ public sealed class MusicSearchController : MusicController
 
     internal void NotifyRouteChanged(bool refreshBindings = true)
     {
-        SyncSharedState();
         Changed(nameof(IsSearchPage));
         Changed(nameof(SearchTab));
         Changed(nameof(IsSearchOverview));
@@ -184,7 +187,8 @@ public sealed class MusicSearchController : MusicController
 
     internal void SearchBindings()
     {
-        SyncSharedState();
+        Changed(nameof(SearchKeyword));
+        Changed(nameof(SearchTotal));
         Changed(nameof(HasSearchSession));
         Changed(nameof(ShowSearchLoading));
         Changed(nameof(CanSearchMore));
@@ -200,7 +204,7 @@ public sealed class MusicSearchController : MusicController
         if (IsSearchPage)
         {
             searchScroll[searchView] = ctx.CaptureScroll();
-            if (contentState.SelectedSong is { } sel) searchSelectedKey = sel.SelectionKey;
+            if (searchSelectedSong is { } sel) searchSelectedKey = sel.SelectionKey;
         }
     }
 
@@ -237,7 +241,7 @@ public sealed class MusicSearchController : MusicController
         {
             searchCardCache.Clear(); searchScroll.Clear();
             ClearSearchSections();
-            SearchSongsSource.Clear(); searchSelectedKey = null; ctx.ResetSearchPresentation();
+            SearchSongsSource.Clear(); searchSelectedSong = null; searchSelectedKey = null; searchTotal = 0; ctx.ResetSearchPresentation();
         }
         searchStarts.Clear();
         searchKeyword = keyword; searchView = view; searchKind = kind; searchAccountEpoch = accounts.AccountEpoch;
@@ -247,9 +251,8 @@ public sealed class MusicSearchController : MusicController
         loadDrains.Add(done.Task);
         var flight = new SearchStartFlight(key, epoch);
         searchStarts[kind] = flight;
-        SyncSharedState();
         ctx.SetLocation(new("catalog-search", keyword), heading: keyword, clearSelection: !retainContent);
-        SearchSessionStarted?.Invoke(keyword, SearchKindLabel);
+        ctx.BeginSearchCatalogState(keyword, SearchKindLabel);
         searchStartTail = flight.Work = Start();
         ctx.PublishContentSelection(previousSelection, false);
         var work = EnsureSearchViewAsync(flight.Work, epoch, token, kind);
@@ -268,14 +271,13 @@ public sealed class MusicSearchController : MusicController
                 string id = snapshot.Id;
                 if (stopping || epoch != searchEpoch || navigation != ctx.LoadGeneration)
                 {
-                    try { await application.CancelSearchAsync(id, lifetime.Token); }
-                    catch (OperationCanceledException) { }
-                    catch (MusicOperationException) { }
+                    try { await application.Search.CancelAsync(id, lifetime.Token); }
+                    catch (Exception error) when (error is OperationCanceledException || ErrorCode(error) is not null) { }
                     return;
                 }
                 searchIds[kind] = id;
                 AcceptSearchSnapshot(snapshot);
-                AcceptSearchSnapshot(await application.GetSearchAsync(id, token));
+                AcceptSearchSnapshot(await application.Search.GetAsync(id, token));
             }
             catch (OperationCanceledException)
             {
@@ -286,7 +288,7 @@ public sealed class MusicSearchController : MusicController
             {
                 if (!stopping && epoch == searchEpoch)
                 {
-                    SearchStatus = MusicCatalogDto.ErrorText(error is MusicOperationException e ? e.Code : "INVALID_RESPONSE");
+                    SearchStatus = MusicCatalogDto.ErrorText(ErrorCode(error) ?? "INVALID_RESPONSE");
                     await CancelSearchIds(searchIds.Values.ToArray());
                 }
             }
@@ -324,7 +326,6 @@ public sealed class MusicSearchController : MusicController
             ReferenceEquals(current, flight))
             searchStarts.Remove(flight.Key.Kind);
         searchStarting = searchStarts.Values.Any(value => value.Epoch == searchEpoch);
-        SyncSharedState();
         if (disposed) return;
         if (!stopping && flight.Epoch == searchEpoch && IsSearchPage &&
             (searchView == SearchOverview || searchKind == flight.Key.Kind))
@@ -346,7 +347,6 @@ public sealed class MusicSearchController : MusicController
         if (value.Keyword != searchKeyword || !searchIds.TryGetValue(value.Kind, out var expected) || value.Id != expected) return;
         if (searchSnapshots.TryGetValue(value.Kind, out var before) && value.Revision < before.Revision) return;
         searchSnapshots[value.Kind] = value;
-        SyncSharedState();
         if (IsSearchPage && (searchView == SearchOverview || searchKind == value.Kind))
             PublishSearchView(restore: false);
         else SearchBindings();
@@ -416,8 +416,8 @@ public sealed class MusicSearchController : MusicController
     {
         var songCards = SearchCards("songs");
         var playlistCards = SearchCards("playlists");
-        CatalogPreviewSurfaceRetiring?.Invoke();
-        string? selected = restore || searchRefresh ? searchSelectedKey : contentState.SelectedSong?.SelectionKey;
+        ctx.RetireCatalogPreviewSurface();
+        string? selected = restore || searchRefresh ? searchSelectedKey : searchSelectedSong?.SelectionKey;
         var nextSongs = SearchSongs(songCards);
         var (prefix, songsChanged) = SearchSongDelta(nextSongs);
         bool reset = !restore && songsChanged && !prefix && IsSearchSongs;
@@ -429,19 +429,19 @@ public sealed class MusicSearchController : MusicController
         {
             string kindLabel = searchKind == "songs" ? "歌曲" : "歌单";
             SearchKindLabel = kindLabel;
-            SyncSharedState();
-            SearchMetadataPublished?.Invoke(searchKeyword, kindLabel);
+            ctx.PublishSearchCatalogMetadata(searchKeyword, kindLabel);
             bool sectionsChanged = ApplySearchSections(sections);
-            int totalCount = searchView == SearchOverview ? songCards.Length + playlistCards.Length :
+            searchTotal = searchView == SearchOverview ? songCards.Length + playlistCards.Length :
                 searchView == "songs" ? songCards.Length : playlistCards.Length;
-            contentState.PublishSearchSummary(searchKeyword, totalCount);
-            CatalogTagsClearing?.Invoke();
-            var songs = ctx.ActiveSongs;
+            Changed(nameof(SearchKeyword));
+            Changed(nameof(SearchTotal));
+            ctx.ClearCatalogTags();
+            var songs = SearchSongsSource;
             if (songsChanged) MusicRuntimeContext.ReconcileSongRows(songs, nextSongs);
             if (restore || searchRefresh || songsChanged || sectionsChanged)
             {
                 var restored = songs.FirstOrDefault(song => song.SelectionKey == selected);
-                if (!ReferenceEquals(contentState.SelectedSong, restored)) contentState.SetSelectedSong(restored);
+                if (!ReferenceEquals(searchSelectedSong, restored)) SetSelectedSong(restored);
             }
             SearchStatus = SearchViewStatus();
             ctx.ClearStatusQuiet();
@@ -460,7 +460,7 @@ public sealed class MusicSearchController : MusicController
 
     private (bool Prefix, bool Changed) SearchSongDelta(SongRow[] next)
     {
-        var songs = ctx.ActiveSongs;
+        var songs = SearchSongsSource;
         bool prefix = next.Length >= songs.Count, changed = next.Length != songs.Count;
         for (int index = 0; index < Math.Min(next.Length, songs.Count); index++)
         {
@@ -533,7 +533,6 @@ public sealed class MusicSearchController : MusicController
         token.ThrowIfCancellationRequested();
         if (navigate) { ctx.AdvanceLoadGeneration(); ctx.LoadCancellation?.Cancel(); }
         var previousSelection = ctx.CaptureContentSelection();
-        SyncSharedState();
         ctx.SetLocation(new("catalog-search", searchKeyword));
         ctx.PublishContentSelection(previousSelection, false);
         PublishSearchView(restore: true);
@@ -549,13 +548,12 @@ public sealed class MusicSearchController : MusicController
     {
         if (ctx.Publishing || !IsSearchPage || stopping) return Task.CompletedTask;
         if (tab is not (SearchOverview or "songs" or "playlists")) return Task.CompletedTask;
-        if (searchView != tab) catalogActions.Invalidate();
+        if (searchView != tab) ctx.InvalidateCatalogAction();
         RememberSearch();
         var previousSelection = ctx.CaptureContentSelection();
         searchView = tab;
         searchKind = tab == "playlists" ? "playlists" : "songs";
         SearchKindLabel = searchKind == "songs" ? "歌曲" : "歌单";
-        SyncSharedState();
         ctx.PublishContentSelection(previousSelection, false);
         PublishSearchView(restore: true);
         return tab == SearchOverview
@@ -619,14 +617,13 @@ public sealed class MusicSearchController : MusicController
                 startedId = id;
                 if (stopping || epoch != searchEpoch || navigation != ctx.LoadGeneration)
                 {
-                    try { await application.CancelSearchAsync(id, lifetime.Token); }
-                    catch (OperationCanceledException) { }
-                    catch (MusicOperationException) { }
+                    try { await application.Search.CancelAsync(id, lifetime.Token); }
+                    catch (Exception error) when (error is OperationCanceledException || ErrorCode(error) is not null) { }
                     return;
                 }
                 searchIds[kind] = id;
                 AcceptSearchSnapshot(snapshot);
-                AcceptSearchSnapshot(await application.GetSearchAsync(id, token));
+                AcceptSearchSnapshot(await application.Search.GetAsync(id, token));
             }
             catch (OperationCanceledException)
             {
@@ -637,7 +634,7 @@ public sealed class MusicSearchController : MusicController
             {
                 if (!stopping && epoch == searchEpoch)
                 {
-                    SearchStatus = MusicCatalogDto.ErrorText(error is MusicOperationException e ? e.Code : "INVALID_RESPONSE");
+                    SearchStatus = MusicCatalogDto.ErrorText(ErrorCode(error) ?? "INVALID_RESPONSE");
                     if (startedId is not null) await CancelSearchIds([startedId]);
                 }
             }
@@ -651,7 +648,7 @@ public sealed class MusicSearchController : MusicController
 
     public Task MoreSearchAsync() => !CanSearchMore ? Task.CompletedTask :
         !searchIds.TryGetValue(searchKind, out string? id) ? Task.CompletedTask :
-        RunAsync(async () => AcceptSearchSnapshot(await application.NextSearchAsync(id, lifetime.Token)));
+        RunAsync(async () => AcceptSearchSnapshot(await application.Search.NextAsync(id, lifetime.Token)));
 
     public Task CancelSearchAsync()
     {
@@ -677,14 +674,14 @@ public sealed class MusicSearchController : MusicController
         {
             try
             {
-                var receipt = await application.CancelSearchAsync(id, lifetime.Token);
+                var receipt = await application.Search.CancelAsync(id, lifetime.Token);
                 AcceptSearchSnapshot(receipt);
             }
             catch (OperationCanceledException) { }
-            catch (MusicOperationException error)
+            catch (Exception error) when (ErrorCode(error) is { } code)
             {
                 MeowFilm.Core.Debug.DebugLog.Warn(MeowFilm.Core.Debug.DebugCategories.Search,
-                    "search", "search_cancel_failed", new { id, code = error.Code });
+                    "search", "search_cancel_failed", new { id, code });
             }
         }
     }
@@ -692,15 +689,14 @@ public sealed class MusicSearchController : MusicController
     internal async Task RetireSearchAsync()
     {
         ++searchEpoch; searchStarting = false;
-        CatalogPreviewSurfaceRetiring?.Invoke();
+        ctx.RetireCatalogPreviewSurface();
         string[] ids = searchIds.Values.ToArray();
-        searchIds.Clear(); searchSnapshots.Clear(); searchCardCache.Clear(); searchScroll.Clear(); searchKeyword = "";
+        searchIds.Clear(); searchSnapshots.Clear(); searchCardCache.Clear(); searchScroll.Clear(); searchKeyword = ""; searchTotal = 0;
         ClearSearchSections();
-        SearchSongsSource.Clear(); searchSelectedKey = null;
+        SearchSongsSource.Clear(); searchSelectedSong = null; searchSelectedKey = null;
         ctx.ResetSearchPresentation();
         var previousSelection = ctx.CaptureContentSelection();
         searchView = SearchOverview; searchKind = "songs";
-        SyncSharedState();
         if (!ctx.PublishContentSelection(previousSelection, true)) SearchBindings();
         await searchStartTail;
         await CancelSearchIds(ids);
@@ -721,12 +717,13 @@ public sealed class MusicSearchController : MusicController
 
     internal void ClearSearchVisibleSnapshot()
     {
-        CatalogPreviewSurfaceRetiring?.Invoke();
+        ctx.RetireCatalogPreviewSurface();
         ActiveSections.Clear();
-        CatalogTagsClearing?.Invoke();
+        ctx.ClearCatalogTags();
         if (IsSearchSongs || !HasSearchSession) SearchSongsSource.Clear();
-        contentState.SetSelectedSong(null);
-        contentState.ClearTotal();
+        SetSelectedSong(null);
+        searchTotal = 0;
+        Changed(nameof(SearchTotal));
         SearchStatus = "";
         ctx.RefreshBindings();
     }

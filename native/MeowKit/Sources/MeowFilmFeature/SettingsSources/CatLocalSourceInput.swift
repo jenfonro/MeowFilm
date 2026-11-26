@@ -19,9 +19,6 @@ struct CatLocalSourceInput: Sendable {
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: destination.path) {
-                guard (try Data(contentsOf: destination)) == bytes else {
-                    throw FilmSourceError(code: "CORRUPT_STORAGE")
-                }
                 return hash
             }
             try Task.checkCancellation()

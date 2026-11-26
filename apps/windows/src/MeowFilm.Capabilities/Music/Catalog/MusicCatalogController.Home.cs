@@ -69,7 +69,7 @@ public sealed partial class MusicCatalogController
                 if (!homeSnapshotRead)
                 {
                     homeSnapshot = await MusicHomeSnapshotCodec.ReadAsync(
-                        homeSnapshotStore, application.ReadSongRecord, request.Token);
+                        homeSnapshotStore, application.Library.ReadSongRecord, request.Token);
                     homeSnapshotRead = true;
                 }
             }
@@ -194,7 +194,7 @@ public sealed partial class MusicCatalogController
             RetireChannelAccountPages(platform, observation);
             changedCatalogAccounts.Add(platform);
             if (catalogAction is { } action && action.Platform == platform && action.Observation < observation)
-                catalogActions.Invalidate();
+                InvalidateCatalogAction();
             bool currentRead = catalogLoadFlight is { } flight && flight.Request.Key.Platform == platform &&
                 flight.Request.Key.AccountObservation >= observation;
             if (platform == settings.CatalogSourcePlatform &&
@@ -227,7 +227,7 @@ public sealed partial class MusicCatalogController
         if (!IsCatalogHome) return;
         optionalReads.RefreshDemandMembers();
         var songs = display.SelectMany(section => section.Items).Select(card => card.Song).OfType<SongRow>().ToArray();
-        MusicRuntimeContext.ReconcileSongRows(ctx.ActiveSongs, songs);
+        MusicRuntimeContext.ReconcileSongRows(CatalogSongsSource, songs);
         if (ctx.RawStatus is "" or "暂无内容")
             ctx.SetStatus(display.Length == 0 ? "暂无内容" : "");
     }
@@ -277,7 +277,7 @@ public sealed partial class MusicCatalogController
                 }
             }
             catch (OperationCanceledException) { }
-            catch (MusicOperationException) { }
+            catch (Exception error) when (ErrorCode(error) is not null) { }
             finally
             {
                 homeAccountRecoveryPending = false;

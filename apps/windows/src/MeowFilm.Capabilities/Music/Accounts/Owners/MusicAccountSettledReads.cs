@@ -33,12 +33,6 @@ public sealed partial class MusicAccountOwner
         lock (gate)
         {
             if (closed || readsStopping) throw new MusicAccountException("CLOSED");
-            if (initialObservationSucceeded && states.Values.Any(state => state.Uncertain))
-            {
-                // A lost account CAS acknowledgement requires a new explicit
-                // durable observation before consumers may reuse hydration.
-                initialObservationSucceeded = false;
-            }
             if (initialObservationSucceeded)
                 return;
             if (initialObservation is not { } current)

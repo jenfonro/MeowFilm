@@ -106,7 +106,7 @@ public sealed partial class MusicPlaybackController
                 if (request.IsCancellationRequested || chorusKey != key || epoch != Interlocked.Read(ref chorusAccountEpoch)) return;
                 if (cached is { } hit && hit.End <= DurationSeconds)
                 { chorusStart = hit.Start; chorusEnd = hit.End; ChorusBindings(); return; }
-                var reply = await application.GetCatalogChorusAsync(platform, id, request.Token);
+                var reply = await application.Catalog.ChorusAsync(platform, id, request.Token);
                 if (request.IsCancellationRequested || chorusKey != key || epoch != Interlocked.Read(ref chorusAccountEpoch)) return;
                 var point = reply.GetProperty("point");
                 if (point.ValueKind != JsonValueKind.Object) return;

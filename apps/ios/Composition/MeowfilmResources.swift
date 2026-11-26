@@ -125,7 +125,7 @@ struct MeowfilmResources: Sendable {
                     }
                     do { try musicHomeSnapshot.clear() }
                     catch { DebugRuntime.logError(.storage, sub: "music.cacheLifecycle", event: "clearHomeSnapshot.error", error: error) }
-                case .accessChanged, .closed:
+                case .closed:
                     await musicAudioCache?.cancelPending()
                 }
             }

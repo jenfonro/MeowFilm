@@ -2,7 +2,6 @@ import Foundation
 import MeowAccounts
 import MeowContracts
 import MeowDebug
-import MeowMusicFeature
 import MeowStorage
 import MeowRuntime
 
@@ -12,10 +11,21 @@ public struct MusicAccountCloseReport: Sendable, Equatable {
     public let pendingCredentialWrites: Int
 }
 
+struct MusicAccountImportBatch: Sendable {
+    struct Item: Sendable { let entry: MusicAccountTransferEntry; let baseline: AccountReplacementLease?; let epoch: UUID? }
+    let epoch: UUID; let items: [Item]
+}
+
+struct MusicAccountQueueBinding: Sendable {
+    let lease: MusicAccountQueueLease; let credential: AccountCredentialUpdateLease
+    let epoch: UUID; let revision: Int; let nativeID: String
+    func revoke() { lease.revoke(); credential.revoke() }
+}
+
 /// Product lifetime. Secrets stay native between this owner, the injected shared
 /// coordinator and a fixed platform adapter. Callers receive typed native
 /// capabilities, never secrets, arbitrary HTTP or credential-store enumeration.
-public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefreshing {
+public actor NativeMusicAccountService {
     let accounts: AccountSessionCoordinator
     let scopes: [MusicAccountPlatform: AccountIdentity]
     let providers: [MusicAccountPlatform: MusicNodeAccountProvider]
@@ -43,7 +53,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
         let epoch: UUID
         let accountEpoch: UUID?
     }
-    let sessionReads = MusicAccountSingleFlight<SessionReadKey, AccountSessionToken>()
+    let sessionReads = AsyncValueCache<SessionReadKey, AccountSessionToken>(capacity: 64)
     var transitions = Set<MusicAccountPlatform>()
     var inspected = Set<MusicAccountPlatform>()
 
@@ -65,7 +75,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
     var restoreNativeIDs: [MusicAccountPlatform: String] = [:]
     var librarySyncBindings: [UUID: MusicAccountSyncBinding] = [:]
     var accountQueueBindings: [UUID: MusicAccountQueueBinding] = [:]
-    var playbackFeedbackLeases: [UUID: MusicPlaybackFeedbackLease] = [:]
+    var feedbackSessions: [UUID: ActiveFeedbackSession] = [:]
     nonisolated let playbackFeedbackOutbox: MusicNeteaseFeedbackOutbox
     var playbackFeedbackSetting = MusicPlaybackFeedbackSetting()
     var playbackFeedbackSettingsRevision = -1
@@ -90,7 +100,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
         let grant: UUID
         let rejectedURL: URL?
     }
-    let audioRequests = MusicAccountSingleFlight<AudioRequestKey, RuntimeValue>()
+    let audioRequests = AsyncValueCache<AudioRequestKey, MusicCachedAudio>(capacity: 64)
 
     struct CapabilityRequestKey: Hashable, Sendable {
         let platform: MusicAccountPlatform
@@ -99,7 +109,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
         let revision: Int
         let scope: String
     }
-    let capabilityRequests = MusicAccountSingleFlight<CapabilityRequestKey, [String]>()
+    let capabilityRequests = AsyncValueCache<CapabilityRequestKey, [String]>(capacity: 64)
 
     struct LocalCacheBinding {
         let value: MusicNativeCacheScope
@@ -116,7 +126,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
         let epoch: UUID
         let cacheEpoch: UUID
     }
-    let localCacheReads = MusicAccountSingleFlight<LocalCacheReadKey, MusicNativeCacheScope?>()
+    let localCacheReads = AsyncValueCache<LocalCacheReadKey, MusicNativeCacheScope?>(capacity: 64)
     var localCacheObservations: [MusicAccountPlatform: Task<Void, Never>] = [:]
 
     struct AggregateCacheBinding {
@@ -205,10 +215,13 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
     var grants: [GrantKey: Grant] = [:]
 
     deinit {
-        audioRequests.cancel()
-        capabilityRequests.cancel()
-        localCacheReads.cancel()
-        sessionReads.cancel()
+        let ar = audioRequests, cr = capabilityRequests, lr = localCacheReads, sr = sessionReads
+        Task {
+            await ar.invalidate()
+            await cr.invalidate()
+            await lr.invalidate()
+            await sr.invalidate()
+        }
         for authorization in playbackAuthorizations.values { authorization.revoke() }
         homeAccountObservation?.cancel()
         for task in localCacheObservations.values { task.cancel() }
@@ -254,8 +267,9 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
     }
 
     func configured(_ platform: MusicAccountPlatform) throws -> AccountIdentity {
-        guard let identity = scopes[platform], identity.source.siteKey == platform.rawValue,
-              Set(scopes.values).count == scopes.count else { throw MusicServiceError.unavailable }
+        guard let identity = scopes[platform], identity.source.siteKey == platform.rawValue else {
+            throw MusicServiceError.unavailable
+        }
         guard providers[platform] != nil else { throw MusicServiceError.unsupported }
         return identity
     }
@@ -287,7 +301,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
     func rotate(_ platform: MusicAccountPlatform, preservingCurrentRequest: Bool = false) async -> UUID {
         revokeAccountImports(platform)
         if platform == .netease { playbackFeedbackOutbox.suspend(preserving: false) }
-        sessionReads.cancel(excludingCurrent: preservingCurrentRequest) { $0.platform == platform }
+        if !preservingCurrentRequest { await sessionReads.invalidate() }
         revokeLocalCacheScopes(platform, event: .accountChanged, preservingCurrentRequest: preservingCurrentRequest)
         let binding = UUID()
         accountEpochs[platform] = binding
@@ -300,8 +314,10 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
         publicationAuthorizations.removeValue(forKey: platform)?.revoke()
         playbackAuthorizations.removeValue(forKey: platform)?.revoke()
         if platform == .netease { guestAudioGrants.removeAll() }
-        audioRequests.cancel(excludingCurrent: preservingCurrentRequest) { $0.cache.platform == platform.rawValue }
-        capabilityRequests.cancel(excludingCurrent: preservingCurrentRequest) { $0.platform == platform }
+        if !preservingCurrentRequest {
+            await audioRequests.invalidate()
+            await capabilityRequests.invalidate()
+        }
         invalidateNativeHome(platform)
         revokePlaybackFeedback(platform)
         if platform == .netease { playbackFeedbackOutbox.suspend(preserving: true) }
@@ -417,15 +433,13 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
             closeTask = Task { await finishClose() }
         }
         let publicationComplete = await closeTask!.value
-        for lease in Array(playbackFeedbackLeases.values) where lease.authorization.inFlight == 0 {
-            await lease.drain()
-        }
-        playbackFeedbackLeases = playbackFeedbackLeases.filter { !$0.value.isDrained }
+        let lrInFlight = await localCacheReads.stats().inFlightCount
+        let srInFlight = await sessionReads.stats().inFlightCount
+        let arInFlight = await audioRequests.stats().inFlightCount
+        let crInFlight = await capabilityRequests.stats().inFlightCount
         let inFlight = operations.count + restoring.count + localCacheRestoring.count +
-            transitions.count + runningTransfers.count + localCacheReads.inFlight + sessionReads.inFlight +
-            audioRequests.inFlight + capabilityRequests.inFlight +
-            playbackFeedbackLeases.values.reduce(0) { $0 + max(1, $1.authorization.inFlight) } +
-            (feedbackDrain == nil ? 0 : 1)
+            transitions.count + runningTransfers.count + lrInFlight + srInFlight +
+            arInFlight + crInFlight + (feedbackDrain == nil ? 0 : 1)
         return .init(cleanupComplete: publicationComplete && inFlight == 0 && pendingWrites == 0,
                      inFlight: inFlight, pendingCredentialWrites: pendingWrites)
     }
@@ -438,10 +452,10 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
             epoch = UUID(); pages.removeAll(); grants.removeAll(); validated.removeAll(); profiles.removeAll()
             for authorization in publicationAuthorizations.values { authorization.revoke() }
             publicationAuthorizations.removeAll()
-            audioRequests.cancel()
-            capabilityRequests.cancel()
-            localCacheReads.cancel()
-            sessionReads.cancel()
+            await audioRequests.invalidate()
+            await capabilityRequests.invalidate()
+            await localCacheReads.invalidate()
+            await sessionReads.invalidate()
             displayProfiles.removeAll(); profileRequests.removeAll()
             displayProfileDeadlines.removeAll()
             revokeLocalCacheScopes(event: .closed)
@@ -556,7 +570,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
                     tokens.removeValue(forKey: platform)
                     requiresExplicitRestore.insert(platform)
                     restoreNativeIDs[platform] = value.nativeID
-                    throw MusicServiceError.commitUnconfirmed
+                    throw MusicServiceError.storageFailed
                 }
             }
             if failure as? AccountSessionError == .credentialsUnavailable { throw MusicServiceError.storageConflict }
@@ -588,7 +602,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
             return try await readSession(platform, force: force, refresh: refresh)
         }
         let key = SessionReadKey(platform: platform, epoch: epoch, accountEpoch: accountEpochs[platform])
-        let token = try await sessionReads.value(for: key) { [self] in
+        let token = try await sessionReads.value(for: key, lifetime: 0) { [self] in
             try await readAutomaticSession(key)
         }
         try check(key.epoch)
@@ -605,7 +619,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
     private func readSession(_ platform: MusicAccountPlatform, force: Bool = false, refresh: Bool = false) async throws -> AccountSessionToken {
         try check(); let identity = try configured(platform), own = epoch
         guard !transitions.contains(platform), login?.platform != platform else { throw MusicServiceError.busy }
-        if requiresExplicitRestore.contains(platform), !force || refresh { throw MusicServiceError.commitUnconfirmed }
+        if requiresExplicitRestore.contains(platform), !force || refresh { throw MusicServiceError.storageFailed }
         if !force, validated.contains(platform), let token = tokens[platform] {
             let revision = revisions[platform, default: 0]
             try await validToken(token, platform: platform, own: own, revision: revision)
@@ -679,12 +693,12 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefre
             let provider = providers[platform]!, restoredNativeID = restoreNativeIDs[platform]
             try await withTaskCancellationHandler {
                 let value = try await run(platform) {
-                    let bound = try await provider.nativeID(lease.credential)
+                    let bound = await provider.nativeID(lease.credential)
                     guard restoredNativeID == nil || restoredNativeID == bound else { throw MusicServiceError.targetChanged }
                     let value: MusicAccountVerified
                     if refresh { value = try await provider.refresh(lease.credential) }
                     else { value = try await provider.verify(lease.credential) }
-                    guard value.nativeID == bound, try await provider.nativeID(value.credential) == bound else {
+                    guard value.nativeID == bound, await provider.nativeID(value.credential) == bound else {
                         throw MusicServiceError.targetChanged
                     }
                     return value

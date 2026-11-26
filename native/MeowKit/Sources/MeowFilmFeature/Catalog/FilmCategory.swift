@@ -69,9 +69,3 @@ public struct FilmCategoryPage: Sendable {
         self.cache = cache
     }
 }
-
-public protocol FilmCategorySource: FilmSource {
-    var categories: [FilmCategory] { get }
-    func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int,
-                      refresh: Bool) async throws -> FilmCategoryPage
-}

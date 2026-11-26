@@ -9,13 +9,8 @@ public sealed partial class MusicLibraryOwner
     private static string[] MetadataOrder(MusicMetadataPolicyRecord policy) =>
         policy.Platforms.Concat(policy.Enabled.Except(policy.Platforms, StringComparer.Ordinal)).ToArray();
 
-    private static MusicMetadataPolicyRecord MetadataPolicy(MusicLibrarySession doc)
-    {
-        var value = doc.ReadMetadataPolicy() ?? DefaultMetadataPolicy;
-        try { ValidateMetadataPolicy(value); }
-        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
-        return value;
-    }
+    private static MusicMetadataPolicyRecord MetadataPolicy(MusicLibrarySession doc) =>
+        doc.ReadMetadataPolicy() ?? DefaultMetadataPolicy;
 
     private static void ValidateMetadataPolicy(MusicMetadataPolicyRecord policy)
     {
@@ -27,22 +22,17 @@ public sealed partial class MusicLibraryOwner
     }
 
     public Task<MusicMetadataPolicyRecord> GetMetadataPolicyAsync(CancellationToken cancellationToken = default) =>
-        RunLibraryReadAsync(doc =>
-        {
-            // Unknown CAS may already have disabled a platform. No consumer may use
-            // the old in-memory policy until the single owner reconciles its receipt.
-            MusicRules.Require(pending is null, "PENDING_WRITE");
-            return MetadataPolicy(doc);
-        }, cancellationToken, authoritativeFor: PendingOwner.Metadata);
+        RunLibraryReadAsync(MetadataPolicy, cancellationToken);
 
-    public Task<MusicMetadataPolicyRecord> SaveMetadataPolicyAsync(
+    public async Task<MusicMetadataPolicyRecord> SaveMetadataPolicyAsync(
         long ifRevision,
         string[] platforms,
         string[] enabled,
-        CancellationToken cancellationToken = default) =>
-        RunLibraryWriteAsync(PendingOwner.Metadata, doc =>
+        CancellationToken cancellationToken = default)
+    {
+        bool mutated = false;
+        var saved = await RunLibraryWriteAsync(doc =>
         {
-            MusicRules.Require(pending is null, "PENDING_WRITE");
             var policy = MetadataPolicy(doc);
             MusicRules.Require(ifRevision == policy.Revision, "REVISION_CONFLICT");
             var next = new MusicMetadataPolicyRecord(
@@ -53,7 +43,10 @@ public sealed partial class MusicLibraryOwner
             doc.SetMetadataPolicy(next);
             ApplyArtworkPolicy(doc, force: true);
             return (next, true);
-        }, cancellationToken);
+        }, cancellationToken, onCommitted: () => mutated = true).ConfigureAwait(false);
+        if (mutated) InvokeSafe(MetadataPolicyChanged, saved);
+        return saved;
+    }
 
     private static bool MetadataSourceEnabled(MusicLibrarySession doc, MusicSongRecord song, string sourceKey)
     {

@@ -10,9 +10,9 @@ internal sealed class NeteasePlaybackFeedback(NeteasePlaybackOutbox outbox, Musi
     private readonly HashSet<Session> sessions = [];
     private Task? disposal;
     private bool closed;
-    private sealed class Attempt(string fingerprint, NeteasePlaybackFeedback owner)
+    private sealed class Attempt(FeedbackAttemptKey key, NeteasePlaybackFeedback owner)
     {
-        internal readonly string Fingerprint = fingerprint;
+        internal readonly FeedbackAttemptKey Key = key;
         internal NeteasePlaybackFeedback? Owner = owner;
         internal string? Terminal;
         internal Task<MusicFeedbackSession>? Start;
@@ -40,7 +40,7 @@ internal sealed class NeteasePlaybackFeedback(NeteasePlaybackOutbox outbox, Musi
     {
         token.ThrowIfCancellationRequested();
         FeedbackProtocolRules.Start(account, input);
-        string fingerprint = FeedbackProtocolRules.Fingerprint(account, input);
+        var attemptKey = FeedbackProtocolRules.AttemptKey(account, input);
         lock (gate)
         lock (input.Attempt.Gate)
         {
@@ -50,12 +50,12 @@ internal sealed class NeteasePlaybackFeedback(NeteasePlaybackOutbox outbox, Musi
             {
                 FeedbackProtocolRules.Require(input.Attempt.State is Attempt, "INSTANCE_MISMATCH");
                 var previous = (Attempt)input.Attempt.State;
-                FeedbackProtocolRules.Require(previous.Fingerprint == fingerprint, "INSTANCE_MISMATCH");
+                FeedbackProtocolRules.Require(previous.Key == attemptKey, "INSTANCE_MISMATCH");
                 FeedbackProtocolRules.Require(previous.Terminal is null, previous.Terminal ?? "START_UNCONFIRMED");
                 FeedbackProtocolRules.Require(previous.Owner == this, "INSTANCE_MISMATCH");
                 return DuplicateAsync(previous, token);
             }
-            var attempt = new Attempt(fingerprint, this);
+            var attempt = new Attempt(attemptKey, this);
             var session = new Session(this, account, input, attempt) { Token = token };
             input.Attempt.State = attempt; sessions.Add(session);
             session.Revocation = token.Register(() => outbox.Revoke(session.OutboxId));
@@ -123,7 +123,7 @@ internal sealed class NeteasePlaybackFeedback(NeteasePlaybackOutbox outbox, Musi
     {
         token.ThrowIfCancellationRequested(); session.Token.ThrowIfCancellationRequested();
         lock (gate) FeedbackProtocolRules.Require(!closed && !session.Closed, "CLOSED");
-        FeedbackProtocolRules.Require((settings.IsEnabled("wy") || settings.PreservesWyConsent) &&
+        FeedbackProtocolRules.Require(settings.IsEnabled("wy") &&
             accounts.IsCurrent(session.Account), "SESSION_CHANGED");
     }
     private Task ReleaseAsync(Session session)

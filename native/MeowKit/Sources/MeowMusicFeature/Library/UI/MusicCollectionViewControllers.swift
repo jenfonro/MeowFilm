@@ -205,7 +205,6 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
                 self?.renderTracks()
                 self?.renderActions()
             }
-            observe(owner.accessChanges) { [weak self] in self?.renderActions() }
         }
         observe(owner.libraryChanges, whenVisible: true) { [weak self] in self?.renderActions() }
         renderActions()
@@ -522,10 +521,8 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         kind: MusicRequestTrace.Operation,
         _ action: @escaping @MainActor () async throws -> Void
     ) {
-        guard let intent = page.makeActionIntent() else { return }
         runPageTask { [weak page] in
-            guard let page else { return }
-            await page.perform(intent: intent, operation: operation, kind: kind, action)
+            await page?.perform(operation: operation, kind: kind, action)
         }
     }
 

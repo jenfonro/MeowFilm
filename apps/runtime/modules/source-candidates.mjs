@@ -23,8 +23,7 @@ export class SourceCandidates {
       Number.isSafeInteger(sourceRevision) && sourceRevision > 0, invalid);
     if (this.module === 'cat') this.#require(basename === undefined, invalid);
     else this.#require(typeof basename === 'string' && basename.trim().length > 0 && basename.length <= 255 &&
-      !/[\\/:*?"<>|\u0000-\u001f\u007f]/.test(basename) &&
-      (this.module === 'music' ? /\.js$(?![\s\S])/i : /\.(?:json|js|html?)$(?![\s\S])/i).test(basename), invalid);
+      !/[\\/:*?"<>|\u0000-\u001f\u007f]/.test(basename), invalid);
   }
   put(input, bytes, signal) {
     this.validate(input);

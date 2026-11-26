@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Native port of packages/music-core/src/queue.js and history.js.
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 extension NativeMusicService {
     func nextID(_ d: MusicDomainState, direction: MusicDirection, reason: MusicAdvanceReason = .manual, preview: Bool = false) -> String? {
@@ -133,7 +133,6 @@ extension NativeMusicService {
                      context: MusicPlayContextRecord = .empty,
                      authoritative: Bool = false) throws -> [MusicQueueEntryRecord] {
         let ids = try registerSongs(songs, library: &state.library, authoritative: authoritative, playback: state.playback)
-        try state.requireQueue()
         var serial = state.queue.serial
         try musicRequire(ids.count <= musicMaxSafeInteger - serial, .limit)
         let rows = ids.map { id -> MusicQueueEntryRecord in
@@ -154,8 +153,7 @@ extension NativeMusicService {
         case .append(_, let next): similarChange = next ? .insertNext : .append
         case .remove, .reorder: similarChange = .edit
         }
-        let result = try similarQueueTransaction([.queue, .playback, .history]) { d -> MusicPlaybackState in
-            try d.requireQueue()
+        let result = try transaction([.queue, .playback, .history]) { d -> MusicPlaybackState in
             try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
             let old = d.queue, previous = old.currentID
             var resolvedSongs: [MusicReference: MusicSongRecord] = [:]
@@ -255,8 +253,7 @@ extension NativeMusicService {
             if reason == .ended { attempt?.endedConsumed = true }
             return .init(state: stateDTO(before), selectedId: nil)
         }
-        let result = try similarQueueTransaction([.queue, .playback]) { d -> MusicAdvanceResult in
-            try d.requireQueue()
+        let result = try transaction([.queue, .playback]) { d -> MusicAdvanceResult in
             try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
             let id = nextID(d, direction: direction, reason: reason)
             if let id {
@@ -317,7 +314,7 @@ extension NativeMusicService {
         }
         let result: MusicPlaybackState
         if change.mode == nil { result = try transaction([.playback], update) }
-        else { result = try similarQueueTransaction([.playback, .queue], update) }
+        else { result = try transaction([.playback, .queue], update) }
         if change.mode != nil {
             similarMode.modeSelection = UUID()
             similarMode.preview?.enterAfter = false
@@ -363,8 +360,7 @@ extension NativeMusicService {
     }
 
     public func restoreHistory(id: String, expectedRevision: Int) async throws -> MusicPlaybackState {
-        let result = try similarQueueTransaction([.queue, .playback, .history]) { d in
-            try d.requireQueue()
+        let result = try transaction([.queue, .playback, .history]) { d in
             try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
             let matches = d.history.playlists.filter { $0.id == id }
             guard let snapshot = matches.first else { throw MusicServiceError.notFound }

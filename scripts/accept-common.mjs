@@ -11,7 +11,7 @@ export function inside(base, target) {
 
 export function createReportWriter(output, report) {
   let writing = Promise.resolve();
-  return function saveReport() {
+  function saveReport() {
     const bytes = `${JSON.stringify(report, null, 2)}\n`;
     writing = writing.then(async () => {
       await mkdir(dirname(output), { recursive: true });
@@ -19,7 +19,35 @@ export function createReportWriter(output, report) {
       await rename(`${output}.tmp`, output);
     });
     return writing;
-  };
+  }
+  saveReport.flush = () => writing;
+  return saveReport;
+}
+
+export function classifyJsonResponseBody(rawBody, event, configurationPattern) {
+  try {
+    const body = JSON.parse(Buffer.from(rawBody ?? []).toString());
+    event.bodyKind = 'json';
+    const code = body?.code ?? body?.status ?? body?.err_code ?? body?.error_code;
+    if (typeof code === 'number' && Number.isSafeInteger(code) && Math.abs(code) <= 999999) {
+      event.businessCode = code;
+    } else if (typeof code === 'string' && /^-?\d{1,6}$/.test(code)) {
+      event.businessCode = Number(code);
+    }
+    const message = String(body?.message ?? body?.msg ?? body?.error ?? '');
+    if (configurationPattern.test(message)) event.responseReason = 'configuration';
+    const error = body?.err_code ?? body?.error_code ?? body?.errcode;
+    const emptyData = body && typeof body === 'object' &&
+      (body.data === null || Array.isArray(body.resource) && body.resource.length === 0 ||
+        body.data && typeof body.data === 'object' && Object.hasOwn(body.data, 'url') && !body.data.url);
+    if (body?.success === false || body?.status === false ||
+        body?.status === 0 && error !== undefined ||
+        typeof error === 'number' && error !== 0 || emptyData) {
+      event.responseReason ??= 'upstream';
+    }
+  } catch {
+    event.bodyKind = 'non_json';
+  }
 }
 
 export async function preparePayloadRuntime(payloadPath, required, {
@@ -57,30 +85,51 @@ export async function loadAcceptanceHttp(runtimeDirectory, hasPayload) {
     ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/script-host/src/native-storage.js')).href)
     : await import('@meowfilm/script-host/storage');
   configureStandaloneStorage(createDesktopStorageDriver);
-  const [{ createAppRuntime }, { createRuntimeClient }] = await Promise.all([
+  const [{ createAppRuntime }, { contracts }] = await Promise.all([
     import(pathToFileURL(join(runtimeDirectory, 'bootstrap.mjs')).href),
-    import(pathToFileURL(join(runtimeDirectory, 'client.mjs')).href),
+    import(pathToFileURL(join(runtimeDirectory, 'contracts.mjs')).href),
   ]);
+  function createAcceptanceClient(baseUrl) {
+    const prefixes = Object.entries(contracts);
+    return {
+      async call(method, params = {}) {
+        const match = prefixes.find(([, spec]) => method.startsWith(spec.prefix));
+        if (!match) throw new Error(`Unknown method: ${method}`);
+        const [id, spec] = match;
+        const response = await fetch(`${baseUrl}/v1/${id}/${method.slice(spec.prefix.length)}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(params),
+        });
+        return response.json();
+      },
+      async upload(module, id, sourceRevision, bytes, { basename } = {}) {
+        const query = basename === undefined ? '' : `?basename=${encodeURIComponent(basename)}`;
+        const response = await fetch(
+          `${baseUrl}/v1/${module}/sources/${encodeURIComponent(id)}/${sourceRevision}${query}`,
+          { method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: bytes },
+        );
+        return response.json();
+      },
+    };
+  }
   return async function openHttp(module, { useAssemble = false } = {}) {
     const sessionId = randomUUID();
-    let runtime, client;
+    let runtime;
     try {
       runtime = createAppRuntime(useAssemble
         ? { sessionId, assemble: () => [module] }
         : { sessionId, modules: [module] });
       await runtime.start();
-      client = createRuntimeClient({ baseUrl: runtime.baseUrl });
       return {
-        client,
+        client: createAcceptanceClient(runtime.baseUrl),
         async close() {
-          const results = await Promise.allSettled([client.close(), runtime.close()]);
-          if (results.some(result => result.status === 'rejected')) {
-            throw Object.assign(new Error(), { code: 'SCRIPT_CLEANUP' });
-          }
+          try { await runtime.close(); }
+          catch { throw Object.assign(new Error(), { code: 'SCRIPT_CLEANUP' }); }
         },
       };
     } catch (error) {
-      await Promise.allSettled([client?.close(), runtime?.close()]);
+      await Promise.allSettled([runtime?.close()]);
       throw error;
     }
   };

@@ -2,7 +2,6 @@ import { isDeepStrictEqual } from 'node:util';
 import { isCandidateAllowed, isItemBlocked, isLineBlocked } from './policy.js';
 import { contentResults, matchesResult, mediaVariants, normalizeDetail, recognizeCandidates, recognizeVariantCandidates } from './recognition.js';
 import { createRecognitionRules, providerFamily, qualityKey } from './rules.js';
-import { validateBlock } from './library.js';
 import { clone, codeOf, fields, identity, isIdentifier, normalizeWorkKey, object, requireValue,
   resultDetailId, text } from './identity.js';
 import { extractMaxEpisodeFromRemark, manualIdentity } from './session-helpers.js';
@@ -262,11 +261,7 @@ export function createSessionCandidates(ctx) {
       }
     }
 
-    const blocks = library.read().blocks.filter(row => row?.targetId === session.targetId);
-    for (const row of blocks) {
-      if (!row.errorCode) validateBlock(row, 'CORRUPT_STORAGE');
-    }
-
+    const blocks = library.read().blocks.filter(row => row?.targetId === session.targetId && !row.errorCode);
     const constraint = explicit || (discoverVariants && session.constraint.action === 'quality')
       ? { action: 'default' }
       : session.constraint;
@@ -274,7 +269,6 @@ export function createSessionCandidates(ctx) {
     const sourceFilter = explicit
       ? { candidateId: candidate.id }
       : (intent.mode === 'direct' && intent.candidateId ? { candidateId: intent.candidateId } : intent.sourceFilter);
-
     if (!isCandidateAllowed(candidate, {
       targetId: session.targetId,
       kind: intent.kind ?? session.kind,

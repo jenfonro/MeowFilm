@@ -2,7 +2,7 @@ import Dispatch
 import Foundation
 import MeowContracts
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 
 final class MusicNativeFMSession {
     let source: MusicRemoteQueueSource
@@ -21,7 +21,7 @@ final class MusicNativeFMSession {
     }
 }
 
-extension NativeMusicService: MusicFMPlaybackServing {
+extension NativeMusicService {
     public func rememberedFM() async throws -> MusicHomeAction {
         let own = epoch
         let binding = try await currentHomeBinding()
@@ -46,7 +46,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
         try session.source.authorization.check()
         if enabled {
             try session.source.authorization.perform {
-                try similarQueueTransaction([.playback]) { d in
+                try transaction([.playback]) { d in
                     selectContinuationMode(&d)
                 }
             }
@@ -76,10 +76,10 @@ extension NativeMusicService: MusicFMPlaybackServing {
         emitSimilar()
     }
     func fmPreferenceScope(_ binding: MusicNativeHomeBinding) async throws -> String {
-        guard let owner = accounts as? any MusicNativeFMProviding else {
+        guard let accounts else {
             return binding.loggedIn ? "wy-fm:" + binding.scope : "wy-fm:guest"
         }
-        let scope = try await owner.nativeFMPreferenceScope(binding)
+        let scope = try await accounts.nativeFMPreferenceScope(binding)
         try musicRequire(!scope.isEmpty, .invalidResponse)
         return scope
     }
@@ -140,7 +140,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
         let context = try remoteContext(session.source)
         var live: [String: MusicRecommendationMetadata] = [:]
         let appended = try session.source.authorization.perform {
-            try similarQueueTransaction([.queue]) { d -> Bool in
+            try transaction([.queue]) { d -> Bool in
                 try musicRequire(d.queue.source?.remoteSession == session.source.id.uuidString.lowercased(), .targetChanged)
                 var seen = Set(d.queue.entries.map(\.songID))
                 let unique = tracks.filter { seen.insert($0.songID).inserted }

@@ -4,195 +4,114 @@ import MeowStorage
 enum MusicLibraryRepository {
     static func read(_ db: SQLiteConnection, scope: String) throws -> MusicLibraryState? {
         guard let state = try db.queryOne(
-            "SELECT revision,owner_id,library_revision,next_id FROM music_library_state WHERE scope=?",
-            [.text(scope)],
-            map: { c in
-                (
-                    revision: try c.integer(0),
-                    ownerID: try c.text(1),
-                    libraryRevision: try c.integer(2),
-                    nextID: try c.integer(3)
-                )
-            }
+            "SELECT revision,owner_id,library_revision,next_id FROM music_library_state WHERE scope=?", [.text(scope)],
+            map: { (revision: try $0.integer(0), ownerID: try $0.text(1), libraryRevision: try $0.integer(2), nextID: try $0.integer(3)) }
         ) else { return nil }
 
         let status = try db.queryOne(
-            "SELECT status_phase,status_at_ms,status_code FROM ios_music_library_status WHERE scope=?",
-            [.text(scope)],
-            map: { c in
-                (
-                    phase: try c.text(0),
-                    atMs: try c.int64(1),
-                    code: try c.optionalText(2)
-                )
-            }
+            "SELECT status_phase,status_at_ms,status_code FROM ios_music_library_status WHERE scope=?", [.text(scope)],
+            map: { (phase: try $0.text(0), atMs: try $0.int64(1), code: try $0.optionalText(2)) }
         )
-
         let accounts: [MusicLibraryAccountRecord] = try db.query(
-            "SELECT platform,account_id FROM music_library_accounts WHERE scope=? ORDER BY platform",
-            [.text(scope)]
-        ) { c in
-            MusicLibraryAccountRecord(platform: try c.text(0), accountID: try c.text(1))
-        }
-
+            "SELECT platform,account_id FROM music_library_accounts WHERE scope=? ORDER BY platform", [.text(scope)]
+        ) { MusicLibraryAccountRecord(platform: try $0.text(0), accountID: try $0.text(1)) }
         let statusIssues: [MusicLibraryIssueRecord] = try db.query(
-            "SELECT platform,collection_id,code FROM ios_music_library_status_issues WHERE scope=? ORDER BY position",
-            [.text(scope)]
-        ) { c in
-            MusicLibraryIssueRecord(
-                platform: try c.optionalText(0),
-                collectionID: try c.optionalText(1),
-                code: try c.text(2)
-            )
-        }
+            "SELECT platform,collection_id,code FROM ios_music_library_status_issues WHERE scope=? ORDER BY position", [.text(scope)]
+        ) { MusicLibraryIssueRecord(platform: try $0.optionalText(0), collectionID: try $0.optionalText(1), code: try $0.text(2)) }
 
         var songsByCollection: [String: [String]] = [:]
-        try db.scan(
-            "SELECT collection_id,song_id FROM music_collection_songs WHERE scope=? ORDER BY collection_id,position",
-            [.text(scope)]
-        ) { c in
+        try db.scan("SELECT collection_id,song_id FROM music_collection_songs WHERE scope=? ORDER BY collection_id,position", [.text(scope)]) { c in
             songsByCollection[try c.text(0), default: []].append(try c.text(1))
         }
 
         struct BindingKey: Hashable { let collectionID: String; let index: Int }
         var baselineByBinding: [BindingKey: [String]] = [:]
         try db.scan(
-            "SELECT collection_id,binding_index,native_id FROM music_collection_binding_baseline " +
-            "WHERE scope=? ORDER BY collection_id,binding_index,position",
+            "SELECT collection_id,binding_index,native_id FROM music_collection_binding_baseline WHERE scope=? ORDER BY collection_id,binding_index,position",
             [.text(scope)]
         ) { c in
-            let key = BindingKey(collectionID: try c.text(0), index: try c.integer(1))
-            baselineByBinding[key, default: []].append(try c.text(2))
+            baselineByBinding[BindingKey(collectionID: try c.text(0), index: try c.integer(1)), default: []].append(try c.text(2))
         }
 
         var mapByBinding: [BindingKey: [MusicCollectionBindingMapEntry]] = [:]
         try db.scan(
-            "SELECT collection_id,binding_index,remote_entry_id,song_id FROM music_collection_binding_map " +
-            "WHERE scope=? ORDER BY collection_id,binding_index,remote_entry_id",
+            "SELECT collection_id,binding_index,remote_entry_id,song_id FROM music_collection_binding_map WHERE scope=? ORDER BY collection_id,binding_index,remote_entry_id",
             [.text(scope)]
         ) { c in
-            let key = BindingKey(collectionID: try c.text(0), index: try c.integer(1))
-            mapByBinding[key, default: []].append(MusicCollectionBindingMapEntry(
-                remoteEntryID: try c.text(2),
-                songID: try c.text(3)
-            ))
+            mapByBinding[BindingKey(collectionID: try c.text(0), index: try c.integer(1)), default: []]
+                .append(MusicCollectionBindingMapEntry(remoteEntryID: try c.text(2), songID: try c.text(3)))
         }
 
         var bindingsByCollection: [String: [MusicCollectionBindingRecord]] = [:]
         try db.scan(
-            "SELECT collection_id,binding_index,platform,account_id,remote_id,writable,name " +
-            "FROM music_collection_bindings WHERE scope=? ORDER BY collection_id,binding_index",
+            "SELECT collection_id,binding_index,platform,account_id,remote_id,writable,name FROM music_collection_bindings WHERE scope=? ORDER BY collection_id,binding_index",
             [.text(scope)]
         ) { c in
-            let collectionID = try c.text(0)
-            let index = try c.integer(1)
-            let key = BindingKey(collectionID: collectionID, index: index)
+            let collectionID = try c.text(0), key = BindingKey(collectionID: collectionID, index: try c.integer(1))
             bindingsByCollection[collectionID, default: []].append(MusicCollectionBindingRecord(
-                platform: try c.text(2),
-                accountID: try c.text(3),
-                remoteID: try c.text(4),
-                writable: try c.bool(5),
-                name: try c.optionalText(6),
-                baseline: baselineByBinding[key] ?? [],
-                map: mapByBinding[key] ?? []
+                platform: try c.text(2), accountID: try c.text(3), remoteID: try c.text(4),
+                writable: try c.bool(5), name: try c.optionalText(6),
+                baseline: baselineByBinding[key] ?? [], map: mapByBinding[key] ?? []
             ))
         }
 
         struct IntentKey: Hashable { let collectionID: String; let intentKey: String }
         var acksByIntent: [IntentKey: [String]] = [:]
         try db.scan(
-            "SELECT collection_id,intent_key,ack_value FROM music_collection_intent_acks " +
-            "WHERE scope=? ORDER BY collection_id,intent_key,position",
+            "SELECT collection_id,intent_key,ack_value FROM music_collection_intent_acks WHERE scope=? ORDER BY collection_id,intent_key,position",
             [.text(scope)]
         ) { c in
-            let key = IntentKey(collectionID: try c.text(0), intentKey: try c.text(1))
-            acksByIntent[key, default: []].append(try c.text(2))
+            acksByIntent[IntentKey(collectionID: try c.text(0), intentKey: try c.text(1)), default: []].append(try c.text(2))
         }
 
         var intentsByCollection: [String: [MusicCollectionIntentRecord]] = [:]
         try db.scan(
-            "SELECT collection_id,intent_key,present,pending,origin FROM music_collection_intents " +
-            "WHERE scope=? ORDER BY collection_id,intent_key",
+            "SELECT collection_id,intent_key,present,pending,origin FROM music_collection_intents WHERE scope=? ORDER BY collection_id,intent_key",
             [.text(scope)]
         ) { c in
-            let collectionID = try c.text(0)
-            let intentKey = try c.text(1)
+            let collectionID = try c.text(0), intentKey = try c.text(1)
             intentsByCollection[collectionID, default: []].append(MusicCollectionIntentRecord(
-                intentKey: intentKey,
-                present: try c.bool(2),
-                pending: try c.bool(3),
-                origin: try c.optionalText(4),
+                intentKey: intentKey, present: try c.bool(2), pending: try c.bool(3), origin: try c.optionalText(4),
                 acknowledged: acksByIntent[IntentKey(collectionID: collectionID, intentKey: intentKey)] ?? []
             ))
         }
 
         let collections: [MusicCollectionRecord] = try db.query(
-            "SELECT collection_id,name,kind,revision,manual_order,deleted,locally_created " +
-            "FROM music_collections WHERE scope=? ORDER BY position",
+            "SELECT collection_id,name,kind,revision,manual_order,deleted,locally_created FROM music_collections WHERE scope=? ORDER BY position",
             [.text(scope)]
         ) { c in
             let cid = try c.text(0)
             return MusicCollectionRecord(
-                id: cid,
-                name: try c.text(1),
-                kind: try c.text(2),
-                order: songsByCollection[cid] ?? [],
-                revision: try c.integer(3),
-                manualOrder: try c.bool(4),
-                deleted: try c.bool(5),
-                locallyCreated: try c.bool(6),
-                bindings: bindingsByCollection[cid] ?? [],
+                id: cid, name: try c.text(1), kind: try c.text(2), order: songsByCollection[cid] ?? [],
+                revision: try c.integer(3), manualOrder: try c.bool(4), deleted: try c.bool(5),
+                locallyCreated: try c.bool(6), bindings: bindingsByCollection[cid] ?? [],
                 intents: intentsByCollection[cid] ?? []
             )
         }
 
         let networkReferences: [MusicNetworkReferenceRecord] = try db.query(
             "SELECT ref_id,platform,remote_id,name,creator,artwork,song_count,revision,present,pending," +
-            "rel_account_id,rel_baseline,rel_relation_id,rel_locator " +
-            "FROM ios_music_network_references WHERE scope=? ORDER BY position",
+            "rel_account_id,rel_baseline,rel_relation_id,rel_locator FROM ios_music_network_references WHERE scope=? ORDER BY position",
             [.text(scope)]
         ) { c in
-            let relation: MusicNetworkReferenceRelationRecord?
-            if let accountID = try c.optionalText(10) {
-                relation = MusicNetworkReferenceRelationRecord(
-                    accountID: accountID,
-                    baseline: try c.optionalBool(11) ?? false,
-                    relationID: try c.optionalText(12) ?? "",
-                    locator: try c.optionalText(13)
+            let relation = try c.optionalText(10).map { accountID in
+                MusicNetworkReferenceRelationRecord(
+                    accountID: accountID, baseline: try c.optionalBool(11) ?? false,
+                    relationID: try c.optionalText(12) ?? "", locator: try c.optionalText(13)
                 )
-            } else {
-                relation = nil
             }
             return MusicNetworkReferenceRecord(
-                id: try c.text(0),
-                platform: try c.text(1),
-                remoteID: try c.text(2),
-                name: try c.text(3),
-                creator: try c.text(4),
-                artwork: try c.text(5),
-                count: try c.integer(6),
-                revision: try c.integer(7),
-                present: try c.bool(8),
-                pending: try c.bool(9),
-                relation: relation
+                id: try c.text(0), platform: try c.text(1), remoteID: try c.text(2), name: try c.text(3),
+                creator: try c.text(4), artwork: try c.text(5), count: try c.integer(6), revision: try c.integer(7),
+                present: try c.bool(8), pending: try c.bool(9), relation: relation
             )
         }
 
-        let sync = try MusicSyncRepository.read(db, scope: scope)
-
         return MusicLibraryState(
-            revision: state.revision,
-            ownerID: state.ownerID,
-            libraryRevision: state.libraryRevision,
-            nextID: state.nextID,
-            accounts: accounts,
-            statusPhase: status?.phase ?? "idle",
-            statusAtMs: status?.atMs ?? 0,
-            statusCode: status?.code,
-            statusIssues: statusIssues,
-            collections: collections,
-            networkReferences: networkReferences,
-            sync: sync
+            revision: state.revision, ownerID: state.ownerID, libraryRevision: state.libraryRevision, nextID: state.nextID,
+            accounts: accounts, statusPhase: status?.phase ?? "idle", statusAtMs: status?.atMs ?? 0,
+            statusCode: status?.code, statusIssues: statusIssues, collections: collections,
+            networkReferences: networkReferences, sync: try MusicSyncRepository.read(db, scope: scope)
         )
     }
 

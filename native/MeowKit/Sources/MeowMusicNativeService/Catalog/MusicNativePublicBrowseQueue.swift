@@ -1,5 +1,5 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 /// Per-open-page snapshot buffer, not a service, account, document or queue owner.
 /// Native rows are released on close.
@@ -81,18 +81,14 @@ extension NativeMusicService {
         try musicRequire(!snapshot.tracks.isEmpty, .contentUnavailable)
         for (id, entry) in publicQueueSources where !entry.authorization.isActive {
             entry.authorization.revoke()
-            publicQueueSources.removeValue(forKey: id); access.remove(id)
+            publicQueueSources.removeValue(forKey: id)
             retainSimilarDrain(Task { await entry.reader.close() })
         }
-        let authorization = MusicQueueAuthorization(), fence = access
+        let authorization = MusicQueueAuthorization()
         let reader = MusicNativePublicBrowseQueueRead { [weak self] _ in
             guard let self else { throw MusicServiceError.closed }
             try await self.check(own)
             return snapshot.tracks
-        }
-        fence.register(id) {
-            authorization.revoke()
-            Task { await reader.close() }
         }
         publicQueueSources[id] = (request.collection.id, authorization, reader)
         let source = MusicRemoteQueueSource(context: .init(kind: request.collection.kind == .album ? .album : .playlist,
@@ -104,7 +100,7 @@ extension NativeMusicService {
                 guard let self else { throw MusicServiceError.closed }
                 try await self.check(own)
             }, close: { [weak self] in
-                fence.remove(id); await reader.close(); await self?.endPublicQueueSource(id)
+                await reader.close(); await self?.endPublicQueueSource(id)
             })
         _ = await bindQueueSource(source)
         do {

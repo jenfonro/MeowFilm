@@ -82,7 +82,7 @@ internal sealed class MusicSourceSession(
     internal async Task RefreshSongAsync(CancellationToken token)
     {
         RefreshSong();
-        var snapshot = await owner.Application.SongSnapshotsAsync([Song.Id], token);
+        var snapshot = await owner.Application.Library.SongSnapshotsAsync([Song.Id], token);
         token.ThrowIfCancellationRequested();
         if (snapshot.Publication > expandedPublication && snapshot.Songs.GetValueOrDefault(Song.Id) is { } value)
             AcceptSong(value, snapshot.Publication);
@@ -90,7 +90,7 @@ internal sealed class MusicSourceSession(
 
     private async Task AcceptReplyAsync(MusicSongRecord value, CancellationToken token)
     {
-        var snapshot = await owner.Application.SongSnapshotsAsync([Song.Id], token);
+        var snapshot = await owner.Application.Library.SongSnapshotsAsync([Song.Id], token);
         token.ThrowIfCancellationRequested();
         AcceptSong(snapshot.Songs.GetValueOrDefault(Song.Id) ?? value, snapshot.Publication);
     }
@@ -106,16 +106,16 @@ internal sealed class MusicSourceSession(
         if (scriptsLoaded) return;
         try
         {
-            var list = await owner.Application.ListSourcesAsync(token);
+            var list = await owner.Application.Scripts.ListSourcesAsync(token);
             Scripts = list.Items.Where(item => item.Enabled)
                 .Select(item => new SourceScript(item.InstallationId, item.Name, item.Sites)).ToArray();
             scriptsLoaded = true;
         }
-        catch (MusicOperationException error) when (MusicPlaybackController.UnavailableSourceCandidate(error.Code))
+        catch (Exception error) when (MusicRuntimeContext.ErrorCode(error) is { } code && MusicPlaybackController.UnavailableSourceCandidate(code))
         {
             DebugLog.Warn(DebugCategories.MusicPlayback, "source-session", "scripts-unavailable",
-                new { songId = Song.Id, code = error.Code });
-            Failure ??= error.Code;
+                new { songId = Song.Id, code });
+            Failure ??= code;
             scriptsLoaded = true;
         }
     }
@@ -193,7 +193,7 @@ internal sealed class MusicSourceSession(
     {
         long revision = owner.ExclusionsRevision;
         if (revision == exclusionsRevision) return;
-        var list = await owner.Application.ListSourceExclusionsAsync(songId: Song.Id, ct: token);
+        var list = await owner.Application.Library.ListSourceExclusionsAsync(songId: Song.Id, cancellationToken: token);
         var next = list.Items.Select(item => new SourceExclusion(item.Provider, item.Platform)).ToHashSet();
         bool restored = exclusions.Except(next).Any();
         exclusions = next;
@@ -339,12 +339,12 @@ internal sealed class MusicSourceSession(
                 });
             return accepted ? media : null;
         }
-        catch (MusicOperationException error) when (error.Code == "CACHE_MISS" && (cacheOnly || urlCacheOnly))
+        catch (Exception error) when (MusicRuntimeContext.ErrorCode(error) == "CACHE_MISS" && (cacheOnly || urlCacheOnly))
         { if (attempt.State == SourceAttemptState.Pending && known is null) Attempts.Remove(key); return null; }
-        catch (MusicOperationException error) when (MusicPlaybackController.UnavailableSourceCandidate(error.Code))
+        catch (Exception error) when (MusicRuntimeContext.ErrorCode(error) is { } code && MusicPlaybackController.UnavailableSourceCandidate(code))
         {
-            Reject(target, error.Code);
-            Failure ??= error.Code;
+            Reject(target, code);
+            Failure ??= code;
             return null;
         }
     }
@@ -386,7 +386,7 @@ internal sealed class MusicSourceSession(
                 }
             }
             catch (OperationCanceledException) when (!token.IsCancellationRequested && stop.IsCancellationRequested) { }
-            catch (MusicOperationException error) when (error.Code == "CANCELLED" &&
+            catch (Exception error) when (MusicRuntimeContext.ErrorCode(error) == "CANCELLED" &&
                 !token.IsCancellationRequested && stop.IsCancellationRequested) { }
             catch (Exception error) when (!token.IsCancellationRequested)
             {
@@ -505,10 +505,10 @@ internal sealed class MusicSourceSession(
     internal async Task<ResolvedMusic> RefreshAsync(MusicOnlineTarget target, CancellationToken token)
     {
         try { return await RefreshTargetAsync(target, token); }
-        catch (MusicOperationException error) when (MusicPlaybackController.UnavailableSourceCandidate(error.Code))
+        catch (Exception error) when (MusicRuntimeContext.ErrorCode(error) is { } code && MusicPlaybackController.UnavailableSourceCandidate(code))
         {
-            Reject(target, error.Code);
-            Failure ??= error.Code;
+            Reject(target, code);
+            Failure ??= code;
             throw;
         }
     }

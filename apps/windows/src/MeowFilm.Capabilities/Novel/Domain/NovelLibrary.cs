@@ -20,7 +20,6 @@ public sealed class NovelLibrary(IStorageDatabase database)
     {
         "installationId", "revision", "bookUrl", "name", "author", "coverUrl", "intro", "tocUrl", "latestChapterTitle"
     };
-    private sealed record State(NovelEntry[] Entries, NovelAppearance Appearance, NovelRule[] Rules);
     private NovelEntry[]? entries;
     private NovelAppearance? appearance;
     private NovelAppearance? readingAppearance;
@@ -55,23 +54,13 @@ public sealed class NovelLibrary(IStorageDatabase database)
     private async Task LoadAsync(CancellationToken token)
     {
         if (initialized) return;
-        var loaded = await database.ReadSnapshotAsync(db =>
-        {
-            var (loadedRecords, loadedAppearance, loadedRules) = NovelLibraryStore.LoadAll(db);
-            var loadedEntries = loadedRecords.Select(FromRecord).ToArray();
-            foreach (var entry in loadedEntries) Validate(entry, stored: true);
-            if (loadedEntries.Select(e => e.BookId).Distinct(StringComparer.Ordinal).Count() != loadedEntries.Length)
-                throw Corrupt();
-            ValidateAppearance(loadedAppearance, stored: true);
-            ValidateRules(loadedRules, stored: true);
-            return new State(loadedEntries, loadedAppearance, loadedRules);
-        }, token);
-        entries = loaded.Entries; appearance = loaded.Appearance; readingAppearance = null; rules = loaded.Rules; rulesRevision++;
+        var (loadedRecords, loadedAppearance, loadedRules) = await database.ReadSnapshotAsync(NovelLibraryStore.LoadAll, token);
+        entries = loadedRecords.Select(FromRecord).ToArray();
+        appearance = loadedAppearance; readingAppearance = null; rules = loadedRules; rulesRevision++;
         initialized = true;
     }
 
-    private static StorageException Corrupt() => new(StorageError.Corrupt);
-    private static void Validate(NovelEntry entry, bool stored = false)
+    private static void Validate(NovelEntry entry)
     {
         bool validAnchor = (entry.Anchor is null) == (entry.ReadAt is null) &&
             (entry.Anchor is null ||
@@ -84,9 +73,9 @@ public sealed class NovelLibrary(IStorageDatabase database)
             book.Name is not null && book.Author is not null && book.CoverUrl is not null && book.Intro is not null &&
             book.TocUrl is not null && book.LatestChapterTitle is not null && entry.ContentSignature is not null && entry.ChapterCount >= 0 &&
             validAnchor;
-        if (!valid) throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
+        if (!valid) throw new StorageException(StorageError.InvalidRequest);
     }
-    private static void ValidateAppearance(NovelAppearance value, bool stored = false)
+    private static void ValidateAppearance(NovelAppearance value)
     {
         bool valid = value is not null &&
             value.Mode is "cover" or "slide" or "none" or "scroll" &&
@@ -102,14 +91,14 @@ public sealed class NovelLibrary(IStorageDatabase database)
             NovelAppearance.TryParseColor(value.Background, out _, out _, out _, out _) &&
             value.BackgroundImage is not null &&
             double.IsFinite(value.AutoSpeed) && value.AutoSpeed is >= 1 and <= 10;
-        if (!valid) throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
+        if (!valid) throw new StorageException(StorageError.InvalidRequest);
     }
-    private static void ValidateRules(IReadOnlyList<NovelRule> rules, bool stored = false)
+    private static void ValidateRules(IReadOnlyList<NovelRule> rules)
     {
         if (rules.Any(r => string.IsNullOrEmpty(r.Id) || r.Name is null || r.Group is null || string.IsNullOrEmpty(r.Pattern) ||
             r.Replacement is null || r.Scope is null || r.ExcludeScope is null || r.TimeoutMillisecond <= 0) ||
             rules.Select(r => r.Id).Distinct(StringComparer.Ordinal).Count() != rules.Count)
-            throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
+            throw new StorageException(StorageError.InvalidRequest);
     }
 
     private static NovelEntry FromRecord(NovelEntryRecord record)
@@ -189,7 +178,6 @@ public sealed class NovelLibrary(IStorageDatabase database)
             {
                 NovelEntryRecord? currentRecord = NovelLibraryStore.FindEntry(db, id);
                 NovelEntry? current = currentRecord is null ? null : FromRecord(currentRecord);
-                if (current is not null) Validate(current, stored: true);
                 var next = edit(current);
                 if (next is not null)
                 {
@@ -209,7 +197,6 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 }
                 var (savedRecord, removedIds) = NovelLibraryStore.UpsertEntry(db, nextRecord);
                 var savedEntry = FromRecord(savedRecord);
-                Validate(savedEntry);
                 db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 return (Changed: true, Entry: savedEntry, RemovedIds: removedIds);
             }, ct);
@@ -295,7 +282,6 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 foreach (var previousRecord in previousRecords)
                 {
                     var current = FromRecord(previousRecord);
-                    Validate(current, stored: true);
                     if (current.ReadAt is null)
                     {
                         updated.Add(current);

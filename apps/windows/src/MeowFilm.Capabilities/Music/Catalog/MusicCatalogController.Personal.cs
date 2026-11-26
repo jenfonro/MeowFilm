@@ -112,9 +112,9 @@ public sealed partial class MusicCatalogController
     internal void RequireCatalogContent()
     {
         if (IsCatalogHome) return;
-        if (contentState.IsSearchPage)
+        if (search.IsSearchPage)
         {
-            if (contentState.SearchAccountEpoch != accounts.AccountEpoch || !contentState.HasSearchSession)
+            if (search.SearchAccountEpoch != accounts.AccountEpoch || !search.HasSearchSession)
                 throw new MusicOperationException("STALE_SESSION");
             return;
         }
@@ -411,7 +411,7 @@ public sealed partial class MusicCatalogController
         dailyStyleBusy = true; DailyStyleBindings();
         try
         {
-            var editor = await application.OpenDailyStyleEditorAsync(lifetime.Token);
+            var editor = await application.Catalog.OpenDailyStyleEditorAsync(lifetime.Token);
             if (revision != dailyStyleRevision || !IsDailyStyle || account != CatalogAccountKey("wy")) return;
             bool wasOpen = IsDailyStyleEditorOpen;
             dailyStyleEditor = editor; dailyStyleAccount = account; dailyStyleCategory = dailyStyleSelectedCategory;
@@ -446,7 +446,7 @@ public sealed partial class MusicCatalogController
     {
         catalogPages.Clear();
         catalogMembersLoaded = false;
-        contentState.CatalogSongsSource.Clear();
+        CatalogSongsSource.Clear();
         utilitySections.Clear();
     }
 
@@ -463,8 +463,6 @@ public sealed partial class MusicCatalogController
         if (!CanConfirmDailyStyle || dailyStyleEditor is not { } editor) return;
         if (dailyStyleAccount != CatalogAccountKey("wy")) { RetireDailyStyleEditor(); return; }
         string saveAccount = dailyStyleAccount;
-        string receiptKey = "music.platform.dailyStyle:wy:" + editor.UserId;
-        long submission = ctx.Receipts.NextSubmission();
         long generation = ctx.LoadGeneration;
         bool CanPublishSave() => !stopping && generation == ctx.LoadGeneration && IsDailyStyle && saveAccount == CatalogAccountKey("wy");
         void SettleSavePage()
@@ -474,7 +472,7 @@ public sealed partial class MusicCatalogController
             catalogAccountStamp = "";
             ClearCurrentDailyPageState();
             dailyStyleNeedsRead = true;
-            contentState.ClearSelectionOnly();
+            ClearCatalogSelection();
             ctx.RefreshBindings();
         }
         var previousPage = catalogPages.GetValueOrDefault(catalogPage);
@@ -486,15 +484,13 @@ public sealed partial class MusicCatalogController
         {
             RetireCatalogLoad();
             generation = ctx.LoadGeneration;
-            catalogActions.Invalidate();
+            InvalidateCatalogAction();
             RetireSavedDailyStyleSnapshots(saveAccount);
             catalogAccountStamp = "";
             ClearCurrentDailyPageState();
-            contentState.ClearSelectionOnly();
+            ClearCatalogSelection();
             ctx.RefreshBindings();
-            var result = await application.SaveDailyStyleAsync(editor, selection, lifetime.Token);
-            if (result.Status is MusicDailyStyleWriteStatus.Confirmed or MusicDailyStyleWriteStatus.Unknown)
-                ctx.Receipts.Record(receiptKey, "风格偏好", submission, result.Status == MusicDailyStyleWriteStatus.Confirmed);
+            var result = await application.Catalog.SaveDailyStyleAsync(editor, selection, lifetime.Token);
             SettleSavePage();
             if (!CanPublishSave()) return;
             if (result.Readback is null && result.Status is (MusicDailyStyleWriteStatus.NotSent or MusicDailyStyleWriteStatus.Rejected) && previousPage is not null)
@@ -515,7 +511,7 @@ public sealed partial class MusicCatalogController
             {
                 catalogAccountStamp = "";
                 ClearCurrentDailyPageState();
-                contentState.ClearSelectionOnly();
+                ClearCatalogSelection();
                 ctx.RefreshBindings();
             }
             dailyStyleNeedsRead = result.Status == MusicDailyStyleWriteStatus.Unknown ||
@@ -525,8 +521,6 @@ public sealed partial class MusicCatalogController
         }
         catch (Exception error)
         {
-            if (error is MusicPlatformException { Code: "COMMIT_UNKNOWN" })
-                ctx.Receipts.Record(receiptKey, "风格偏好", submission, confirmed: false);
             SettleSavePage();
             if (CanPublishSave()) { dailyStyleNeedsRead = true; ctx.SetStatus(DailyStyleError(error)); }
         }
@@ -535,4 +529,161 @@ public sealed partial class MusicCatalogController
 
     private static string DailyStyleError(Exception error) => error is MusicPlatformException platform
         ? MusicCatalogDto.ErrorText(platform.Code) : ErrorText(error);
+
+    private MusicVipPageSnapshot? vipSnapshot;
+    private CancellationTokenSource? vipReadCancellation;
+    private Task vipWork = Task.CompletedTask;
+    private long vipEpoch;
+    private bool vipSigning, vipInvalidated = true;
+
+    public MusicVipAccountSummary? VipAccount => IsVipChannel ? vipSnapshot?.Account : null;
+    public MusicVipSignCardData? VipSign => IsVipChannel ? vipSnapshot?.Sign : null;
+    public MusicVipBannerData? VipBanner => IsVipChannel ? vipSnapshot?.Banner : null;
+    public bool ShowVipAccount => VipAccount is not null;
+    public bool ShowVipSign => VipSign is not null;
+    public bool ShowVipBanner => VipBanner is not null && !string.IsNullOrWhiteSpace(VipBanner.ImageUrl);
+    public bool HasVipCards => ShowVipAccount || ShowVipSign || ShowVipBanner;
+    public string VipSignButtonText => vipSnapshot is null ? "" : vipSigning ? "打卡中" : vipSnapshot.SignedToday ? "已打卡" :
+        VipSign?.ButtonText is { Length: > 0 } text ? text : "打卡";
+    public bool ShowVipSignButton => ShowVipSign && VipSignButtonText.Length > 0;
+    public bool CanSignVip => !stopping && ShowVipSign && !vipSigning && vipSnapshot is { SignedToday: false, Generation: > 0 };
+    public bool CanOpenVipBanner => !stopping && CanCatalogBrowse && VipBanner is { ResourceType: "SONG" or "PLAYLIST", ResourceId.Length: > 0 };
+
+    internal void VipPageBindings()
+    {
+        foreach (var name in new[]
+        {
+            nameof(HasVipCards), nameof(ShowVipAccount), nameof(VipAccount),
+            nameof(ShowVipSign), nameof(VipSign), nameof(VipSignButtonText),
+            nameof(ShowVipSignButton), nameof(CanSignVip),
+            nameof(ShowVipBanner), nameof(VipBanner), nameof(CanOpenVipBanner)
+        })
+            Changed(name);
+    }
+
+    private void OnVipPageInvalidated()
+    {
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (stopping || disposed) return;
+            vipInvalidated = true;
+            ClearVipDisplay();
+            _ = SyncVipSurfaceAsync();
+        });
+    }
+
+    internal void ClearVipDisplay()
+    {
+        vipEpoch++;
+        vipReadCancellation?.Cancel();
+        vipSnapshot = null;
+        vipInvalidated = true;
+        VipPageBindings();
+    }
+
+    internal void PrepareVipShutdown()
+    {
+        catalogViewVisible = false;
+        vipEpoch++;
+        vipReadCancellation?.Cancel();
+    }
+
+    internal Task DrainVipAsync() => vipWork;
+
+    internal Task UpdateVipPageAsync(bool viewVisible)
+    {
+        catalogViewVisible = viewVisible;
+        if (!viewVisible)
+        {
+            vipEpoch++;
+            vipReadCancellation?.Cancel();
+            return Task.CompletedTask;
+        }
+        return SyncVipSurfaceAsync();
+    }
+
+    private Task SyncVipSurfaceAsync()
+    {
+        if (stopping || disposed || !catalogViewVisible || !IsVipChannel)
+        {
+            if (!IsVipChannel && vipSnapshot is not null) ClearVipDisplay();
+            return Task.CompletedTask;
+        }
+        if (!vipInvalidated && vipSnapshot is not null || vipReadCancellation is not null) return vipWork;
+        var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        vipReadCancellation = request;
+        vipInvalidated = false;
+        long epoch = vipEpoch;
+        return vipWork = ReadVipCoreAsync(request, epoch);
+    }
+
+    private async Task ReadVipCoreAsync(CancellationTokenSource request, long epoch)
+    {
+        try
+        {
+            var snapshot = await application.VipPage.ReadVipPageAsync(request.Token);
+            if (epoch == vipEpoch && catalogViewVisible && IsVipChannel && !stopping && !disposed)
+            {
+                vipSnapshot = snapshot;
+                VipPageBindings();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (epoch == vipEpoch) vipInvalidated = true;
+        }
+        catch
+        {
+            if (epoch == vipEpoch) vipInvalidated = true;
+        }
+        finally
+        {
+            if (ReferenceEquals(vipReadCancellation, request)) vipReadCancellation = null;
+            request.Dispose();
+        }
+    }
+
+    public async Task SignVipPageAsync()
+    {
+        if (!CanSignVip || vipSnapshot is not { } snap) return;
+        long expectedGen = snap.Generation;
+        long epoch = vipEpoch;
+        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        loadDrains.Add(drained.Task);
+        vipSigning = true;
+        VipPageBindings();
+        try
+        {
+            var receipt = await application.VipPage.SignVipPageAsync(expectedGen, lifetime.Token);
+            if (epoch == vipEpoch && vipSnapshot?.Generation == receipt.Generation)
+                vipSnapshot = vipSnapshot with { Sign = receipt.RefreshedSign ?? vipSnapshot.Sign, SignConfirmed = true };
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (!stopping && !disposed) ctx.SetStatus(ErrorText(error));
+        }
+        finally
+        {
+            loadDrains.Remove(drained.Task);
+            drained.TrySetResult();
+            vipSigning = false;
+            if (!disposed) VipPageBindings();
+        }
+    }
+
+    public Task OpenVipBannerAsync()
+    {
+        if (!CanOpenVipBanner || VipBanner is not { } current || vipSnapshot is not { } snap) return Task.CompletedTask;
+        long gen = snap.Generation;
+        if (current.ResourceType == "SONG")
+            return PlayCatalogSongAsync("wy", current.ResourceId,
+                () => IsVipChannel && vipSnapshot?.Generation == gen && ReferenceEquals(VipBanner, current));
+        if (current.ResourceType == "PLAYLIST")
+            return OpenCatalogTargetAsync(
+                MusicCatalogDispatcher.Target("playlist", "wy", "歌单", new(Id: current.ResourceId)) with { Artwork = current.ImageUrl },
+                current.ResourceId);
+        return Task.CompletedTask;
+    }
 }

@@ -2,7 +2,6 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    // Installed by the existing coordinator; called only after the local CAS has left the owner gate.
     internal Func<string, CancellationToken, Task<MusicNetworkPlaylistSyncStatus>>? SynchronizeNetworkPlaylists { get; set; }
 
     internal static string NetworkPlaylistId(string platform, string remoteId)
@@ -23,33 +22,6 @@ public sealed partial class MusicLibraryOwner
             checked(library.LibraryRevision + 1),
             true,
             null, null, null, null, null, null, null);
-
-    private static void ValidateNetworkPlaylists(MusicLibraryAreaRecord library)
-    {
-        var ids = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var reference in library.NetworkPlaylists)
-        {
-            MusicRules.Require(reference.Platform.Length > 0 && reference.RemoteId.Length > 0 &&
-                reference.Name.Length > 0 && reference.Revision is >= 0 and <= MusicRules.MaxInteger &&
-                reference.SongCount is >= 0 and <= int.MaxValue);
-            MusicRules.Require(reference.PlaylistId == NetworkPlaylistId(reference.Platform, reference.RemoteId) &&
-                ids.Add(reference.PlaylistId));
-            MusicRules.Require(reference.Cover == NativeMusicSong.PublicUrl(reference.Cover));
-            if (reference.SubAccountId is not null || reference.SubPresent is not null)
-            {
-                MusicRules.Require(reference.SubAccountId is { Length: > 0 } && reference.SubPresent is not null &&
-                    SyncPlatforms.Contains(reference.Platform) &&
-                    library.Accounts.TryGetValue(reference.Platform, out var acc) && acc == reference.SubAccountId);
-            }
-            if (reference.IntentAccountId is not null || reference.IntentPresent is not null)
-            {
-                MusicRules.Require(reference.IntentAccountId is { Length: > 0 } && reference.IntentPresent is { } intentPresent &&
-                    SyncPlatforms.Contains(reference.Platform) && intentPresent == reference.Present);
-                string account = library.Accounts.TryGetValue(reference.Platform, out var acc) ? acc : "";
-                MusicRules.Require(account.Length == 0 || account == reference.IntentAccountId);
-            }
-        }
-    }
 
     public Task<MusicNetworkPlaylistMutationResult> SaveNetworkPlaylistAsync(string platform, string id, string name,
         string? cover = null, long? count = null, CancellationToken cancellationToken = default) =>
@@ -143,7 +115,7 @@ public sealed partial class MusicLibraryOwner
         Func<MusicLibrarySession, ((MusicNetworkPlaylistRecord Selected, bool Synchronize) Result, bool Mutate)> write,
         CancellationToken token)
     {
-        var (selected, synchronize) = await RunLibraryWriteAsync(PendingOwner.NetworkPlaylists, write, token).ConfigureAwait(false);
+        var (selected, synchronize) = await RunLibraryWriteAsync(write, token, notifyCollections: true).ConfigureAwait(false);
         var sync = new MusicNetworkPlaylistSyncStatus(true, State: "local-only");
         if (synchronize)
         {

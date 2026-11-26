@@ -100,7 +100,7 @@ public sealed class MusicFeedbackController : IAsyncDisposable
             ObserveLocked(position, duration, true, rate, mode);
             if (!started) startedAt = clock.GetUtcNow();
             started = true; BeginEligibleLocked();
-            if (!settings.IsConfirmed && !loading)
+            if (!settings.IsLoaded && !loading)
             {
                 loading = true;
                 QueueLocked(async () =>
@@ -158,7 +158,7 @@ public sealed class MusicFeedbackController : IAsyncDisposable
     }
 
     private bool Authorized(Target target) => !target.Cancelled &&
-        (settings.IsEnabled(target.Platform) || target.Platform == "wy" && settings.PreservesWyConsent) &&
+        settings.IsEnabled(target.Platform) &&
         (target.Account is null || accounts.IsCurrent(target.Account));
 
     private static bool ValidSample(double position, double duration, double rate) =>
@@ -167,7 +167,7 @@ public sealed class MusicFeedbackController : IAsyncDisposable
 
     private void BeginEligibleLocked()
     {
-        if (!started || !running || closed || preparing || selection is null || !settings.IsConfirmed ||
+        if (!started || !running || closed || preparing || selection is null || !settings.IsLoaded ||
             !ValidSample(position, duration, rate)) return;
         foreach (string platform in Platforms)
         {
@@ -300,8 +300,7 @@ public sealed class MusicFeedbackController : IAsyncDisposable
         protocol.AuthorizationChanged(accountChanged: false);
         lock (sync)
         {
-            foreach (var target in targets.Where(t => !settings.IsEnabled(t.Platform) &&
-                !(t.Platform == "wy" && settings.PreservesWyConsent)).ToArray())
+            foreach (var target in targets.Where(t => !settings.IsEnabled(t.Platform)).ToArray())
             { active.Remove(target.Platform); CancelLocked(target); }
             foreach (string platform in Platforms.Where(settings.IsEnabled))
                 if (!active.ContainsKey(platform)) attempted.Remove(platform);
@@ -367,8 +366,6 @@ public sealed class MusicFeedbackController : IAsyncDisposable
         await protocol.FlushLocalAsync().WaitAsync(token).ConfigureAwait(false);
         if (protocol.LastError == "FEEDBACK_STORAGE_FAILED")
             throw new MusicFeedbackException("FEEDBACK_STORAGE_FAILED");
-        // Unknown local preference save is not a successful shutdown preparation.
-        if (settings.RequiresReconciliation) throw new MusicFeedbackException("COMMIT_UNKNOWN");
         lock (sync) if (releaseFaulted) throw new MusicFeedbackException("FEEDBACK_RELEASE_FAILED");
     }
     public async Task DrainAsync(CancellationToken token = default)

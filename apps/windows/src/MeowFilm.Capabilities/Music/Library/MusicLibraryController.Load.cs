@@ -56,7 +56,7 @@ public sealed partial class MusicLibraryController
                 case "search":
                 {
                     title = "曲库搜索";
-                    var reply = await application.SearchLibraryAsync(target.Query, target.Offset, 100, token);
+                    var reply = await application.Library.SearchLibraryAsync(target.Query, target.Offset, 100, token);
                     rows = reply.Items.Select(item => SongRow.FromRecord(item)).ToArray();
                     count = reply.Total;
                     break;
@@ -69,7 +69,7 @@ public sealed partial class MusicLibraryController
                     target = target with { Date = dates.Contains(target.Date) ? target.Date : dates.FirstOrDefault() };
                     if (target.Date is not null)
                     {
-                        var reply = await application.GetHistoryDayDetailAsync(target.Date, target.Offset, 100, token);
+                        var reply = await application.Library.GetHistoryDayDetailAsync(target.Date, target.Offset, 100, token);
                         rows = reply.Items.Select(item => SongRow.FromRecord(item.Song)).ToArray();
                         count = reply.Total;
                     }
@@ -86,7 +86,7 @@ public sealed partial class MusicLibraryController
                 {
                     target = target with { Offset = 0 };
                     var id = target.Route == "favorites" ? "favorites" : target.Route[9..];
-                    var reply = await application.GetCollectionDetailAsync(id, 0, 100, token);
+                    var reply = await application.Library.GetCollectionDetailAsync(id, 0, 100, token);
                     detail = PlaylistRow.FromSummary(reply.Collection);
                     title = detail.Name; count = reply.Total;
                     rows = reply.Songs.Select(item => SongRow.FromRecord(item)).ToArray();
@@ -138,7 +138,7 @@ public sealed partial class MusicLibraryController
         var rows = new List<MusicHistoryDaySummary>();
         while (true)
         {
-            var reply = await application.ListHistoryDaysAsync(rows.Count, 100, token);
+            var reply = await application.Library.ListHistoryDaysAsync(rows.Count, 100, token);
             rows.AddRange(reply.Items);
             if (rows.Count >= reply.Total || reply.Items.Length == 0) return rows.ToArray();
         }
@@ -149,7 +149,7 @@ public sealed partial class MusicLibraryController
         var rows = new List<MusicHistoryPlaylistSummary>();
         while (true)
         {
-            var reply = await application.ListHistoryPlaylistsAsync(rows.Count, 100, token);
+            var reply = await application.Library.ListHistoryPlaylistsAsync(rows.Count, 100, token);
             rows.AddRange(reply.Items);
             if (rows.Count >= reply.Total || reply.Items.Length == 0) return rows.ToArray();
         }

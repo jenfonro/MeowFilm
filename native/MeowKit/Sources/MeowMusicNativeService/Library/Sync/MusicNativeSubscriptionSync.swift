@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 extension NativeMusicService {
     func syncMergeSubscriptions(_ round: inout MusicNativeSyncRound) throws {

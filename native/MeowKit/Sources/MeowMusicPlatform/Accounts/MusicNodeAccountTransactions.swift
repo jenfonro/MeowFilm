@@ -1,5 +1,4 @@
 import Foundation
-import MeowMusicFeature
 import MeowRuntime
 
 extension MusicNodeAccountProvider {
@@ -129,7 +128,7 @@ extension MusicNodeAccountProvider {
                                                createdName: value[music: "createdName"] == .null ? nil : value[music: "createdName"].musicText)
         case "notSent": return .notDispatched(MusicPlatformClient.error(RuntimeHTTPError.remote(value[music: "errorCode"].musicText)))
         case "rejected": return .rejected(MusicPlatformClient.error(RuntimeHTTPError.remote(value[music: "errorCode"].musicText)))
-        default: throw MusicServiceError.commitUnconfirmed
+        default: throw MusicServiceError.upstreamFailed
         }
     }
 }
@@ -142,9 +141,9 @@ extension MusicNodeAccountProvider {
     func releaseFeedback(_ session: MusicAccountFeedbackNativeSession) async {
         _ = try? await call("feedback.release", ["sessionId": .string(session.id)])
     }
-    func feedback(_ report: MusicPlaybackFeedbackReport, session: MusicAccountFeedbackNativeSession?,
-                  guard authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicAccountFeedbackNativeResult {
-        try await authorization.check()
+    func feedback(_ report: MusicPlaybackFeedbackReport,
+                  session: MusicAccountFeedbackNativeSession?) async throws -> MusicAccountFeedbackNativeResult {
+        try Task.checkCancellation()
         let target = report.target
         var fields: RuntimeObject = ["event": .string(report.event == .start ? "start" : "end"),
             "duration": .number(report.duration), "listened": .number(report.listened), "mediaListened": .number(report.mediaListened),
@@ -155,7 +154,7 @@ extension MusicNodeAccountProvider {
                 "mixsongId": target.mixsongID.map(RuntimeValue.string) ?? .null,
                 "automatic": .bool(target.automatic), "origin": .object(["kind": .string(target.origin?.kind.rawValue ?? "")])])]
         if let session { fields["sessionId"] = .string(session.id) }
-        let value = try await call("feedback.send", fields, authorize: { try authorization.checkLocal() })
+        let value = try await call("feedback.send", fields)
         let receipt: MusicPlaybackFeedbackReceipt
         switch value[music: "status"].musicText {
         case "confirmed": receipt = .confirmed
@@ -167,10 +166,10 @@ extension MusicNodeAccountProvider {
         return .init(receipt: receipt, session: value[music: "sessionId"] == .null ? nil :
             .init(id: try value[music: "sessionId"].musicRequiredText()))
     }
-    func uploadPlaybackLog(_ events: Data, authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackReceipt {
-        try await authorization.check()
+    func uploadPlaybackLog(_ events: Data, authorization: MusicQueueAuthorization) async throws -> MusicPlaybackFeedbackReceipt {
+        try authorization.check()
         let value = try await call("feedback.upload", ["events": .array([try RuntimeJSON.decode(events)])],
-                                   authorize: { try authorization.checkLocal() })
+                                   authorize: { try authorization.check() })
         if value[music: "status"] == .string("notSent") { try feedbackNotSent(value) }
         if value[music: "status"] == .string("rejected") {
             throw MusicPlatformClient.error(RuntimeHTTPError.remote(value[music: "errorCode"].musicText))

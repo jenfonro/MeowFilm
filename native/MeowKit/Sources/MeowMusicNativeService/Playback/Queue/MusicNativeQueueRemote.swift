@@ -1,6 +1,6 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 
 final class MusicAccountQueueOpening: @unchecked Sendable {
     private let lock = NSLock()
@@ -18,7 +18,7 @@ final class MusicAccountQueueOpening: @unchecked Sendable {
     }
 }
 
-extension NativeMusicService: MusicRemoteQueueServing {
+extension NativeMusicService {
     public func openAccountQueue(platform: MusicAccountPlatform, kind: MusicAccountQueueKind,
                                  title: String) async throws -> MusicRemoteQueueSource {
         try check(); try requirePlatform(platform.rawValue)
@@ -26,7 +26,7 @@ extension NativeMusicService: MusicRemoteQueueServing {
             let action = try await rememberedFM()
             return try await openHomeActionQueue(action, title: title)
         }
-        guard let owner = accounts as? any MusicNativeAccountQueueProviding else { throw MusicServiceError.unavailable }
+        guard let accounts else { throw MusicServiceError.unavailable }
         let context: MusicRemoteQueueContext
         switch kind {
         case .collection(let id):
@@ -37,9 +37,9 @@ extension NativeMusicService: MusicRemoteQueueServing {
         let opening = MusicAccountQueueOpening(), own = epoch
         do {
             let lease = try await work {
-                let value = try await owner.beginAccountQueue(platform: platform)
+                let value = try await accounts.beginAccountQueue(platform: platform)
                 guard opening.receive(value) else {
-                    value.revoke(); await owner.endAccountQueue(value); throw MusicServiceError.cancelled
+                    value.revoke(); await accounts.endAccountQueue(value); throw MusicServiceError.cancelled
                 }
                 if Task.isCancelled { throw MusicServiceError.cancelled }
                 return value
@@ -48,19 +48,19 @@ extension NativeMusicService: MusicRemoteQueueServing {
             try musicRequire(lease.platform == platform, .targetChanged)
             let source = MusicRemoteQueueSource(context: context, authorization: lease.authorization, loadPage: { cursor in
                 try lease.authorization.check()
-                let page = try await owner.accountQueuePage(lease, kind: kind, cursor: cursor)
+                let page = try await accounts.accountQueuePage(lease, kind: kind, cursor: cursor)
                 try lease.authorization.check()
                 return page
             }, validate: {
-                try lease.authorization.check(); try await owner.checkAccountQueue(lease); try lease.authorization.check()
-            }, close: { await owner.endAccountQueue(lease) },
+                try lease.authorization.check(); try await accounts.checkAccountQueue(lease); try lease.authorization.check()
+            }, close: { await accounts.endAccountQueue(lease) },
                 homeAction: platform == .netease && kind == .recommendation(kind: "daily") ? .daily(branch: .default) : nil)
             _ = await bindQueueSource(source)
             try check(own); try lease.authorization.check()
             _ = opening.finish()
             return source
         } catch {
-            if let lease = opening.finish() { lease.revoke(); await owner.endAccountQueue(lease) }
+            if let lease = opening.finish() { lease.revoke(); await accounts.endAccountQueue(lease) }
             throw error
         }
     }
@@ -128,7 +128,7 @@ extension NativeMusicService: MusicRemoteQueueServing {
         var live: [String: MusicRecommendationMetadata] = [:]
         let result = try source.authorization.perform {
             try intent.perform {
-                try similarQueueTransaction([.queue, .playback, .history]) { d in
+                try transaction([.queue, .playback, .history]) { d in
                     try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
                     if source.context.kind == .fm && !hadActiveFM {
                         try musicRequire(similarMode.modeSelection == modeSelection, .targetChanged)

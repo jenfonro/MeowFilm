@@ -2,7 +2,6 @@ import Foundation
 import CoreImage
 import MeowAccounts
 import MeowDebug
-import MeowMusicFeature
 import MeowRuntime
 
 /// Borrows the one platform module; the native coordinator owns every durable
@@ -23,37 +22,37 @@ actor MusicNodeAccountProvider {
         try await client.request(platform: platform.rawValue, operation: operation, parameters: parameters,
                                  candidate: candidate, authorize: authorize)
     }
+    private func candidateObject(_ credential: AccountCredential) -> RuntimeObject {
+        ["platform": .string(credential.siteKey), "userId": .string(credential.userID), "cookie": .string(credential.cookie)]
+    }
     func publish(_ credential: AccountCredential, scope: String, generation: Int,
                  authorization: MusicQueueAuthorization) async throws {
-        var fields = try MusicAccountCredential.read(credential)
-        guard case .object(var value) = fields else { throw MusicServiceError.invalidResponse }
+        var value = candidateObject(credential)
         value["scope"] = .string(scope); value["generation"] = .number(Double(generation))
-        fields = .object(value)
-        try await client.publish(platform: platform.rawValue, session: fields,
+        try await client.publish(platform: platform.rawValue, session: .object(value),
                                  authorize: { try authorization.check() })
         revokePublicationFailed = false
     }
-    func nativeID(_ credential: AccountCredential) throws -> String {
-        try MusicAccountCredential.read(credential)[music: "userId"].musicRequiredText()
+    func nativeID(_ credential: AccountCredential) -> String {
+        credential.userID
     }
     private func verified(_ value: RuntimeValue, reusing original: AccountCredential? = nil) throws -> MusicAccountVerified {
         let id = try value[music: "userId"].musicRequiredText()
         let cookie = try value[music: "cookie"].musicRequiredText()
         let credential: AccountCredential
-        if let original, case .object(let fields) = try MusicAccountCredential.read(original),
-           fields["platform"] == .string(platform.rawValue), fields["userId"] == .string(id),
-           fields["cookie"] == .string(cookie) {
+        if let original, original.siteKey == platform.rawValue, original.userID == id, original.cookie == cookie {
             credential = original
         } else {
-            credential = try MusicAccountCredential.make(platform: platform, userID: id, cookie: cookie)
+            do { credential = try AccountCredential(siteKey: platform.rawValue, userID: id, cookie: cookie) }
+            catch { throw MusicServiceError.invalidResponse }
         }
         return .init(credential: credential, nickname: value[music: "profile"][music: "displayName"].musicText, nativeID: id)
     }
     func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified {
-        try verified(await call("account.verify", candidate: MusicAccountCredential.read(credential)), reusing: credential)
+        try verified(await call("account.verify", candidate: .object(candidateObject(credential))), reusing: credential)
     }
     func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified {
-        try verified(await call("account.refresh", candidate: MusicAccountCredential.read(credential)), reusing: credential)
+        try verified(await call("account.refresh", candidate: .object(candidateObject(credential))), reusing: credential)
     }
     func accountProfile() async throws -> MusicAccountProfileSnapshot {
         let value = try await call("account.profile"), profile = value[music: "profile"]
@@ -134,14 +133,12 @@ actor MusicNodeAccountProvider {
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
     func sendSMS(countryCode: String, phone: String, attemptID: UUID) async throws -> MusicSMSSendReceipt {
-        do {
-            let value = try await sms("sms.send", parameters: ["phone": .string(phone), "countryCode": .string(countryCode)],
-                                     attemptID: attemptID)
-            guard value[music: "confirmed"].musicBool else { throw MusicSMSFailure(reason: .commitUnconfirmed) }
-            return .init(retryAt: Date().addingTimeInterval(value[music: "retryAfterSeconds"].musicNumber ?? 60))
-        } catch let failure as MusicSMSFailure where failure.reason == .commitUnconfirmed {
-            throw MusicSMSFailure(reason: failure.reason, retryAt: Date().addingTimeInterval(60), detail: failure.detail)
+        let value = try await sms("sms.send", parameters: ["phone": .string(phone), "countryCode": .string(countryCode)],
+                                  attemptID: attemptID)
+        guard value[music: "confirmed"].musicBool else {
+            throw MusicSMSFailure(reason: .upstreamFailed, retryAt: Date().addingTimeInterval(60))
         }
+        return .init(retryAt: Date().addingTimeInterval(value[music: "retryAfterSeconds"].musicNumber ?? 60))
     }
     func loginSMS(countryCode: String, phone: String, code: String, attemptID: UUID) async throws -> MusicAccountVerified {
         try verified(await sms("sms.login", parameters: ["phone": .string(phone), "countryCode": .string(countryCode),

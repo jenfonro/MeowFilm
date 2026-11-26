@@ -1,11 +1,5 @@
 import Foundation
-
-/// Read-only native repository access. Display projections retain occurrence
-/// and page context, but obtain song facts from the one committed store.
-public protocol MusicSongRepositoryReading: Sendable {
-    func repositoryTracks(songIDs: Set<String>) async throws -> [String: MusicRemoteTrack]
-    func songChanges() async -> AsyncStream<Set<String>>
-}
+import MeowMusicPlatform
 
 extension MusicRemoteTrack {
     func projected(_ songs: [String: MusicRemoteTrack]) -> MusicRemoteTrack {

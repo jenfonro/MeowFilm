@@ -35,90 +35,32 @@ final class PlaybackEngine: @unchecked Sendable {
         }
     }
 
-    final class CommandCompletion: @unchecked Sendable {
-        private var lock = pthread_mutex_t()
-        private var finished = false
-        private var error: VideoKernelFailure?
-        private var continuation: CheckedContinuation<Void, Error>?
+    enum DemuxCommand {
+        case seek(id: UInt64, target: Double, videoSerial: Int, audioSerial: Int, continuation: CheckedContinuation<Void, Error>?)
+        case trackSwitch(id: UInt64, kind: VideoTrack.Kind, streamIndex: Int32, continuation: CheckedContinuation<Void, Error>?)
 
-        init() {
-            pthread_mutex_init(&lock, nil)
-        }
-
-        deinit {
-            pthread_mutex_destroy(&lock)
-        }
-
-        func complete(error: VideoKernelFailure?) {
-            pthread_mutex_lock(&lock)
-            guard !finished else {
-                pthread_mutex_unlock(&lock)
-                return
-            }
-            finished = true
-            self.error = error
-            let cont = continuation
-            continuation = nil
-            pthread_mutex_unlock(&lock)
-            if let cont {
-                if let error {
-                    cont.resume(throwing: error)
-                } else {
-                    cont.resume(returning: ())
-                }
+        var id: UInt64 {
+            switch self {
+            case .seek(let id, _, _, _, _), .trackSwitch(let id, _, _, _): return id
             }
         }
 
-        func cancelFromCaller() {
-            complete(error: .cancelled)
+        var continuation: CheckedContinuation<Void, Error>? {
+            switch self {
+            case .seek(_, _, _, _, let cont), .trackSwitch(_, _, _, let cont): return cont
+            }
         }
 
-        func wait() async throws {
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                    pthread_mutex_lock(&lock)
-                    if finished {
-                        let err = error
-                        pthread_mutex_unlock(&lock)
-                        if let err {
-                            cont.resume(throwing: err)
-                        } else {
-                            cont.resume(returning: ())
-                        }
-                    } else {
-                        continuation = cont
-                        pthread_mutex_unlock(&lock)
-                    }
-                }
-            } onCancel: {
-                self.cancelFromCaller()
-            }
+        var isSeek: Bool {
+            if case .seek = self { return true }
+            return false
         }
     }
 
-    final class SeekTicket: @unchecked Sendable {
+    struct PreparedSeek {
         let target: Double
         let videoSerial: Int
         let audioSerial: Int
-        let completion = CommandCompletion()
-
-        init(target: Double, videoSerial: Int, audioSerial: Int) {
-            self.target = target
-            self.videoSerial = videoSerial
-            self.audioSerial = audioSerial
-        }
-    }
-
-    final class TrackSwitchCommand: @unchecked Sendable {
-        let kind: VideoTrack.Kind
-        let streamIndex: Int32
-        let completion: CommandCompletion?
-
-        init(kind: VideoTrack.Kind, streamIndex: Int32, wait: Bool) {
-            self.kind = kind
-            self.streamIndex = streamIndex
-            self.completion = wait ? CommandCompletion() : nil
-        }
     }
 
     enum DemuxCommandResult {
@@ -195,8 +137,9 @@ final class PlaybackEngine: @unchecked Sendable {
     var doviProfile: UInt8?
 
     // FIFO commands processed on demux thread (guarded by stateMutex).
-    var pendingSeeks: [SeekTicket] = []
-    var pendingTrackSwitches: [TrackSwitchCommand] = []
+    var nextCommandID: UInt64 = 0
+    var pendingCommands: [DemuxCommand] = []
+    var seekPreparing = false
 
     // Diagnostics counters (guarded by stateMutex)
     var droppedFrames: UInt64 = 0
@@ -465,49 +408,32 @@ final class PlaybackEngine: @unchecked Sendable {
 
     // MARK: - Control API (Thread-safe, Non-blocking where appropriate)
 
-    var position: Double {
+    @inline(__always)
+    func withStateLock<T>(_ body: () -> T) -> T {
         pthread_mutex_lock(&stateMutex)
         defer { pthread_mutex_unlock(&stateMutex) }
-        return currentPosition
+        return body()
     }
+
+    var position: Double { withStateLock { currentPosition } }
 
     var bufferedPosition: Double {
         let vBuf = videoPackets.bufferedUntilSeconds
-        pthread_mutex_lock(&stateMutex)
-        let hasAudio = audioStreamIndex >= 0
-        pthread_mutex_unlock(&stateMutex)
+        let hasAudio = withStateLock { audioStreamIndex >= 0 }
         let aBuf = hasAudio ? audioPackets.bufferedUntilSeconds : vBuf
         let minBuf = hasAudio && aBuf > 0 ? min(vBuf, aBuf) : vBuf
         return max(position, minBuf)
     }
 
-    var isBuffering: Bool {
-        pthread_mutex_lock(&stateMutex)
-        defer { pthread_mutex_unlock(&stateMutex) }
-        return buffering
-    }
-
-    var seekable: Bool {
-        pthread_mutex_lock(&stateMutex)
-        defer { pthread_mutex_unlock(&stateMutex) }
-        return seekableStream && !closed
-    }
-
-    var tracks: [VideoTrack] {
-        pthread_mutex_lock(&stateMutex)
-        defer { pthread_mutex_unlock(&stateMutex) }
-        return tracksCache
-    }
-
+    var isBuffering: Bool { withStateLock { buffering } }
+    var seekable: Bool { withStateLock { seekableStream && !closed } }
+    var tracks: [VideoTrack] { withStateLock { tracksCache } }
     var volume: Float {
         get { audioOutput.volume }
         set { audioOutput.setVolume(newValue) }
     }
-
     var activeRate: Float {
-        pthread_mutex_lock(&stateMutex)
-        defer { pthread_mutex_unlock(&stateMutex) }
-        return (committed && playing && !buffering && !ended) ? playbackRate : 0
+        withStateLock { (committed && playing && !buffering && !ended) ? playbackRate : 0 }
     }
 
     var diagnostics: VideoKernelDiagnostics {
@@ -599,9 +525,8 @@ final class PlaybackEngine: @unchecked Sendable {
         }
     }
 
-    /// Synchronously advances video/audio serials, flushes queues, and enqueues the seek command.
-    /// Callers MUST update their frame-present gate and invalidate output BEFORE awaiting `waitSeek`.
-    func beginSeek(to target: Double) throws -> SeekTicket {
+    /// Synchronously advances video/audio serials and flushes queues before awaiting `performSeek`.
+    func prepareSeek(to target: Double) throws -> PreparedSeek {
         guard target.isFinite, target >= 0 else { throw VideoKernelFailure.seekFailed }
         guard !interruptBox.isAborted else { throw VideoKernelFailure.cancelled }
 
@@ -626,58 +551,90 @@ final class PlaybackEngine: @unchecked Sendable {
         wallClockBaseMedia = clamped
         wallClockBaseHost = CACurrentMediaTime()
         hasWallClock = true
+        seekPreparing = true
 
-        // Cancel any older queued seeks before enqueueing the latest seek command.
-        let superseded = pendingSeeks
-        pendingSeeks.removeAll(keepingCapacity: true)
-        let cmd = SeekTicket(target: clamped, videoSerial: newVideoSerial, audioSerial: newAudioSerial)
-        pendingSeeks.append(cmd)
+        let superseded = pendingCommands.filter(\.isSeek)
+        pendingCommands.removeAll(where: \.isSeek)
         pthread_cond_broadcast(&stateCond)
         pthread_mutex_unlock(&stateMutex)
 
-        for req in superseded {
-            req.completion.complete(error: .cancelled)
+        for cmd in superseded {
+            cmd.continuation?.resume(throwing: VideoKernelFailure.cancelled)
         }
 
         VideoLogSinkBox.shared.emit(level: 32, message: "[mvk] seek.begin target=\(String(format: "%.2f", clamped)) serial=\(newVideoSerial) oldPos=\(String(format: "%.2f", oldPos)) oldWall=\(String(format: "%.2f", oldWall)) startOffset=\(String(format: "%.2f", startTimeSeconds))")
 
-        // Flush packet queues & audio ring so blocked workers wake immediately and stale chunks are rejected.
         videoPackets.flush(newSerial: newVideoSerial, resetBufferedTo: clamped)
         audioPackets.flush(newSerial: newAudioSerial, resetBufferedTo: clamped)
         clearFrameQueue()
         audioOutput.flush(newSerial: newAudioSerial)
-        return cmd
+        return PreparedSeek(target: clamped, videoSerial: newVideoSerial, audioSerial: newAudioSerial)
     }
 
-    func waitSeek(_ cmd: SeekTicket) async throws -> Double {
-        try await cmd.completion.wait()
+    func performSeek(_ prepared: PreparedSeek) async throws -> Double {
+        defer {
+            withStateLock {
+                if videoSerial == prepared.videoSerial && seekPreparing {
+                    seekPreparing = false
+                    pthread_cond_broadcast(&stateCond)
+                }
+            }
+        }
+        let cmdID: UInt64 = withStateLock {
+            nextCommandID &+= 1
+            return nextCommandID
+        }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                pthread_mutex_lock(&stateMutex)
+                if closed || interruptBox.isAborted || videoSerial != prepared.videoSerial || Task.isCancelled {
+                    if videoSerial == prepared.videoSerial { seekPreparing = false }
+                    pthread_cond_broadcast(&stateCond)
+                    pthread_mutex_unlock(&stateMutex)
+                    cont.resume(throwing: VideoKernelFailure.cancelled)
+                    return
+                }
+                seekPreparing = false
+                pendingCommands.insert(
+                    .seek(id: cmdID, target: prepared.target, videoSerial: prepared.videoSerial,
+                          audioSerial: prepared.audioSerial, continuation: cont),
+                    at: 0
+                )
+                pthread_cond_broadcast(&stateCond)
+                pthread_mutex_unlock(&stateMutex)
+                videoPackets.wakeProducers()
+                audioPackets.wakeProducers()
+            }
+        } onCancel: {
+            self.cancelQueuedCommand(id: cmdID)
+        }
         guard !interruptBox.isAborted else { throw VideoKernelFailure.cancelled }
-
-        pthread_mutex_lock(&stateMutex)
-        let pos = currentPosition
-        pthread_mutex_unlock(&stateMutex)
-        return pos
+        return position
     }
 
     /// Seekless subtitle switch/disable; audio/video track switch resets only the switched decoder.
     func selectTrack(id: Int32, kind: VideoTrack.Kind) async throws {
         guard !interruptBox.isAborted else { throw VideoKernelFailure.cancelled }
-        let cmd = TrackSwitchCommand(kind: kind, streamIndex: id, wait: true)
-        pthread_mutex_lock(&stateMutex)
-        guard !closed else {
-            pthread_mutex_unlock(&stateMutex)
-            throw VideoKernelFailure.cancelled
+        let cmdID: UInt64 = withStateLock {
+            nextCommandID &+= 1
+            return nextCommandID
         }
-        pendingTrackSwitches.append(cmd)
-        pthread_cond_broadcast(&stateCond)
-        pthread_mutex_unlock(&stateMutex)
-
-        // Wake demuxer immediately even if parked on full video/audio packet queues.
-        videoPackets.wakeProducers()
-        audioPackets.wakeProducers()
-
-        if let completion = cmd.completion {
-            try await completion.wait()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                pthread_mutex_lock(&stateMutex)
+                guard !closed, !interruptBox.isAborted, !Task.isCancelled else {
+                    pthread_mutex_unlock(&stateMutex)
+                    cont.resume(throwing: VideoKernelFailure.cancelled)
+                    return
+                }
+                pendingCommands.append(.trackSwitch(id: cmdID, kind: kind, streamIndex: id, continuation: cont))
+                pthread_cond_broadcast(&stateCond)
+                pthread_mutex_unlock(&stateMutex)
+                videoPackets.wakeProducers()
+                audioPackets.wakeProducers()
+            }
+        } onCancel: {
+            self.cancelQueuedCommand(id: cmdID)
         }
         guard !interruptBox.isAborted else { throw VideoKernelFailure.cancelled }
     }
@@ -685,14 +642,22 @@ final class PlaybackEngine: @unchecked Sendable {
     /// Non-blocking subtitle disable safe to invoke from MainActor.
     func disableSubtitleAsync() {
         guard !interruptBox.isAborted else { return }
-        let cmd = TrackSwitchCommand(kind: .subtitle, streamIndex: -1, wait: false)
         pthread_mutex_lock(&stateMutex)
         guard !closed else { pthread_mutex_unlock(&stateMutex); return }
-        pendingTrackSwitches.append(cmd)
+        nextCommandID &+= 1
+        pendingCommands.append(.trackSwitch(id: nextCommandID, kind: .subtitle, streamIndex: -1, continuation: nil))
         pthread_cond_broadcast(&stateCond)
         pthread_mutex_unlock(&stateMutex)
         videoPackets.wakeProducers()
         audioPackets.wakeProducers()
+    }
+
+    private func cancelQueuedCommand(id: UInt64) {
+        let cont: CheckedContinuation<Void, Error>? = withStateLock {
+            guard let index = pendingCommands.firstIndex(where: { $0.id == id }) else { return nil }
+            return pendingCommands.remove(at: index).continuation
+        }
+        cont?.resume(throwing: VideoKernelFailure.cancelled)
     }
 
     func cancel() {
@@ -709,18 +674,14 @@ final class PlaybackEngine: @unchecked Sendable {
         closed = true
         playing = false
         firstFrameInFlight = false
-        let seeks = pendingSeeks
-        pendingSeeks.removeAll()
-        let switches = pendingTrackSwitches
-        pendingTrackSwitches.removeAll()
+        seekPreparing = false
+        let commands = pendingCommands
+        pendingCommands.removeAll()
         pthread_cond_broadcast(&stateCond)
         pthread_mutex_unlock(&stateMutex)
 
-        for req in seeks {
-            req.completion.complete(error: .cancelled)
-        }
-        for sw in switches {
-            sw.completion?.complete(error: .cancelled)
+        for cmd in commands {
+            cmd.continuation?.resume(throwing: VideoKernelFailure.cancelled)
         }
     }
 
@@ -813,46 +774,16 @@ final class PlaybackEngine: @unchecked Sendable {
         return String(cString: name)
     }
 
-    func currentSerialsSnapshot() -> (video: Int, audio: Int) {
-        pthread_mutex_lock(&stateMutex)
-        defer { pthread_mutex_unlock(&stateMutex) }
-        return (videoSerial, audioSerial)
-    }
+    var currentVideoSerial: Int { withStateLock { videoSerial } }
+    var currentAudioSerial: Int { withStateLock { audioSerial } }
+    var hasPendingCommand: Bool { withStateLock { !pendingCommands.isEmpty || seekPreparing } }
 
-    func currentVideoSerialSnapshot() -> Int {
-        pthread_mutex_lock(&stateMutex)
-        defer { pthread_mutex_unlock(&stateMutex) }
-        return videoSerial
-    }
-
-    func currentAudioSerialSnapshot() -> Int {
-        pthread_mutex_lock(&stateMutex)
-        defer { pthread_mutex_unlock(&stateMutex) }
-        return audioSerial
-    }
-
-    func bumpVideoSerial() -> Int {
-        pthread_mutex_lock(&stateMutex)
-        videoSerial &+= 1
-        let next = videoSerial
-        pthread_cond_broadcast(&stateCond)
-        pthread_mutex_unlock(&stateMutex)
-        return next
-    }
-
-    func bumpAudioSerial() -> Int {
-        pthread_mutex_lock(&stateMutex)
-        audioSerial &+= 1
-        let next = audioSerial
-        pthread_cond_broadcast(&stateCond)
-        pthread_mutex_unlock(&stateMutex)
-        return next
-    }
-
-    func hasPendingCommand() -> Bool {
-        pthread_mutex_lock(&stateMutex)
-        defer { pthread_mutex_unlock(&stateMutex) }
-        return !pendingSeeks.isEmpty || !pendingTrackSwitches.isEmpty
+    func bumpSerial(video: Bool) -> Int {
+        withStateLock {
+            if video { videoSerial &+= 1 } else { audioSerial &+= 1 }
+            pthread_cond_broadcast(&stateCond)
+            return video ? videoSerial : audioSerial
+        }
     }
 
     func reportFatal(_ error: VideoKernelFailure) {

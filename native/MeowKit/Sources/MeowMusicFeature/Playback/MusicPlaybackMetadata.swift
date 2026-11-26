@@ -1,10 +1,16 @@
 import Foundation
 #if os(iOS) || os(macOS)
+import MeowContracts
 import MeowDebug
 
 /// Lyrics use permanent-song/source references. Artwork bytes belong only to
 /// the shared image loader; this owner publishes the repository's chosen URL.
 @MainActor final class MusicPlaybackMetadata {
+    private struct LyricCacheKey: Hashable, Sendable {
+        let songID: String
+        let sourceKey: String
+    }
+
     struct Presentation {
         let occurrenceID: String?
         let track: MusicRemoteTrack?
@@ -12,11 +18,11 @@ import MeowDebug
         let lines: [MusicLyricLine]
         let artwork: URL?
     }
-    private var service: (any MusicServing)?
-    private var accounts: (any MusicNativeCacheScopeProviding)?
-    private var display: (any MusicPresentationCaching)?
+    private var service: NativeMusicService?
+    private var accounts: NativeMusicAccountService?
+    private var display: MusicNativePresentationCache?
     private var apply: (@MainActor (Presentation) -> Void)?
-    private let lyrics = MusicPlaybackLyricCache()
+    private let lyrics = AsyncValueCache<LyricCacheKey, MusicLyricsSnapshot>(capacity: 64)
     private var closed = false
     private var session = UUID()
     private var projection = UUID()
@@ -24,7 +30,6 @@ import MeowDebug
     private var track: MusicRemoteTrack?
     private var enabled = true
     private var restoreOnly = false
-    private var request: MusicPlaybackLyricCache.Request?
     private var task: Task<Void, Never>?
     private var artworkTask: Task<Void, Never>?
     private var revocations: Task<Void, Never>?
@@ -35,15 +40,15 @@ import MeowDebug
     private var state = "idle"
     private var lines: [MusicLyricLine] = []
 
-    func configure(service: (any MusicServing)?, accounts: (any MusicAccountsServing)?,
+    func configure(service: NativeMusicService?, accounts: NativeMusicAccountService?,
                    apply: @escaping @MainActor (Presentation) -> Void) {
-        self.service = service; self.accounts = accounts as? any MusicNativeCacheScopeProviding
+        self.service = service; self.accounts = accounts
         self.apply = apply
     }
-    func setDisplayCache(_ cache: (any MusicPresentationCaching)?) { display = cache }
+    func setDisplayCache(_ cache: MusicNativePresentationCache?) { display = cache }
     private func cancelLoad() {
         session = UUID(); task?.cancel(); task = nil; artworkTask?.cancel(); artworkTask = nil
-        request?.cancel(); request = nil; revocations?.cancel(); revocations = nil
+        revocations?.cancel(); revocations = nil
         authorization?.revoke(); authorization = nil
     }
     private func invalidate() {
@@ -74,7 +79,7 @@ import MeowDebug
            self.entry == entry, enabled == lyricsEnabled, authorization?.isActive == true,
            self.restoreOnly == restoreOnly || !self.restoreOnly { return }
         let sameSong = self.entry?.track.songId == entry.track.songId
-        if force { lyrics.removeAll() }
+        if force { Task { await lyrics.invalidate() } }
         cancelLoad()
         if !sameSong {
             candidates = []; coverURL = entry.track.artwork; failedArtwork.removeAll(); lines = []
@@ -90,10 +95,19 @@ import MeowDebug
         }
     }
     func flush() async {
-        await task?.value; await artworkTask?.value; await lyrics.flush()
+        await task?.value; await artworkTask?.value
     }
-    func debugLyricCacheStats() -> DebugJSONValue { lyrics.debugStats() }
-    func clearMemoryLyricCache() { lyrics.removeAll() }
+    func debugLyricCacheStats() async -> DebugJSONValue {
+        let stats = await lyrics.stats()
+        return .object([
+            "entryCount": .int(stats.entryCount),
+            "inFlightCount": .int(stats.inFlightCount),
+            "totalCost": .int(stats.totalCost),
+            "capacity": stats.capacity.map(DebugJSONValue.int) ?? .null,
+            "maximumCost": .int(stats.maximumCost)
+        ])
+    }
+    func clearMemoryLyricCache() async { await lyrics.invalidate() }
     private func load(_ entry: MusicQueueEntry, session id: UUID) async {
         do {
             guard let service else { throw MusicServiceError.unavailable }
@@ -113,7 +127,9 @@ import MeowDebug
             revocations = Task { [weak self] in
                 for await _ in changes {
                     guard !Task.isCancelled, let self, self.session == id else { return }
-                    self.lyrics.removeAll(); self.invalidate()
+                    await self.lyrics.invalidate()
+                    guard !Task.isCancelled, self.session == id else { return }
+                    self.invalidate()
                     return
                 }
             }
@@ -134,16 +150,17 @@ import MeowDebug
                    display?.lyricRevision == cacheRevision, !saved.lines.isEmpty {
                     lines = saved.lines; state = "ready"; publish(); return
                 }
-                let key = try MusicPlaybackLyricCache.Key(track: metadata.track, source: candidate.source)
-                let next = try lyrics.request(for: key, occurrenceID: entry.id) {
-                    try await service.lyrics(occurrenceId: entry.id, sourceKey: candidate.source.sourceKey)
-                }
-                let previous = request; request = next; previous?.cancel()
+                let key = LyricCacheKey(songID: metadata.track.songId, sourceKey: candidate.source.sourceKey)
                 do {
-                    let value = try await MusicOperationDeadline.run(seconds: 8) { try await next.value() }
-                    try check(id); try next.checkAccess()
+                    let value = try await MusicOperationDeadline.run(seconds: 8) {
+                        try await self.lyrics.value(for: key, lifetime: 300) {
+                            let result = try await service.lyrics(occurrenceId: entry.id, sourceKey: candidate.source.sourceKey)
+                            guard result.state == .ready, !result.lines.isEmpty else { throw MusicServiceError.notFound }
+                            return result
+                        }
+                    }
+                    try check(id)
                     if let scope { try await accounts?.checkNativeCacheScope(scope); try check(id) }
-                    guard value.state == .ready, !value.lines.isEmpty else { next.cancel(); continue }
                     try fence.perform { lines = value.lines; state = "ready"; publish() }
                     if let display, let cacheRevision {
                         await display.storeLyrics(value.lines, sourceKey: candidate.source.sourceKey,
@@ -151,7 +168,6 @@ import MeowDebug
                     }
                     return
                 } catch {
-                    next.cancel()
                     try check(id)
                     let failure = MusicServiceError.sanitized(error)
                     if [.accessUnavailable, .staleAccess, .closed, .cancelled, .targetChanged].contains(failure) { throw error }
@@ -166,14 +182,13 @@ import MeowDebug
     }
 
     func artworkFailed(_ url: URL?) {
-        guard !closed, let entry, let url, coverURL == url,
-              let selector = service as? any MusicArtworkSelecting else { return }
+        guard !closed, let entry, let url, coverURL == url, let service else { return }
         failedArtwork.insert(url)
         let id = session, attempted = failedArtwork
         artworkTask?.cancel()
         artworkTask = Task { [weak self] in
             do {
-                let next = try await selector.failedArtwork(songID: entry.track.songId, url: url, attempted: attempted)
+                let next = try await service.failedArtwork(songID: entry.track.songId, url: url, attempted: attempted)
                 guard let self else { return }
                 try self.check(id)
                 guard self.coverURL == url else { return }
@@ -186,13 +201,12 @@ import MeowDebug
         }
     }
     func artworkLoaded(_ url: URL?, resourceURL: URL) {
-        guard !closed, let entry, let url, coverURL == url,
-              let selector = service as? any MusicArtworkSelecting else { return }
+        guard !closed, let entry, let url, coverURL == url, let service else { return }
         let id = session
         artworkTask?.cancel()
         artworkTask = Task { [weak self] in
             do {
-                let selected = try await selector.succeededArtwork(songID: entry.track.songId,
+                let selected = try await service.succeededArtwork(songID: entry.track.songId,
                     url: resourceURL, replacing: url)
                 guard let self else { return }
                 try self.check(id)
@@ -212,9 +226,10 @@ import MeowDebug
     func close() async {
         guard !closed else { return }
         let load = task, artwork = artworkTask, revoked = revocations
-        invalidate(); closed = true; lyrics.close(); apply = nil
-        await load?.value; await artwork?.value; await revoked?.value; await lyrics.flush()
+        invalidate(); closed = true; apply = nil
+        await lyrics.invalidate()
+        await load?.value; await artwork?.value; await revoked?.value
     }
-    deinit { task?.cancel(); artworkTask?.cancel(); request?.cancel(); revocations?.cancel(); authorization?.revoke(); lyrics.close() }
+    deinit { task?.cancel(); artworkTask?.cancel(); revocations?.cancel(); authorization?.revoke() }
 }
 #endif

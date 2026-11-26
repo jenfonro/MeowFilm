@@ -39,7 +39,7 @@ public sealed partial class MusicLibraryOwner
             MusicRules.Require(MusicRules.IsValidId(id));
             var library = LibraryState(doc);
             MusicRules.Require(!library.NetworkPlaylists.Any(r => r.PlaylistId == id), "READ_ONLY");
-            var c = FindCollection(doc, library, id);
+            var c = FindCollection(library, id);
             var songs = SlicePage(c.Order, offset, limit, songId => SongReference(doc, songId));
             return new MusicCollectionDetail(
                 MusicCollectionSummaryRecord.FromCollection(c),
@@ -54,9 +54,8 @@ public sealed partial class MusicLibraryOwner
         {
             MusicRules.Require(MusicRules.IsValidId(id));
             var library = LibraryState(doc);
-            var c = FindCollection(doc, library, id);
-            var normalized = NativeMusicSong.Normalize(song);
-            string? member = doc.Songs.Find(normalized, c.Order.ToHashSet(StringComparer.Ordinal));
+            var c = FindCollection(library, id);
+            string? member = doc.Songs.Find(song, c.Order.ToHashSet(StringComparer.Ordinal));
             return new MusicCollectionMembership(member is not null, member, c.Revision);
         }, cancellationToken);
 
@@ -74,23 +73,20 @@ public sealed partial class MusicLibraryOwner
                     s.Title.Contains(lowered, StringComparison.OrdinalIgnoreCase) ||
                     s.Artist.Contains(lowered, StringComparison.OrdinalIgnoreCase) ||
                     s.Album.Contains(lowered, StringComparison.OrdinalIgnoreCase))
-                .Select(NativeMusicSong.Normalize)
                 .ToArray();
             var page = SlicePage(matches, offset, limit, static s => s);
             return new MusicLibrarySearchPage(page, matches.Length, offset, limit, library.LibraryRevision);
         }, cancellationToken);
 
     public Task<MusicCollectionSummaryRecord> CreatePlaylistAsync(string name, IReadOnlyList<MusicSongRecord>? songs = null, CancellationToken cancellationToken = default) =>
-        RunLibraryWriteAsync(PendingOwner.Library, doc =>
+        RunLibraryWriteAsync(doc =>
         {
-            MusicRules.Require(pending is null, "PENDING_WRITE");
             MusicRules.Require(MusicRules.IsValidId(name, null));
             var library = LibraryState(doc);
             var collections = library.Collections.ToList();
             long nextId = library.NextId;
             MusicRules.Require(nextId < MusicRules.MaxInteger, "LIMIT");
             string newId = "playlist:" + nextId;
-            MusicRules.Require(!collections.Any(c => c.CollectionId == newId), "CORRUPT_LIBRARY");
             nextId++;
             var order = songs is { Count: > 0 }
                 ? RegisterSongs(doc, songs).Select(s => s.SongId).Distinct(StringComparer.Ordinal).ToArray()
@@ -109,14 +105,13 @@ public sealed partial class MusicLibraryOwner
                 Collections = collections.ToArray()
             });
             return (MusicCollectionSummaryRecord.FromCollection(created), true);
-        }, cancellationToken);
+        }, cancellationToken, notifyCollections: true);
 
     public Task<bool> RemoveCollectionAsync(string id, long ifRevision, CancellationToken cancellationToken = default) =>
-        RunLibraryWriteAsync(PendingOwner.Library, doc =>
+        RunLibraryWriteAsync(doc =>
         {
-            MusicRules.Require(pending is null, "PENDING_WRITE");
             var library = LibraryState(doc);
-            var c = AtCollectionRevision(doc, library, id, ifRevision);
+            var c = AtCollectionRevision(library, id, ifRevision);
             MusicRules.Require(c.Kind != "favorites", "FAVORITES_PROTECTED");
             var collections = library.Collections.ToList();
             int idx = collections.FindIndex(x => x.CollectionId == c.CollectionId);
@@ -129,7 +124,7 @@ public sealed partial class MusicLibraryOwner
                 Collections = collections.ToArray()
             });
             return (true, true);
-        }, cancellationToken);
+        }, cancellationToken, notifyCollections: true);
 
     public Task<MusicCollectionSummaryRecord> EditCollectionAsync(string id, long ifRevision, string? name = null,
         IReadOnlyList<MusicSongRecord>? songs = null, string[]? order = null, CancellationToken cancellationToken = default) =>
@@ -142,8 +137,7 @@ public sealed partial class MusicLibraryOwner
                 next = RegisterSongs(doc, songs).Select(s => s.SongId).Distinct(StringComparer.Ordinal).ToArray();
             if (order is not null)
             {
-                MusicRules.Require(order.All(item => MusicRules.IsValidId(item)) &&
-                    order.Length == next.Length &&
+                MusicRules.Require(order.Length == next.Length &&
                     order.Distinct(StringComparer.Ordinal).Count() == next.Length &&
                     order.All(next.Contains), "INVALID_ORDER");
                 next = order.ToArray();
@@ -194,11 +188,11 @@ public sealed partial class MusicLibraryOwner
             return (c.Name, list.ToArray(), false);
         }, cancellationToken);
 
-    private static MusicCollectionRecord AtCollectionRevision(MusicLibrarySession doc, MusicLibraryAreaRecord library, string id, long ifRevision)
+    private static MusicCollectionRecord AtCollectionRevision(MusicLibraryAreaRecord library, string id, long ifRevision)
     {
         MusicRules.Require(MusicRules.IsValidId(id));
         MusicRules.Require(!library.NetworkPlaylists.Any(r => r.PlaylistId == id), "READ_ONLY");
-        var c = FindCollection(doc, library, id);
+        var c = FindCollection(library, id);
         MusicRules.Require(c.Revision == ifRevision, "REVISION_CONFLICT");
         return c;
     }
@@ -208,11 +202,10 @@ public sealed partial class MusicLibraryOwner
         long ifRevision,
         Func<MusicLibrarySession, MusicCollectionRecord, (string Name, string[] Order, bool UpdateIntents)> transform,
         CancellationToken cancellationToken) =>
-        RunLibraryWriteAsync(PendingOwner.Library, doc =>
+        RunLibraryWriteAsync(doc =>
         {
-            MusicRules.Require(pending is null, "PENDING_WRITE");
             var library = LibraryState(doc);
-            var c = AtCollectionRevision(doc, library, id, ifRevision);
+            var c = AtCollectionRevision(library, id, ifRevision);
             var (nextName, nextOrder, updateIntents) = transform(doc, c);
             IReadOnlyDictionary<string, MusicCollectionIntentRecord> intents = c.Intents;
             if (updateIntents)
@@ -225,7 +218,6 @@ public sealed partial class MusicLibraryOwner
                 {
                     if (!nextSet.Contains(songId))
                     {
-                        // An unbound local removal must not become a future account's delete.
                         if (unbound) mutableIntents.Remove(songId);
                         else mutableIntents[songId] = new MusicCollectionIntentRecord(false, true, "local", null);
                     }
@@ -256,5 +248,5 @@ public sealed partial class MusicLibraryOwner
                 Collections = collections
             });
             return (MusicCollectionSummaryRecord.FromCollection(updated), true);
-        }, cancellationToken);
+        }, cancellationToken, notifyCollections: true);
 }

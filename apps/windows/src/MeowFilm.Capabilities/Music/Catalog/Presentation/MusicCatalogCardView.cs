@@ -177,11 +177,12 @@ public sealed class MusicCatalogCardView : UserControl
     {
         var currentLibrary = context?.Library;
         var currentCatalog = context?.Catalog;
-        if (currentLibrary is null || currentCatalog is null || card.Kind != "playlist" && card.Song is null) return null;
+        var currentSearch = context?.Search;
+        if (currentLibrary is null || currentCatalog is null || currentSearch is null || card.Kind != "playlist" && card.Song is null) return null;
         menu?.Hide();
         var next = new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
         bool Current() => IsLoaded && ReferenceEquals(DataContext, card) && ReferenceEquals(context?.Library, currentLibrary);
-        if (card.Song is not null) MusicContentMenus.PopulateSongMenu(next, currentLibrary, currentCatalog, card.Song, card, Current);
+        if (card.Song is not null) MusicContentMenus.PopulateSongMenu(next, currentLibrary, currentCatalog, currentSearch, card.Song, card, Current);
         else MusicContentMenus.PopulatePlaylistMenu(next, currentLibrary, currentCatalog, card, Current);
         MusicContentMenus.ApplyStyles(host, next);
         next.Closed += (_, _) => { if (ReferenceEquals(menu, next)) menu = null; };

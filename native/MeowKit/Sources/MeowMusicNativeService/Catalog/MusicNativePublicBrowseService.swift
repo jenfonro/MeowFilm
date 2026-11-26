@@ -1,5 +1,4 @@
 import Foundation
-import MeowMusicFeature
 import MeowMusicPlatform
 import MeowRuntime
 
@@ -32,8 +31,7 @@ struct MusicNativePublicBrowseCursor {
     }
 }
 
-extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
-    MusicPublicBrowseQueueLoading, MusicPublicBrowseRefreshing, MusicPublicPlaylistSummaryReading {
+extension NativeMusicService {
     public func publicPlaylistSummaries(platform: MusicPublicBrowsePlatform, ids: [String]) async throws -> [MusicPublicBrowseCollection] {
         try check(); try requirePlatform(platform.rawValue)
         let own = epoch, revision = homeSourceRevision, port = publicPlatforms
@@ -50,7 +48,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
         publicCollectionRevision = UUID()
         let retired = publicQueueSources.filter { $0.value.collectionID == collection.id }
         for (id, entry) in retired {
-            entry.authorization.revoke(); publicQueueSources.removeValue(forKey: id); access.remove(id)
+            entry.authorization.revoke(); publicQueueSources.removeValue(forKey: id)
         }
         for entry in retired.values { await entry.reader.close() }
         await publicPlatforms.invalidateCollection(collection)

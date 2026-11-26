@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed iWebPlus b900c259 account-settings.js / library.ts / collection.ts.
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 struct MusicNativeAutomaticSyncRuntime {
     var observers: [UUID: AsyncStream<MusicAutomaticLibrarySyncEvent>.Continuation] = [:]
@@ -14,47 +14,7 @@ struct MusicNativeAutomaticSyncRuntime {
     var attemptedIntent: (preferences: Int, mutation: Int)?
 }
 
-private struct MusicNativeAutomaticSyncPort: MusicNativeLibrarySyncProviding {
-    let base: any MusicNativeLibrarySyncProviding
-    let bindings: [String: MusicNativeAutomaticSyncBinding]
-    let authorization: MusicQueueAuthorization
-    func check() throws { try authorization.check(); try Task.checkCancellation() }
-    func beginLibrarySync(platform: MusicAccountPlatform) async throws -> MusicLibrarySyncSession {
-        try check()
-        guard let binding = bindings[platform.rawValue] else { throw MusicServiceError.verificationRequired }
-        let session = try await base.beginLibrarySync(platform: platform)
-        do {
-            try check()
-            guard session.platform == platform, binding.accountID == session.accountID,
-                  binding.scope == session.scope else { throw MusicServiceError.targetChanged }
-            try await base.checkLibrarySync(session); try check()
-            return session
-        } catch { await base.endLibrarySync(session); throw error }
-    }
-    func checkLibrarySync(_ session: MusicLibrarySyncSession) async throws {
-        try check(); try await base.checkLibrarySync(session); try check()
-    }
-    func readLibrarySync(_ session: MusicLibrarySyncSession, kinds: [MusicLibrarySyncKind]) async throws -> MusicLibrarySyncSnapshot {
-        try await checkLibrarySync(session)
-        let value = try await base.readLibrarySync(session, kinds: kinds)
-        try await checkLibrarySync(session)
-        return value
-    }
-    func readLibrarySubscriptions(_ session: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot {
-        try await checkLibrarySync(session)
-        let value = try await base.readLibrarySubscriptions(session)
-        try await checkLibrarySync(session)
-        return value
-    }
-    func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
-        do { try await checkLibrarySync(session) }
-        catch { return .notDispatched(MusicServiceError.sanitized(error)) }
-        return try await base.writeLibrarySync(session, mutation: mutation)
-    }
-    func endLibrarySync(_ session: MusicLibrarySyncSession) async { await base.endLibrarySync(session) }
-}
-
-extension NativeMusicService: MusicAutomaticLibrarySyncing {
+extension NativeMusicService {
     public func automaticLibrarySyncPreferences() async throws -> MusicAutomaticLibrarySyncPreferences {
         let saved = try MusicNativeSyncLedger.load(read().library).automatic
         return .init(revision: saved.revision, selections: saved.selections)
@@ -164,7 +124,6 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
             } onCancel: { permission.revoke() }
         }
         automaticLibrarySyncRuntime.settingsSync = (requestID, permission, task)
-        access.register(accessID) { permission.revoke(); task.cancel() }
         do { try permission.register(accessID) { task.cancel() } }
         catch { task.cancel() }
         publishAutomaticLibrarySync(.refreshed)
@@ -176,7 +135,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         previous: Task<Result<MusicLibrarySyncState, MusicServiceError>, Never>?,
         drain: (@Sendable () async -> Void)?) async -> Result<MusicLibrarySyncState, MusicServiceError> {
         defer {
-            authorization.remove(accessID); authorization.revoke(); access.remove(accessID)
+            authorization.remove(accessID); authorization.revoke()
             if automaticLibrarySyncRuntime.settingsSync?.id == requestID { automaticLibrarySyncRuntime.settingsSync = nil }
             if automaticLibrarySyncRuntime.saving == requestID { automaticLibrarySyncRuntime.saving = nil }
             publishAutomaticLibrarySync(.refreshed)
@@ -201,17 +160,17 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
 
     private func bindAutomaticLibraryAccounts(revision: Int, authorization: MusicQueueAuthorization) async throws {
         try check(); try authorization.check(); try musicRequire(librarySyncRun == nil, .busy)
-        guard let port = accounts as? any MusicNativeLibrarySyncProviding else { throw MusicServiceError.unavailable }
+        guard let accounts else { throw MusicServiceError.unavailable }
         let own = epoch, library = try read().library, ledger = try MusicNativeSyncLedger.load(library)
         let preferences = ledger.automatic
         try musicRequire(preferences.revision == revision, .revisionConflict)
         var bindings: [String: MusicNativeAutomaticSyncBinding] = [:]
         for selection in preferences.selections {
             try check(own); try authorization.check()
-            let session = try await port.beginLibrarySync(platform: selection.platform)
+            let session = try await accounts.beginLibrarySync(platform: selection.platform)
             do {
                 try check(own); try authorization.check()
-                try await port.checkLibrarySync(session)
+                try await accounts.checkLibrarySync(session)
                 try check(own); try authorization.check()
                 try musicRequire(!session.accountID.isEmpty, .invalidResponse)
                 _ = try musicText(session.scope)
@@ -220,8 +179,8 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
                     (previous == nil || previous == session.accountID), .targetChanged)
                 if let old = ledger.scopes[selection.platform.rawValue] { try musicRequire(old == session.scope, .targetChanged) }
                 bindings[selection.platform.rawValue] = .init(accountID: session.accountID, scope: session.scope)
-            } catch { await port.endLibrarySync(session); throw error }
-            await port.endLibrarySync(session)
+            } catch { await accounts.endLibrarySync(session); throw error }
+            await accounts.endLibrarySync(session)
         }
         try check(own); try authorization.check()
         try changeAutomaticPreferences(expected: revision, authorization: authorization) { value, _ in
@@ -269,23 +228,29 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
             publishAutomaticLibrarySync(.refreshed)
             throw MusicServiceError.verificationRequired
         }
-        guard let base = accounts as? any MusicNativeLibrarySyncProviding else { throw MusicServiceError.unavailable }
+        guard let accounts else { throw MusicServiceError.unavailable }
         let permission = MusicQueueAuthorization(parent: request.authorization)
-        let port = MusicNativeAutomaticSyncPort(base: base, bindings: current.bindings, authorization: permission)
+        let bindings = current.bindings
         let nativeRequest = MusicLibrarySyncRequest(id: request.id, selections: selected)
         let orderOnly = request.reason == .localMutation ? current.orderOnly : nil
         let task = Task {
             try permission.check()
-            if let orderOnly { return try await self.performAutomaticOrderSync(nativeRequest, port: port, collectionID: orderOnly) }
-            return try await self.performLibrarySync(nativeRequest, port: port, relationshipsOnly: relationshipsOnly)
+            if let orderOnly {
+                return try await self.performAutomaticOrderSync(
+                    nativeRequest, port: accounts, bindings: bindings, authorization: permission, collectionID: orderOnly
+                )
+            }
+            return try await self.performLibrarySync(
+                nativeRequest, port: accounts, relationshipsOnly: relationshipsOnly,
+                automaticBindings: bindings, automaticAuthorization: permission
+            )
         }
         let cancel: @Sendable () -> Void = { permission.revoke(); task.cancel() }
         automaticLibrarySyncRuntime.task = task; automaticLibrarySyncRuntime.authorization = permission
         automaticLibrarySyncRuntime.attemptedIntent = (current.revision, current.intentRevision)
         librarySyncRun = (request.id, cancel, { _ = await task.result })
-        access.register(request.id, cancel: cancel)
         defer {
-            permission.revoke(); access.remove(request.id)
+            permission.revoke()
             if librarySyncRun?.id == request.id {
                 librarySyncRun = nil; automaticLibrarySyncRuntime.task = nil
                 automaticLibrarySyncRuntime.authorization = nil
@@ -322,16 +287,19 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         }
     }
 
-    private func performAutomaticOrderSync(_ request: MusicLibrarySyncRequest, port: any MusicNativeLibrarySyncProviding,
+    private func performAutomaticOrderSync(_ request: MusicLibrarySyncRequest, port: NativeMusicAccountService,
+                                           bindings: [String: MusicNativeAutomaticSyncBinding],
+                                           authorization: MusicQueueAuthorization,
                                            collectionID: String) async throws -> MusicLibrarySyncState {
         let initial = try read()
-        try initial.requireRevision(.library)
         let local = try collection(collectionID, initial)
         guard let kind = MusicLibrarySyncKind(rawValue: local.kind) else { throw MusicServiceError.corruptStorage }
         var round = MusicNativeSyncRound(
             request: request,
             epoch: epoch,
             port: port,
+            automaticBindings: bindings,
+            automaticAuthorization: authorization,
             library: initial.library,
             ledger: try MusicNativeSyncLedger.load(initial.library),
             revision: initial.library.revision
@@ -340,9 +308,9 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         try syncCheckpoint(&round)
         do {
             try musicRequire(!local.deleted, .notFound)
-            try musicRequire(round.ledger.fences.isEmpty, .commitUnconfirmed)
+            try musicRequire(round.ledger.fences.isEmpty, .storageConflict)
             for selection in request.selections {
-                let session = try await port.beginLibrarySync(platform: selection.platform)
+                let session = try await round.beginSession(platform: selection.platform)
                 round.sessions[selection.platform.rawValue] = session
                 try await syncCurrent(round)
                 try musicRequire(round.library.accountID(for: selection.platform.rawValue) == session.accountID &&
@@ -361,7 +329,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
                     try musicRequire(binding.baseline.sorted() == remote.members.map(\.occurrenceID).sorted(), .revisionConflict)
                     for member in remote.members {
                         guard let songID = binding.songID(for: member.occurrenceID),
-                              try repositoryReader.containsSong(id: songID) else {
+                              try database.containsSong(id: songID) else {
                             throw MusicServiceError.corruptStorage
                         }
                     }
@@ -383,10 +351,10 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
             }
             round.ledger.phase = round.ledger.issues.isEmpty && round.ledger.fences.isEmpty ? .synced : .partial
             try await syncCurrent(round); try syncCheckpoint(&round)
-            for session in round.sessions.values { await port.endLibrarySync(session) }
+            for session in round.sessions.values { await round.endSession(session) }
             return try await librarySyncState()
         } catch {
-            for session in round.sessions.values { await port.endLibrarySync(session) }
+            for session in round.sessions.values { await round.endSession(session) }
             throw error
         }
     }

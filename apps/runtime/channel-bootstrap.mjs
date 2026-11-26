@@ -1,6 +1,6 @@
 import { isAbsolute, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { BridgeError, HTTP_PROTOCOL, decodeJSONValue, validateEndpoint, validateSession } from '@meowfilm/runtime-bridge';
+import { BridgeError, HTTP_PROTOCOL, decodeJSONValue, validateSession } from '@meowfilm/runtime-bridge';
 import { configureStorage, setStorageObserver } from '@meowfilm/storage';
 import { createAppRuntime } from './bootstrap.mjs';
 import { createNodeDebug, parseDebugHandshake, serializeDebugError } from './debug.mjs';
@@ -230,7 +230,6 @@ export async function startRuntimeOnChannel(stream, {
     startingRuntime = Promise.resolve(runtime.start());
     await Promise.race([startingRuntime, interrupted]);
     if (stopped) throw stopError;
-    validateEndpoint(runtime.baseUrl);
     recordStage('endpoint');
     const readyLine = Buffer.from(`${JSON.stringify({ protocol: HTTP_PROTOCOL, baseUrl: runtime.baseUrl })}\n`);
     await Promise.race([

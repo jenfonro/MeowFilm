@@ -1,7 +1,10 @@
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 extension NativeMusicService {
+    private static let hopByHopHeaders: Set<String> = [
+        "host", "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "content-length"
+    ]
     // Official account quality names are not LX capabilities. Keep their
     // grouping local to playback without rewriting the durable library schema.
     static func officialQualities(_ values: [String], _ prefs: MusicPlaybackSettingsState) -> [String] {
@@ -27,7 +30,7 @@ extension NativeMusicService {
 
     func target(_ song: MusicSongRecord, _ key: String) throws -> (MusicNativeSource, MusicSongSourceRecord) {
         guard let row = song.sources.first(where: { $0.sourceKey == key }),
-              let source = try MusicModel.sources(song).first(where: { $0.sourceKey == key }) else {
+              let source = MusicModel.sources(song).first(where: { $0.sourceKey == key }) else {
             throw MusicServiceError.targetChanged
         }
         return (source, row)
@@ -35,11 +38,7 @@ extension NativeMusicService {
 
     func validate(_ source: MusicScriptSource, site: String, quality: String? = nil, action: String = "musicUrl") throws -> MusicScriptCapability {
         try musicRequire(source.isCandidate && source.generation >= 0 &&
-            (source.state == .ready ? source.generation > 0 : source.generation == 0) &&
-            source.generation <= musicMaxSafeInteger && source.capabilities.count <= 5, .sourceUnavailable)
-        _ = try musicText(source.installationID, maximum: 128); _ = try musicText(source.version)
-        try musicRequire(musicHex(source.contentHash) && musicHex(source.revisionHash), .invalidResponse)
-        try musicRequire(Set(source.capabilities.map(\.siteID)).count == source.capabilities.count, .invalidResponse)
+            (source.state == .ready ? source.generation > 0 : source.generation == 0), .sourceUnavailable)
         guard let cap = source.capabilities.first(where: { $0.siteID == site }), cap.actions.contains(action),
               quality == nil || cap.qualities.contains(quality!) else { throw MusicServiceError.sourceUnavailable }
         return cap
@@ -67,13 +66,17 @@ extension NativeMusicService {
         try value.playbackAuthorization?.check()
         let url = value.url
         try musicRequire(["https", "http"].contains(url.scheme?.lowercased() ?? "") &&
-            url.host?.isEmpty == false && url.user == nil && url.password == nil && url.fragment == nil, .invalidMediaCandidate)
+            url.host?.isEmpty == false, .invalidMediaCandidate)
         var headers: [String: String] = [:]
-        for (key, value) in value.headers {
-            let name = key.lowercased()
-            try musicRequire(["referer", "user-agent"].contains(name) && headers[name] == nil &&
-                !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }), .invalidMediaCandidate)
-            headers[name] = value
+        var seen = Set<String>()
+        for (rawKey, rawVal) in value.headers {
+            let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lower = key.lowercased()
+            if Self.hopByHopHeaders.contains(lower) { continue }
+            try musicRequire(!key.isEmpty && key.utf8.allSatisfy({ $0 > 32 && $0 < 127 }) &&
+                seen.insert(lower).inserted &&
+                !rawVal.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }), .invalidMediaCandidate)
+            headers[key] = rawVal
         }
         if let expires = value.expiresAt { try musicRequire(expires > now() && expires.timeIntervalSince1970.isFinite, .invalidMediaCandidate) }
         return .init(url: url, headers: headers, expiresAt: value.expiresAt, fileCachePolicy: value.fileCachePolicy,
@@ -133,37 +136,27 @@ extension NativeMusicService {
             try musicRequire(attempt?.id == attemptId && current.queue.currentID == occurrenceId, .staleResult)
             attempt?.selection = resolvedSelection
             let currentSong = try repositorySong(songID, current)
-            _ = try target(currentSong, selection.sourceKey)
-            try musicRequire(!selection.installationId.hasPrefix("official:") ||
-                Self.officialEnabled(source.platform, current.playback), .sourceUnavailable)
+            try admitSource(currentSong, selection: resolvedSelection)
             let valid = try media(audio)
-            try validateDelivery(valid, song: currentSong, playback: current.playback, automaticQuality: false)
             let authorization = valid.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization()
             audioCacheAttempt = try await prepareAudioCache(audio: valid, song: currentSong,
                 selection: resolvedSelection, attemptID: attemptId, playbackAuthorization: authorization)
             observeAudioCacheCapture(audioCacheAttempt)
             try await admitRecordingSource(currentSong, sourceKey: selection.sourceKey)
             try check(own)
-            try musicRequire(attempt?.id == attemptId, .staleResult)
             let latest = try read()
-            try musicRequire(latest.queue.currentID == occurrenceId &&
-                latest.queue.revision == d.queue.revision &&
-                latest.playback.revision == d.playback.revision, .staleRevision)
+            try musicRequire(attempt?.id == attemptId && latest.queue.currentID == occurrenceId, .staleResult)
             let latestSong = try repositorySong(songID, latest)
-            _ = try target(latestSong, selection.sourceKey)
-            try admitSource(latestSong, selection: resolvedSelection)
-            try validateDelivery(valid, song: latestSong, playback: latest.playback, automaticQuality: false)
             let candidate = MusicPlaybackCandidate(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
                 url: valid.url, headers: valid.headers, title: latestSong.title, startPosition: start,
                 requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
                 expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
                 delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
             try pinPlaybackRecovery(candidate: candidate, song: latestSong, state: latest)
-            let publish = {
+            try authorization.perform {
                 self.attempt?.authorization = authorization
                 self.attempt?.ready = true
             }
-            try authorization.perform(publish)
             return candidate
         } catch {
             if attempt?.id == attemptId { retireAudioCacheAttempt(); attempt = nil }
@@ -189,13 +182,6 @@ extension NativeMusicService {
         try check()
         try musicRequire(fact.position.isFinite && (0...604_800).contains(fact.position) &&
             (fact.duration == nil || fact.duration!.isFinite && (0...604_800).contains(fact.duration!)))
-        if ![.failed, .stopped].contains(fact.kind) {
-            let state = try read()
-            guard let entry = state.queue.entries.first(where: { $0.id == fact.occurrenceId })
-                else { throw MusicServiceError.staleResult }
-            let song = try entrySong(entry, state)
-            try musicRequire(MusicMediaDuration.matches(expected: song.effectiveDuration, actual: fact.duration), .invalidMediaCandidate)
-        }
         try commitPreparedSource(fact)
         guard let current = attempt, current.ready, current.id == fact.attemptId, current.occurrence == fact.occurrenceId,
               fact.resourceId == "music:" + current.id else { throw MusicServiceError.staleResult }

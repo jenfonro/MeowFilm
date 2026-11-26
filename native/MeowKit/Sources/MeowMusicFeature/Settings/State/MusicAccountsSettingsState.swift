@@ -146,14 +146,13 @@ final class MusicAccountsSettingsState: ObservableObject {
                 owner?.accountSessionsChanged(platform)
             })
         }
-        sync = owner.librarySync.map {
-            MusicLibrarySyncViewModel(service: $0, accounts: owner.accounts,
-                                      settingsReceipts: owner.settingsReceipts) { [weak owner] in
+        sync = owner.service.map {
+            MusicLibrarySyncViewModel(service: $0, accounts: owner.accounts) { [weak owner] in
                 await owner?.load()
             }
         }
-        feedback = owner.playbackFeedbackSettings.map {
-            MusicPlaybackFeedbackSettingsModel(service: $0, receipts: owner.settingsReceipts) { [weak owner] in
+        feedback = owner.service.map {
+            MusicPlaybackFeedbackSettingsModel(service: $0) { [weak owner] in
                 try await owner?.reconcilePlaybackFeedbackSettings()
             }
         }

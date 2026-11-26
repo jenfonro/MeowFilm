@@ -14,16 +14,11 @@ public sealed partial class MusicNativeApplication
     private string MatchingContext(string platform, MusicPlatformSession? session)
     {
         bool guest = session is null || accounts.IsOfficialGuest(session);
-        var tuple = MusicNodeSongCodec.Build(w =>
-        {
-            w.WriteStartArray();
-            w.WriteStringValue("recording-match-v1");
-            w.WriteStringValue(platform);
-            w.WriteStringValue(guest ? "public" : session!.Scope);
-            w.WriteNumberValue(guest ? 0 : session!.Generation);
-            w.WriteEndArray();
-        });
-        return NativeMusicSong.Hash(MusicRules.CanonicalElement(tuple));
+        return NativeMusicSong.Hash(MusicRules.CanonicalArray(
+            "recording-match-v1",
+            platform,
+            guest ? "public" : session!.Scope,
+            (guest ? 0L : session!.Generation).ToString(System.Globalization.CultureInfo.InvariantCulture)));
     }
 
     private void ObserveSongMatches(MusicSearchSnapshot snapshot) =>

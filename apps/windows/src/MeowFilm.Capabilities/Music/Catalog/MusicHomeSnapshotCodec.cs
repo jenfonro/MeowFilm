@@ -208,16 +208,12 @@ internal static class MusicHomeSnapshotCodec
                     Title: NullIfEmpty(sec.Title),
                     Type: NullIfEmpty(sec.Type),
                     Layout: NullIfEmpty(sec.Layout),
-                    Available: null,
                     ErrorCode: NullIfEmpty(sec.ErrorCode),
                     RequiresAccount: sec.Action?.RequiresAccount == true ? true : null,
-                    Display: null,
                     SelectedTab: NullIfEmpty(sec.SelectedTab),
-                    SelectedTag: null,
                     Action: ParseAction(sec.Action?.Action),
                     Items: items,
-                    Tabs: tabs,
-                    Tags: []));
+                    Tabs: tabs));
             }
             pages.Add(new HomePageRecord(snapshot.Platform, sections));
         }
@@ -227,9 +223,7 @@ internal static class MusicHomeSnapshotCodec
     private static HomeCardRecord ToCardRecord(MusicCatalogCard card)
     {
         if (!card.Display)
-            return new HomeCardRecord(true, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, false, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null);
+            return new HomeCardRecord(true, Display: false);
 
         string? presentation = card.Presentation switch
         {
@@ -249,16 +243,13 @@ internal static class MusicHomeSnapshotCodec
             : null;
         return new HomeCardRecord(
             HiddenOnly: false,
-            SongId: null,
             RefSongId: NullIfEmpty(card.Song?.Id),
             Id: NullIfEmpty(card.Id),
             Key: NullIfEmpty(card.StableKey),
-            Name: null,
             Title: NullIfEmpty(card.Title),
             Label: NullIfEmpty(card.Label),
             Subtitle: NullIfEmpty(card.Subtitle),
             ContextText: NullIfEmpty(card.ContextText),
-            Creator: null,
             Cover: NullIfEmpty(card.Cover),
             CoverLabel: NullIfEmpty(card.CoverLabel),
             Kind: NullIfEmpty(card.Kind),

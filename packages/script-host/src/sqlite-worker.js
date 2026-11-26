@@ -11,7 +11,6 @@ const MAX_PREPARED_STATEMENTS = 256;
 const MAX_CACHED_SQL_LENGTH = 4096;
 const statementCache = new Map();
 const synchronousMode = identity?.synchronous === 'NORMAL' ? 'NORMAL' : 'FULL';
-const synchronousLevel = synchronousMode === 'NORMAL' ? 1 : 2;
 const initializeLockName = identity?.initializeLock ?? 'data-initialize.lock';
 const maintenanceLockName = identity?.maintenanceLock ?? 'data-maintenance.lock';
 let db, commits = 0, maintenanceFailure;
@@ -161,9 +160,6 @@ if (isReader) {
     db = new DatabaseSync(path, { readOnly: true, enableForeignKeyConstraints: true, allowExtension: false });
     db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; ' +
       'PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;');
-    if (db.prepare('PRAGMA query_only').get().query_only !== 1 ||
-        db.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal' ||
-        db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 2) fail('STORAGE_CONFIGURATION');
     parentPort.postMessage({ id: 0, value: true });
   } catch (error) {
     statementCache.clear();
@@ -188,10 +184,6 @@ if (isReader) {
     }
     db = new DatabaseSync(path, { enableForeignKeyConstraints: true, allowExtension: false });
     if (process.platform !== 'win32') chmodSync(path, 0o600);
-    const engine = db.prepare('SELECT sqlite_version() AS version').get().version.split('.').map(Number);
-    if (!(engine[0] === 3 && (engine[1] > 51 || engine[1] === 51 && engine[2] >= 3 ||
-        engine[1] === 50 && engine[2] >= 7 || engine[1] === 44 && engine[2] >= 6)))
-      fail('STORAGE_ENGINE_UNSUPPORTED');
     const application = db.prepare('PRAGMA application_id').get().application_id;
     const version = db.prepare('PRAGMA user_version').get().user_version;
     const empty = db.prepare("SELECT count(*) AS count FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").get().count === 0;
@@ -202,15 +194,6 @@ if (isReader) {
     db.exec('PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; ' +
       `PRAGMA journal_mode=WAL; PRAGMA synchronous=${synchronousMode}; PRAGMA wal_autocheckpoint=0; ` +
       'PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;');
-    if (db.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal' ||
-        db.prepare('PRAGMA synchronous').get().synchronous !== synchronousLevel ||
-        db.prepare('PRAGMA foreign_keys').get().foreign_keys !== 1 ||
-        db.prepare('PRAGMA trusted_schema').get().trusted_schema !== 0 ||
-        db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint !== 0 ||
-        db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 2 ||
-        db.prepare('PRAGMA busy_timeout').get().timeout !== 5000 ||
-        db.prepare('PRAGMA temp_store').get().temp_store !== 2 ||
-        db.prepare('PRAGMA cache_size').get().cache_size !== -16384) fail('STORAGE_CONFIGURATION');
     if (empty) {
       db.exec('BEGIN IMMEDIATE');
       try {

@@ -4,7 +4,7 @@ import { performance } from 'node:perf_hooks';
 import {
   createScriptHost, createNodeNetwork, createSourceDownload, parseLXHeader, PrivateSources, ScriptHostError,
 } from '@meowfilm/script-host';
-import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
+import { BridgeError } from '@meowfilm/runtime-bridge';
 import { stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { contracts } from '../contracts.mjs';
 import { canonicalJSON as canonical } from './json-canonical.mjs';
@@ -16,7 +16,6 @@ const musicScriptContract = contracts.music.contract;
 const musicPlatforms = Object.freeze(['wy', 'tx', 'kw', 'kg', 'mg']);
 const downloadTimeout = 30000;
 const checkTimeout = 15000;
-const codes = contracts.music.codes;
 // Public catalog identifiers of one well-known recording per platform. A pass
 // means "this sample resolved", never "every song or quality is playable".
 const checkSamples = Object.freeze({
@@ -29,11 +28,11 @@ const checkSamples = Object.freeze({
 const checkQualities = ['128k', '192k', '320k', 'flac', 'flac24bit', 'master'];
 const restrictedMedia = ['freeTrialInfo', 'trial', 'preview', 'drm', 'encrypted', 'requiresLicense', 'licenseRequired'];
 const forbiddenHeaders = new Set(['host', 'range', 'accept-encoding', 'connection', 'keep-alive', 'te',
-  'trailer', 'transfer-encoding', 'upgrade', 'expect']);
+  'trailer', 'transfer-encoding', 'upgrade', 'expect', 'content-length']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const sitePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 class Failure extends Error {
-  constructor(code) { super(codes.has(code) ? code : 'SCRIPT_FAILURE'); this.code = this.message; }
+  constructor(code) { super(typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'SCRIPT_FAILURE'); this.code = this.message; }
 }
 const requireValue = (condition, code = 'INVALID_REQUEST') => { if (!condition) throw new Failure(code); };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -84,8 +83,9 @@ function sourceURL(value) {
     'INVALID_SOURCE_URL');
   let url;
   try { url = new URL(input); } catch { throw new Failure('INVALID_SOURCE_URL'); }
-  requireValue(['http:', 'https:'].includes(url.protocol) && url.hostname.length > 0 && !url.username && !url.password &&
-    !input.includes('#'), 'INVALID_SOURCE_URL');
+  requireValue(['http:', 'https:'].includes(url.protocol) && url.hostname.length > 0 && !url.username && !url.password,
+    'INVALID_SOURCE_URL');
+  url.hash = '';
   return url.href;
 }
 function sourceBasename(url) {
@@ -130,17 +130,16 @@ function mediaHeaders(value) {
   const seen = new Set(), headers = {};
   for (const [name, item] of Object.entries(value)) {
     const lower = name.toLowerCase();
-    requireValue(/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(name) && !seen.has(lower) &&
-      typeof item === 'string' && /^[\u0020-\u007e]*$/.test(item), 'INVALID_MEDIA_CANDIDATE');
-    requireValue(!forbiddenHeaders.has(lower) &&
-      !['if-', 'content-', 'proxy-', 'sec-'].some(prefix => lower.startsWith(prefix)), 'MEDIA_HEADERS_UNSUPPORTED');
+    if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(name) || typeof item !== 'string' ||
+        !/^[\u0020-\u007e]*$/.test(item)) throw new Failure('INVALID_MEDIA_CANDIDATE');
+    if (seen.has(lower) || forbiddenHeaders.has(lower) || lower.startsWith('proxy-')) continue;
     seen.add(lower);
     headers[name] = item;
   }
   return headers;
 }
 /** The one musicUrl result contract shared by playback and checks. */
-function mediaCandidate(raw, expected, duration = 0) {
+function mediaCandidate(raw, expected) {
   requireValue(raw !== null && raw !== undefined && !(typeof raw === 'string' && raw.trim().length === 0),
     'MEDIA_UNAVAILABLE');
   const candidate = typeof raw === 'string' ? { url: raw } : raw;
@@ -162,15 +161,9 @@ function mediaCandidate(raw, expected, duration = 0) {
   }
   for (const [field, value] of Object.entries(expected))
     requireValue(candidate[field] === undefined || candidate[field] === value, 'TARGET_CHANGED');
-  if (candidate.duration !== undefined && candidate.duration !== null) {
-    requireValue(typeof candidate.duration === 'number' && Number.isFinite(candidate.duration) && candidate.duration >= 0,
-      'INVALID_MEDIA_CANDIDATE');
-    if (duration > 0 && candidate.duration > 0)
-      requireValue(Math.abs(duration - candidate.duration) <= 10,
-        'RECORDING_MISMATCH');
-  }
-  return { url, headers: mediaHeaders(candidate.headers), expiresAt,
-    duration: candidate.duration > 0 ? candidate.duration : null };
+  const candidateDuration = typeof candidate.duration === 'number' && Number.isFinite(candidate.duration) && candidate.duration > 0
+    ? candidate.duration : null;
+  return { url, headers: mediaHeaders(candidate.headers), expiresAt, duration: candidateDuration };
 }
 /** LX musicInfo with the conventional mm:ss interval derived from a known duration. */
 function lxInfo(musicInfo) {
@@ -357,9 +350,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         requireValue(record?.state === 'ready' && record.generation === input.generation, 'STALE_SOURCE');
         requireValue(Object.hasOwn(record.capabilities,input.siteId),'PERMISSION_DENIED');
       };
-      if (operation === 'set') {
-        validateJSONValue(input.value);
-      }
       const value = await persistence.kv(operation,input,check);
       return operation === 'get' ? lxValue(value) : null;
     } catch (error) {

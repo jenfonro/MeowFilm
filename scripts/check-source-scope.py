@@ -172,8 +172,7 @@ def check(root):
                 dependencies.add((dependency.get("target") or dependency["byName"])[0])
         targets[name] = dependencies
         kinds[name] = kind
-        folder = "Tests" if kind == "test" else "Sources"
-        declared = package / (declaration.get("path") or folder + "/" + name)
+        declared = package / (declaration.get("path") or "Sources/" + name)
         directory = Path(os.path.abspath(declared))
         if kind == "binary":
             directories[name] = directory
@@ -182,7 +181,6 @@ def check(root):
             return failures + ["Linked or escaped target directory: " + name]
         directories[name] = directory
     sources = {name for name, kind in kinds.items() if kind == "regular"}
-    tests = {name for name, kind in kinds.items() if kind == "test"}
     systems = {name for name, kind in kinds.items() if kind == "system"}
     binaries = {name for name, kind in kinds.items() if kind == "binary"}
     for name in systems:
@@ -260,7 +258,6 @@ def check(root):
             failures.append("Non-source dependency: " + target)
         if target in binaries:
             continue
-        folder = "Sources" if target in sources | systems else "Tests"
         imported = set()
         for path in directories[target].rglob("*.swift"):
             if path.is_symlink() or not path.resolve().is_relative_to(directories[target].resolve()):

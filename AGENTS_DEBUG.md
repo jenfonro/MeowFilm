@@ -13,7 +13,7 @@
 3. **生产代码里的纯测试钩子**：如 `InternalsVisibleTo("...Tests")`、`#if DEBUG` `XCTestCase` 旁路、仅供测试读取的环境变量开关或镜像断言。
 4. **外部盲扫控件树、模拟键鼠与盲目 `sleep`**：用 Win32 / UIA 扫整页控件树猜按钮坐标、发模拟鼠标/键盘输入、用固定延时猜页面加载完成，或用自制 HTML / 离屏假数据图冒充原生客户端画面。
 5. **半截探针脚本充当验收或残留入库**：只调单个内部函数或半条链路就宣称端到端完成；临时辅助脚本测完必须立即删除，不得提交进 Git。
-6. **低层级检查冒充高层级实跑验收**：编译成功、`npm run verify`、`verify-projects.mjs`、`verify-native.sh`、`ios-node-preflight` 或单条 `runtime/invoke` 成功，只能证明各自覆盖范围，**不能**冒充真实界面、音视频播放、在线账号或真机验收通过。
+6. **低层级检查冒充高层级实跑验收**：编译成功、`npm run verify`、`verify-projects.mjs`、`verify-native.sh` 或单条 `runtime/invoke` 成功，只能证明各自覆盖范围，**不能**冒充真实界面、音视频播放、在线账号或真机验收通过。
 
 ### 明确允许且保留的入口（不属于回归测试）
 

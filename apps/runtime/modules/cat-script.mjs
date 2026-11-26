@@ -17,7 +17,8 @@ const sourceURL = value => {
   requireValue(['http:', 'https:'].includes(url.protocol));
 };
 const failure = error => ({ ok: false, contract: catScriptContract,
-  code: error instanceof ScriptHostError && contracts.cat.codes.has(error.code) ? error.code : 'SCRIPT_EXCEPTION' });
+  code: error instanceof ScriptHostError && typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+    ? error.code : 'SCRIPT_EXCEPTION' });
 const success = value => ({ ok: true, contract: catScriptContract, value: value ?? null });
 
 /** Passive Cat protocol owner; the caller owns its data-root and session. */

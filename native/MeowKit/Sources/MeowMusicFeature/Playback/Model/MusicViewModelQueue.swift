@@ -75,24 +75,23 @@ extension MusicViewModel {
     public func openAccountQueue(platform: MusicAccountPlatform, kind: MusicAccountQueueKind,
                                  title: String) async throws -> MusicRemoteQueueSource {
         let epoch = try enter()
-        guard let remoteQueueService else { throw MusicServiceError.unavailable }
-        let source = try await remoteQueueService.openAccountQueue(platform: platform, kind: kind, title: title)
+        let service = try requireService()
+        let source = try await service.openAccountQueue(platform: platform, kind: kind, title: title)
         do { try check(epoch); return source }
         catch { source.revoke(); await source.close(); throw error }
     }
     public func openHomeActionQueue(_ action: MusicHomeAction, title: String) async throws -> MusicRemoteQueueSource {
         let epoch = try enter()
-        guard let provider = service as? any MusicHomeActionQueueServing else { throw MusicServiceError.unsupported }
-        let source = try await provider.openHomeActionQueue(action, title: title)
+        let service = try requireService()
+        let source = try await service.openHomeActionQueue(action, title: title)
         do { try check(epoch); return source }
         catch { source.revoke(); await source.close(); throw error }
     }
     public func playHomeAction(_ requested: MusicHomeAction, title: String, forceReload: Bool = false) async throws {
         let epoch = try enter(), account = searchAccessGeneration, selection = selectionID
         let action: MusicHomeAction
-        if !forceReload, case .fm(.default, "", nil) = requested,
-           let owner = service as? any MusicFMPlaybackServing {
-            action = try await owner.rememberedFM()
+        if !forceReload, case .fm(.default, "", nil) = requested, let service {
+            action = try await service.rememberedFM()
         } else { action = requested }
         try check(epoch)
         guard searchAccessGeneration == account, selectionID == selection else { throw MusicServiceError.cancelled }
@@ -131,46 +130,44 @@ extension MusicViewModel {
     }
     public func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
         let epoch = try enter()
-        guard let remoteQueueService else { throw MusicServiceError.unavailable }
-        let page = try await remoteQueueService.remoteQueuePage(source, cursor: cursor)
+        let service = try requireService()
+        let page = try await service.remoteQueuePage(source, cursor: cursor)
         try check(epoch); try source.authorization.check(); return page
     }
     public func filteredRemoteQueue(_ source: MusicRemoteQueueSource, query: String) async throws -> MusicRemoteQueueSource {
         let epoch = try enter()
-        guard let provider = service as? any MusicRemoteCollectionServing else { throw MusicServiceError.unsupported }
+        let service = try requireService()
         let intent = MusicQueueAuthorization()
         defer { intent.revoke() }
         let filtered = try await withTaskCancellationHandler {
-            try await provider.filteredRemoteQueue(source: source, query: query, intent: intent)
+            try await service.filteredRemoteQueue(source: source, query: query, intent: intent)
         } onCancel: { intent.revoke() }
         do { try check(epoch); try intent.check(); return filtered }
         catch { filtered.revoke(); await filtered.close(); throw error }
     }
     public func saveRemoteCollection(_ source: MusicRemoteQueueSource, name: String) async throws {
         let epoch = try enter()
-        guard let provider = service as? any MusicRemoteCollectionServing else { throw MusicServiceError.unsupported }
+        let service = try requireService()
         let intent = MusicQueueAuthorization()
         defer { intent.revoke() }
         _ = try await withTaskCancellationHandler {
-            try await provider.saveRemoteCollection(source: source, name: name, intent: intent)
+            try await service.saveRemoteCollection(source: source, name: name, intent: intent)
         } onCancel: { intent.revoke() }
         try check(epoch); try intent.check()
-        let next = try await requireService().collections()
+        let next = try await service.collections()
         try check(epoch); publishCollections(next)
     }
     /// Search owns its selected query/platform/page order. Rehydrate that exact
     /// selection once, commit once, and carry the same page intent into playback.
     public func playSearchBatch(_ batch: MusicSearchBatchRequest) async {
         await playPreparedQueue { service, revision, intent in
-            guard let provider = service as? any MusicSearchBatchPlaying else { throw MusicServiceError.unsupported }
-            return try await provider.replaceSearchBatch(batch, expectedRevision: revision, intent: intent)
+            try await service.replaceSearchBatch(batch, expectedRevision: revision, intent: intent)
         }
     }
     public func playDisplayed(_ tracks: [MusicRemoteTrack], index: Int,
                               origin: MusicDisplayedQueueOrigin) async {
         await playPreparedQueue { service, revision, intent in
-            guard let provider = service as? any MusicDisplayedQueuePlaying else { throw MusicServiceError.unsupported }
-            return try await provider.replaceDisplayedQueue(tracks, index: index, origin: origin,
+            try await service.replaceDisplayedQueue(tracks, index: index, origin: origin,
                 expectedRevision: revision, intent: intent)
         }
     }
@@ -178,7 +175,7 @@ extension MusicViewModel {
         await playDisplayed([row.track], index: 0, origin: .history(date: row.date))
     }
     func playPreparedQueue(_ prepare: @escaping @Sendable
-        (any MusicServing, Int, MusicQueueAuthorization) async throws -> MusicPlaybackState) async {
+        (NativeMusicService, Int, MusicQueueAuthorization) async throws -> MusicPlaybackState) async {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let own: UUID
         do { own = try enter() } catch { return }
@@ -200,7 +197,7 @@ extension MusicViewModel {
             }
         }
         do {
-            await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
+            await service.pauseSimilarNavigation()
             await flushPlaybackFacts(); try check(own); try intent.check()
             let before = try await service.state()
             try check(own); try intent.check()
@@ -236,7 +233,7 @@ extension MusicViewModel {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch = try enter()
         guard !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations,
-              let service, let remoteQueueService else {
+              let service else {
             throw MusicServiceError.busy
         }
         let request = UUID(), intent = MusicQueueAuthorization(), selection = selectionID
@@ -262,22 +259,9 @@ extension MusicViewModel {
             let before = try await service.state()
             try check(epoch); try intent.check()
             guard selection == selectionID, request == recommendations.remoteQueueRequest else { throw MusicServiceError.staleResult }
-            let receipt = source.fmPreferenceScope.map {
-                settingsReceipts.begin(settings: ["fm/" + $0 + "/selection"], operation: "保存漫游设置")
-            }
             let task = Task {
-                do {
-                    let value = try await remoteQueueService.replaceRemoteQueue(source, start: start,
-                        expectedRevision: before.revision, intent: intent)
-                    if let receipt { settingsReceipts.settle(receipt, failure: nil) }
-                    return value
-                } catch {
-                    if let receipt {
-                        settingsReceipts.settle(receipt,
-                            failure: error as? MusicServiceError ?? MusicServiceError.sanitized(error))
-                    }
-                    throw error
-                }
+                try await service.replaceRemoteQueue(source, start: start,
+                    expectedRevision: before.revision, intent: intent)
             }
             recommendations.remoteQueueTask = task
             let next = try await withTaskCancellationHandler { try await task.value } onCancel: { intent.revoke(); task.cancel() }
@@ -403,8 +387,7 @@ extension MusicViewModel {
             guard navigationID == navigation, token == selectionID, searchAccessGeneration == account else { return }
             let result: MusicAdvanceResult
             if let fm {
-                guard let remoteQueueService else { throw MusicServiceError.unavailable }
-                result = try await remoteQueueService.advanceFM(fm, direction: direction, reason: reason,
+                result = try await service.advanceFM(fm, direction: direction, reason: reason,
                     expectedRevision: before.revision, intent: intent)
                 try intent.check(); try fm.authorization.check()
                 guard recommendations.fmSource?.id == fm.id else { throw MusicServiceError.staleResult }

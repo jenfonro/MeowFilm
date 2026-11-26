@@ -18,18 +18,12 @@ final class PanSettingsStore: @unchecked Sendable {
 
     func accounts() async throws -> [PanAccount] {
         let byProvider = try await readMap()
-        return try PanProviderID.allCases.map { id in
-            let account: PanAccount, signature: Data
-            do {
-                account = try Self.snapshot(byProvider[id.rawValue], id)
-                signature = try Self.signature(byProvider[id.rawValue], id)
-            } catch {
-                guard error as? RuntimeHTTPError == .remote("CORRUPT_STORAGE") else { throw error }
-                lock.lock(); verified[id] = nil; lock.unlock()
-                return PanAccount(corrupt: id)
-            }
+        return PanProviderID.allCases.map { id in
+            let record = byProvider[id.rawValue]
+            let account = Self.snapshot(record, id)
+            let sig = Self.signature(record, id)
             lock.lock(); defer { lock.unlock() }
-            guard let prior = verified[id], prior.signature == signature else {
+            guard let prior = verified[id], prior.signature == sig else {
                 verified[id] = nil
                 return account
             }
@@ -65,12 +59,12 @@ final class PanSettingsStore: @unchecked Sendable {
             ).accounts
         } catch { throw Self.storageError(error) }
         let record = updated.first { $0.provider == provider.rawValue }
-        return try Self.snapshot(record, provider)
+        return Self.snapshot(record, provider)
     }
 
     func signature(_ provider: PanProviderID) async throws -> Data {
         let byProvider = try await readMap()
-        return try Self.signature(byProvider[provider.rawValue], provider)
+        return Self.signature(byProvider[provider.rawValue], provider)
     }
 
     /// The runtime's success is not sufficient: its credential CAS must already
@@ -80,13 +74,13 @@ final class PanSettingsStore: @unchecked Sendable {
         guard let fields = account.fields else { throw PanAccountError.unconfirmed }
         let byProvider = try await readMap()
         let record = byProvider[account.provider.rawValue]
-        let current = try Self.snapshot(record, account.provider)
+        let current = Self.snapshot(record, account.provider)
         guard current.revision == account.revision else { throw RuntimeHTTPError.remote("STALE_ACCOUNT") }
         guard current.configured == account.configured, let currentFields = current.fields,
               Set(currentFields) == Set(fields) else {
             throw PanAccountError.unconfirmed
         }
-        let signature = try Self.signature(record, account.provider)
+        let signature = Self.signature(record, account.provider)
         lock.withLock { verified[account.provider] = Verified(signature: signature, account: account) }
         return account
     }
@@ -94,8 +88,8 @@ final class PanSettingsStore: @unchecked Sendable {
     func expire(_ provider: PanProviderID, expected: Data) async throws {
         let byProvider = try await readMap()
         let record = byProvider[provider.rawValue]
-        guard try Self.signature(record, provider) == expected else { throw RuntimeHTTPError.remote("STALE_ACCOUNT") }
-        let current = try Self.snapshot(record, provider)
+        guard Self.signature(record, provider) == expected else { throw RuntimeHTTPError.remote("STALE_ACCOUNT") }
+        let current = Self.snapshot(record, provider)
         guard current.configured == true, let revision = current.revision, let fields = current.fields else { return }
         let account = PanAccount(provider: provider, revision: revision, fields: fields, status: .expired)
         lock.withLock { verified[provider] = Verified(signature: expected, account: account) }
@@ -153,31 +147,42 @@ final class PanSettingsStore: @unchecked Sendable {
         }
     }
 
-    static func snapshot(_ record: FilmPanAccountRecord?, _ provider: PanProviderID) throws -> PanAccount {
+    static func snapshot(_ record: FilmPanAccountRecord?, _ provider: PanProviderID) -> PanAccount {
         let allowed = PanProvider.all.first { $0.id == provider }!.credentialFields
-        var credentials = RuntimeObject()
-        if let record {
-            guard record.accountRevision > 0 else { throw RuntimeHTTPError.remote("CORRUPT_STORAGE") }
-            for field in allowed {
-                if let val = fieldValue(record, field) { credentials[field.rawValue] = val }
-            }
-            do { try validateCredentials(provider, .object(credentials)) }
-            catch { throw RuntimeHTTPError.remote("CORRUPT_STORAGE") }
-        }
-        let fields = credentials.filter { _, value in
-            if let text = value.panString { return !text.isEmpty }
-            return (value.panInteger ?? 0) > 0
-        }.map(\.key).sorted()
+        let fields = allowed.compactMap { field -> String? in
+            guard let val = fieldValue(record, field) else { return nil }
+            if let text = val.panString { return text.isEmpty ? nil : field.rawValue }
+            return (val.panInteger ?? 0) > 0 ? field.rawValue : nil
+        }.sorted()
         return PanAccount(provider: provider, revision: record?.accountRevision ?? 0,
                           fields: fields, status: fields.isEmpty ? .signedOut : .unverified)
     }
 
-    private static func signature(_ record: FilmPanAccountRecord?, _ provider: PanProviderID) throws -> Data {
-        _ = try snapshot(record, provider)
+    private static func signature(_ record: FilmPanAccountRecord?, _ provider: PanProviderID) -> Data {
         let fields = PanProvider.all.first { $0.id == provider }!.credentialFields
-        let value = RuntimeValue.array([.number(Double(record?.accountRevision ?? 0))] +
-            fields.map { fieldValue(record, $0) ?? .null })
-        return Data(SHA256.hash(data: try RuntimeJSON.encode(value)))
+        var hasher = SHA256()
+        func feed(_ text: String?) {
+            if let text {
+                var len = UInt64(text.utf8.count).littleEndian
+                withUnsafeBytes(of: &len) { hasher.update(bufferPointer: $0) }
+                hasher.update(data: Data(text.utf8))
+            } else {
+                var sentinel = UInt64.max.littleEndian
+                withUnsafeBytes(of: &sentinel) { hasher.update(bufferPointer: $0) }
+            }
+        }
+        var rev = (record?.accountRevision ?? 0).littleEndian
+        withUnsafeBytes(of: &rev) { hasher.update(bufferPointer: $0) }
+        for field in fields {
+            switch field {
+            case .cookie: feed(record?.cookie)
+            case .username: feed(record?.username)
+            case .password: feed(record?.password)
+            case .authorization: feed(record?.authorization)
+            case .refreshedAt: feed(record?.refreshedAtMs.map(String.init))
+            }
+        }
+        return Data(hasher.finalize())
     }
 }
 

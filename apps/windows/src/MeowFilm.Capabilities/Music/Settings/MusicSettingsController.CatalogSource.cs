@@ -36,12 +36,10 @@ public sealed partial class MusicSettingsController
 
     private void AcceptCatalogSource(MusicCatalogSourceRecord value)
     {
-        bool changed = value.Platform != catalogSourcePlatform;
         catalogSourcePlatform = value.Platform;
         catalogSourceRevision = value.Revision;
         catalogSourceLoaded = true;
         catalogSourceStatus = "";
-        if (changed) CatalogSourceInvalidated?.Invoke();
         NotifyCatalogSourceBindings();
     }
 
@@ -68,8 +66,7 @@ public sealed partial class MusicSettingsController
                 await Task.Yield();
                 try
                 {
-                    var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.CatalogSource,
-                        ct => application.GetCatalogSourceAsync(ct), cancellation.Token);
+                    var settings = await application.Library.GetCatalogSourceAsync(cancellation.Token);
                     cancellation.Token.ThrowIfCancellationRequested();
                     if (CatalogSourceCurrent(currentGeneration)) AcceptCatalogSource(settings);
                 }
@@ -124,29 +121,25 @@ public sealed partial class MusicSettingsController
         {
             try
             {
-                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.CatalogSource,
-                    ct => application.SaveCatalogSourceAsync(expectedRevision, nextPlatform, ct), lifetime.Token);
+                var saved = await application.Library.SaveCatalogSourceAsync(expectedRevision, nextPlatform, lifetime.Token);
                 if (CatalogSourceCurrent(currentGeneration)) AcceptCatalogSource(saved);
             }
-            catch (MusicOperationException error) when (error.Code is
-                "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
+            catch (Exception error) when (ErrorCode(error) is "STORAGE_CONFLICT" or "REVISION_CONFLICT")
             {
                 if (!CatalogSourceCurrent(currentGeneration)) return;
                 try
                 {
-                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.CatalogSource,
-                        ct => application.GetCatalogSourceAsync(ct), lifetime.Token);
+                    var current = await application.Library.GetCatalogSourceAsync(lifetime.Token);
                     if (!CatalogSourceCurrent(currentGeneration)) return;
                     AcceptCatalogSource(current);
                     if (catalogSourcePlatform != nextPlatform)
-                        catalogSourceStatus = error.Code == "REVISION_CONFLICT" ? "数据源设置已更新" : "数据源设置保存失败";
+                        catalogSourceStatus = ErrorCode(error) == "REVISION_CONFLICT" ? "数据源设置已更新" : "数据源设置保存失败";
                 }
                 catch
                 {
                     if (!CatalogSourceCurrent(currentGeneration)) return;
                     catalogSourceLoaded = false;
                     catalogSourceStatus = "数据源设置保存失败";
-                    CatalogSourceInvalidated?.Invoke();
                 }
             }
             catch (OperationCanceledException) { if (CatalogSourceCurrent(currentGeneration)) catalogSourceStatus = "已取消"; }
