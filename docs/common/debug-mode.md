@@ -367,10 +367,15 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | | `film.playback` | `{}` | `film` / `film-playback` | `FilmPlayerViewController` |
 | **小说** | `novel.home` | `{ sourceId? }` | `novel` / `novel-home` | Primary `.novel`（`NovelHomeViewController`） |
 | | `novel.data` | `{ sourceId?, category?, sectionId?, sectionIndex? }` | `novel` / `novel-data` | `NovelCategoryViewController` |
-| | `novel.shelf` | — | `novel` / `novel-shelf`（独立书架视图） | 小说书架视图 |
-| | `novel.history` | — | `novel` / `novel-history`（独立阅读历史视图） | 平台可选（当前 Windows 已支持） |
 | | `novel.book` | `{ bookId? }` | `novel` / `novel-book` | `NovelDetailViewController` |
 | | `novel.reader` | `{}` | `novel` / `novel-reader` | `NovelReaderViewController` |
+| **收藏与历史** | `history` | `{ tab?: "film"\|"novel", section?: "favorites"\|"history" }` | 侧栏顶部公共「历史」页 `HistoryPage` | `UNSUPPORTED_ON_PLATFORM`（iOS 使用 `library.*`） |
+| | `history.film` | `{ section?: "favorites"\|"history" }` | `HistoryPage`（影视 Tab） | `UNSUPPORTED_ON_PLATFORM`（iOS 使用 `library.film`） |
+| | `history.novel` | `{ section?: "favorites"\|"history" }` | `HistoryPage`（小说 Tab） | `UNSUPPORTED_ON_PLATFORM`（iOS 使用 `library.novel`） |
+| | `library` | `{ tab?: "music"\|"film"\|"novel", section?: "favorites"\|"history" }` | — | Primary `.library`（`MeowfilmLibraryViewController`） |
+| | `library.music` | — | — | Primary `.library` 音乐子页（`MusicLibraryViewController`） |
+| | `library.film` | `{ section?: "favorites"\|"history" }` | — | Primary `.library` 影视子页（`FilmPersonalLibraryViewController` / 二级网格） |
+| | `library.novel` | `{ section?: "favorites"\|"history" }` | — | Primary `.library` 小说子页（`NovelPersonalLibraryViewController` / 二级网格） |
 | **搜索** | `search` | `{ query?, target?: "music"\|"film"\|"novel", tab? }` | `SearchResultsPage`（若提供 `query` 同时触发提交） | `MeowfilmCoordinator.showSearch()` + 可选提交与切 Tab |
 | **通用设置** | `settings.general` | `{ section?: "appearance"\|"sources"\|"cache"\|"window"\|"shortcuts" }` | `ShellWindow` 通用设置 + 对应区域 Tab | `MeowfilmSettingsViewController`（`appearance`→外观设置，`cache`→缓存管理；`window`/`shortcuts` 返 `UNSUPPORTED_ON_PLATFORM`） |
 | **音乐设置** | `settings.music` | `{ section?: "accounts"\|"sources"\|"exclusions"\|"search"\|"quality"\|"playback"\|"metadata"\|"home-source"\|"cache" }` | `MusicSettingsView` 对应锚点/子区（`home-source`/`cache` 切到通用设置对应区或子面板） | `MusicSettingsViewController` + 对应子页面（`.aggregation`/`.sources`/`.exclusions`/`.search`/`.playback`/`.metadata`） |

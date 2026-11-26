@@ -7,7 +7,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
 {
     private static readonly IReadOnlyList<string> NovelTargets =
     [
-        "novel.home", "novel.data", "novel.shelf", "novel.history", "novel.book", "novel.reader", "settings.novel"
+        "novel.home", "novel.data", "novel.book", "novel.reader", "settings.novel"
     ];
 
     public string DebugModuleId => capability.Id;
@@ -25,8 +25,6 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
         {
             NovelCapability.HomeRoute => "novel.home",
             NovelCapability.DataRoute => "novel.data",
-            NovelCapability.ShelfRoute => "novel.shelf",
-            NovelCapability.HistoryRoute => "novel.history",
             NovelCapability.BookRoute => "novel.book",
             NovelCapability.ReaderRoute => "novel.reader",
             _ => "novel.home"
@@ -87,12 +85,6 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                 await capability.SwitchToDataSectionAsync(selected, cancellationToken);
                 return true;
             }
-            case "novel.shelf":
-                await capability.NavigateAsync(NovelCapability.ShelfRoute, cancellationToken);
-                return true;
-            case "novel.history":
-                await capability.NavigateAsync(NovelCapability.HistoryRoute, cancellationToken);
-                return true;
             case "novel.book":
             {
                 if (DebugParams.GetString(parameters, "bookId") is { Length: > 0 } bookId)
@@ -231,77 +223,6 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     onShelf = bookSession.Entry.OnShelf,
                     chapterCount = bookSession.Chapters.Count
                 },
-                player = (object?)null,
-                reader = (object?)null,
-                settings = (object?)null
-            });
-        }
-
-        if (capability.Route == NovelCapability.ShelfRoute)
-        {
-            var shelfRows = capability.Library.OrderedShelfEntries().Take(maxItems).Select((entry, idx) => new
-            {
-                index = idx,
-                id = entry.BookId,
-                bookId = entry.BookId,
-                title = entry.Book.Name,
-                author = entry.Book.Author,
-                onShelf = entry.OnShelf,
-                pinned = entry.PinnedAt is not null,
-                readAt = entry.ReadAt?.ToString("O"),
-                chapterTitle = entry.Anchor?.ChapterTitle ?? "",
-                ratio = entry.Anchor?.Ratio ?? 0d,
-                coverUrl = entry.Book.CoverUrl,
-                actions = new[] { "open", "continue", "pin", "remove" }
-            }).ToArray();
-
-            return Task.FromResult<object?>(new
-            {
-                target = "novel.shelf",
-                kind = "list",
-                loading = false,
-                error = string.IsNullOrWhiteSpace(capability.Notice) ? null : capability.Notice,
-                tabs = Array.Empty<object>(),
-                filters = Array.Empty<object>(),
-                sections = Array.Empty<object>(),
-                rows = shelfRows,
-                hasMore = false,
-                detail = (object?)null,
-                player = (object?)null,
-                reader = (object?)null,
-                settings = (object?)null
-            });
-        }
-
-        if (capability.Route == NovelCapability.HistoryRoute)
-        {
-            var historyRows = capability.Library.OrderedHistoryEntries().Take(maxItems).Select((entry, idx) => new
-            {
-                index = idx,
-                id = entry.BookId,
-                bookId = entry.BookId,
-                title = entry.Book.Name,
-                author = entry.Book.Author,
-                onShelf = entry.OnShelf,
-                readAt = entry.ReadAt?.ToString("O"),
-                chapterTitle = entry.Anchor?.ChapterTitle ?? "",
-                ratio = entry.Anchor?.Ratio ?? 0d,
-                coverUrl = entry.Book.CoverUrl,
-                actions = new[] { "open", "continue", "delete" }
-            }).ToArray();
-
-            return Task.FromResult<object?>(new
-            {
-                target = "novel.history",
-                kind = "list",
-                loading = false,
-                error = string.IsNullOrWhiteSpace(capability.Notice) ? null : capability.Notice,
-                tabs = Array.Empty<object>(),
-                filters = Array.Empty<object>(),
-                sections = Array.Empty<object>(),
-                rows = historyRows,
-                hasMore = false,
-                detail = (object?)null,
                 player = (object?)null,
                 reader = (object?)null,
                 settings = (object?)null
@@ -574,31 +495,6 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     await s.ReadAsync(idx, token: cancellationToken);
                     if (s.HasContent) await capability.OpenReaderDirectAsync(cancellationToken);
                     return new { invoked = true, chapterIndex = idx, title = s.Chapters[idx].Name };
-                }
-                if (capability.Route is NovelCapability.ShelfRoute or NovelCapability.HistoryRoute)
-                {
-                    var entries = (capability.Route == NovelCapability.ShelfRoute
-                        ? capability.Library.OrderedShelfEntries()
-                        : capability.Library.OrderedHistoryEntries()).ToArray();
-                    NovelEntry picked;
-                    if (idxParam is { } ei)
-                    {
-                        if (ei < 0 || ei >= entries.Length) throw DebugApiException.InvalidArgument("List index out of range.");
-                        picked = entries[ei];
-                    }
-                    else if (!string.IsNullOrWhiteSpace(id))
-                    {
-                        picked = entries.FirstOrDefault(e => string.Equals(e.BookId, id, StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(e.Book.Name, id, StringComparison.OrdinalIgnoreCase))
-                            ?? throw DebugApiException.NotFound($"Book '{id}' not found.");
-                    }
-                    else
-                    {
-                        if (entries.Length == 0) throw DebugApiException.InvalidState("List is empty.");
-                        picked = entries[0];
-                    }
-                    await capability.OpenEntryDirectAsync(picked, cancellationToken);
-                    return new { invoked = true, bookId = picked.BookId, title = picked.Book.Name };
                 }
                 if (capability.IsData)
                 {

@@ -37,6 +37,7 @@ internal static class Program
         FilmSourceService? pendingSources = null;
         FilmMetadataService? pendingMetadata = null;
         SearchResultsPage? searchPage = null;
+        HistoryPage? historyPage = null;
         AppMediaWindowAttachment? pendingMediaAttachment = null;
         MusicLibraryDatabase? musicLibraryStore = null;
         AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules),
@@ -90,6 +91,7 @@ internal static class Program
                 try
                 {
                     searchPage?.Dispose(); searchPage = null;
+                    historyPage?.Dispose(); historyPage = null;
                     await Task.WhenAll(pendingRules?.DisposeAsync().AsTask() ?? Task.CompletedTask,
                         pendingSources?.DisposeAsync().AsTask() ?? Task.CompletedTask,
                         pendingMetadata?.DisposeAsync().AsTask() ?? Task.CompletedTask);
@@ -120,6 +122,7 @@ internal static class Program
                 var film = capabilities.OfType<FilmCapability>().Single();
                 var novel = capabilities.OfType<NovelCapability>().Single();
                 var page = searchPage ?? throw new InvalidOperationException("Search page is missing.");
+                var history = historyPage ?? throw new InvalidOperationException("History page is missing.");
                 var shell = (ShellWindow)window;
                 shell.ActivePlaybackOwnerProvider = () => playbackCoordinator?.ActiveOwner;
                 page.NavigationToken = () => shell.GetPageNavigationToken(page, film.Id, "film-playback");
@@ -136,6 +139,20 @@ internal static class Program
                     token.ThrowIfCancellationRequested();
                     await novel.ReceiveBookAsync(item, token);
                     await shell.NavigateFromPageAsync(page, novel.Id, NovelCapability.BookRoute);
+                };
+                history.FilmNavigationToken = () => shell.GetPageNavigationToken(history, film.Id, "film-playback");
+                history.NavigateToPlaybackAsync = async (item, token) =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    await film.ReceiveSearchPlaybackAsync(item, token);
+                    await shell.NavigateFromPageAsync(history, film.Id, "film-playback");
+                };
+                history.NovelNavigationToken = () => shell.GetPageNavigationToken(history, novel.Id, NovelCapability.BookRoute);
+                history.NavigateToNovelAsync = async (entry, token) =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    novel.ReceiveLibraryEntry(entry);
+                    await shell.NavigateFromPageAsync(history, novel.Id, NovelCapability.BookRoute);
                 };
                 // Platform callbacks are composed before this attachment. Host
                 // restoration is App-owned and independent of the selected page.
@@ -161,8 +178,13 @@ internal static class Program
                 pendingMediaAttachment = null;
                 return attachment;
             },
-            capabilities => [searchPage = new SearchResultsPage(capabilities.OfType<MusicCapability>().Single(),
-                capabilities.OfType<FilmCapability>().Single(), capabilities.OfType<NovelCapability>().Single())],
+            capabilities =>
+            [
+                searchPage = new SearchResultsPage(capabilities.OfType<MusicCapability>().Single(),
+                    capabilities.OfType<FilmCapability>().Single(), capabilities.OfType<NovelCapability>().Single()),
+                historyPage = new HistoryPage(capabilities.OfType<FilmCapability>().Single(),
+                    capabilities.OfType<NovelCapability>().Single())
+            ],
             runtimeSettings: database => new FilmRuntimeSettings(database),
             stopPlayback: () => Task.WhenAll(musicPlayback?.StopAsync() ?? Task.CompletedTask,
                 filmCapability?.PrepareShutdownAsync() ?? filmPlayback?.StopAsync() ?? Task.CompletedTask),

@@ -73,13 +73,17 @@
         <TextBlock Grid.Column="1" Text="{x:Bind ModuleTitle}" VerticalAlignment="Center"/>
        </Grid></DataTemplate></ListView.ItemTemplate>
       </ListView>
+      <ListView x:Name="PublicNavigationList" Style="{StaticResource MeowFilm.NavigationList}" ItemContainerStyle="{StaticResource ShellNavigationItem}" ScrollViewer.VerticalScrollBarVisibility="Disabled" ContainerContentChanging="OnNavigationContainerContentChanging" SelectionChanged="OnPublicPageSelectionChanged" AutomationProperties.Name="公共页面">
+       <ListView.ItemsPanel><ItemsPanelTemplate><StackPanel/></ItemsPanelTemplate></ListView.ItemsPanel>
+       <ListView.ItemTemplate><DataTemplate x:DataType="local:IDesktopPage"><Grid ColumnSpacing="12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <local:NavigationIcon PathData="{x:Bind IconData}" Glyph="{x:Bind Glyph}" Width="18" Height="18" VerticalAlignment="Center"/>
+        <TextBlock Grid.Column="1" Text="{x:Bind Title}" VerticalAlignment="Center"/>
+       </Grid></DataTemplate></ListView.ItemTemplate>
+      </ListView>
       <Border Height="1" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="14,22,14,16"/>
       <ListView x:Name="NavigationList" Style="{StaticResource MeowFilm.NavigationList}" ItemContainerStyle="{StaticResource ShellNavigationItem}" ItemTemplate="{StaticResource ShellNavigationTemplate}" ScrollViewer.VerticalScrollBarVisibility="Disabled" ContainerContentChanging="OnNavigationContainerContentChanging" SelectionChanged="OnNavigationSelectionChanged" AutomationProperties.Name="内容导航">
        <ListView.ItemsPanel><ItemsPanelTemplate><StackPanel/></ItemsPanelTemplate></ListView.ItemsPanel>
-      </ListView>
-      <ListView x:Name="PublicNavigationList" Style="{StaticResource MeowFilm.NavigationList}" ItemContainerStyle="{StaticResource ShellNavigationItem}" ScrollViewer.VerticalScrollBarVisibility="Disabled" ContainerContentChanging="OnNavigationContainerContentChanging" SelectionChanged="OnPublicPageSelectionChanged" AutomationProperties.Name="公共页面">
-       <ListView.ItemsPanel><ItemsPanelTemplate><StackPanel/></ItemsPanelTemplate></ListView.ItemsPanel>
-       <ListView.ItemTemplate><DataTemplate x:DataType="local:IDesktopPage"><StackPanel Orientation="Horizontal"><TextBlock Text="{x:Bind Glyph}" Width="30" FontFamily="{StaticResource MeowFilm.Font.Icons}"/><TextBlock Text="{x:Bind Title}"/></StackPanel></DataTemplate></ListView.ItemTemplate>
       </ListView>
       <ListView x:Name="CollectionNavigationList" Margin="0,20,0,0" Style="{StaticResource MeowFilm.NavigationList}" ItemContainerStyle="{StaticResource ShellNavigationItem}" ItemTemplate="{StaticResource ShellNavigationTemplate}" ScrollViewer.VerticalScrollBarVisibility="Disabled" ContainerContentChanging="OnNavigationContainerContentChanging" SelectionChanged="OnNavigationSelectionChanged" AutomationProperties.Name="我的">
        <ListView.GroupStyle><GroupStyle HeaderContainerStyle="{StaticResource MeowFilm.GroupHeaderItem}">

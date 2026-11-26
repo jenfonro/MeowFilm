@@ -65,6 +65,7 @@ public struct PosterCatalogSection: Equatable {
     public let id: String
     public let title: String
     public let hasMore: Bool
+    public let actionTitle: String?
     public let statusText: String
     public let items: [PosterCatalogCard]
 
@@ -72,12 +73,14 @@ public struct PosterCatalogSection: Equatable {
         id: String,
         title: String,
         hasMore: Bool,
+        actionTitle: String? = nil,
         statusText: String,
         items: [PosterCatalogCard]
     ) {
         self.id = id
         self.title = title
         self.hasMore = hasMore
+        self.actionTitle = actionTitle
         self.statusText = statusText
         self.items = items
     }
@@ -353,7 +356,9 @@ final class PosterSectionHeaderView: UICollectionReusableView {
     static let reuseIdentifier = "PosterSectionHeaderView"
     private let titleLabel = UILabel()
     private let titleButton = UIButton(type: .system)
+    private let actionButton = UIButton(type: .system)
     private var onMore: (() -> Void)?
+    private var onAction: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -375,8 +380,14 @@ final class PosterSectionHeaderView: UICollectionReusableView {
         titleButton.titleLabel?.lineBreakMode = .byTruncatingTail
         titleButton.accessibilityTraits.insert(.header)
         titleButton.addAction(UIAction { [weak self] _ in self?.onMore?() }, for: .touchUpInside)
+
+        actionButton.titleLabel?.font = .systemFont(ofSize: 13)
+        actionButton.contentHorizontalAlignment = .trailing
+        actionButton.addAction(UIAction { [weak self] _ in self?.onAction?() }, for: .touchUpInside)
+
         addSubview(titleLabel)
         addSubview(titleButton)
+        addSubview(actionButton)
     }
 
     @available(*, unavailable)
@@ -385,33 +396,51 @@ final class PosterSectionHeaderView: UICollectionReusableView {
     override func prepareForReuse() {
         super.prepareForReuse()
         onMore = nil
+        onAction = nil
         titleButton.accessibilityIdentifier = nil
         titleButton.accessibilityLabel = nil
+        actionButton.accessibilityIdentifier = nil
+        actionButton.accessibilityLabel = nil
     }
 
     func configure(
         title: String,
         theme: PageTheme,
         moreAccessibilityID: String,
-        onMore: (() -> Void)?
+        onMore: (() -> Void)?,
+        actionTitle: String? = nil,
+        onAction: (() -> Void)? = nil
     ) {
         titleLabel.text = title
         titleLabel.textColor = UIColor(theme.ink)
         self.onMore = onMore
+        self.onAction = onAction
         titleLabel.isHidden = onMore != nil
         titleButton.isHidden = onMore == nil
         titleButton.configuration?.title = title
         titleButton.configuration?.baseForegroundColor = UIColor(theme.ink)
         titleButton.accessibilityIdentifier = moreAccessibilityID
         titleButton.accessibilityLabel = "查看更多\(title)"
+
+        let hasAction = actionTitle != nil && onAction != nil
+        actionButton.isHidden = !hasAction
+        actionButton.setTitle(actionTitle, for: .normal)
+        actionButton.setTitleColor(UIColor(theme.muted), for: .normal)
+        actionButton.accessibilityIdentifier = hasAction ? "\(moreAccessibilityID).action" : nil
+        actionButton.accessibilityLabel = actionTitle
         setNeedsLayout()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let width = min(bounds.width, ceil(titleButton.intrinsicContentSize.width))
+        let actionWidth: CGFloat = actionButton.isHidden
+            ? 0
+            : max(44, ceil(actionButton.intrinsicContentSize.width) + 8)
+        actionButton.frame = CGRect(x: max(0, bounds.width - actionWidth), y: 0, width: actionWidth, height: bounds.height)
+        let availableWidth = max(0, bounds.width - (actionWidth > 0 ? actionWidth + 8 : 0))
+        let width = min(availableWidth, ceil(titleButton.intrinsicContentSize.width))
         titleButton.frame = CGRect(x: 0, y: 0, width: width, height: bounds.height)
-        titleLabel.frame = CGRect(x: 0, y: 8, width: bounds.width, height: bounds.height - 16)
+        titleLabel.frame = CGRect(x: 0, y: 8, width: availableWidth, height: bounds.height - 16)
     }
 }
 

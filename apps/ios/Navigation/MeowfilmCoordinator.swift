@@ -226,6 +226,32 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         navigation.pushViewController(page, animated: animated)
     }
 
+    func showFilmPersonalSection(_ sectionKind: PersonalLibrarySectionKind, animated: Bool = true) {
+        guard let history = assembly.filmHistory else { return }
+        let category = FilmPersonalCategoryViewController(
+            kind: sectionKind,
+            library: assembly.filmLibrary,
+            history: history,
+            images: assembly.filmImages,
+            themeProvider: assembly.appearance
+        )
+        category.onSelectItem = { [weak self] item in
+            self?.showFilm(item, kind: item.kind == .movie ? .movie : .tv, entrySurface: "library")
+        }
+        navigation.pushViewController(category, animated: animated)
+    }
+
+    func showNovelPersonalSection(_ sectionKind: NovelPersonalSectionKind, animated: Bool = true) {
+        guard let novel = assembly.novel else { return }
+        let category = NovelPersonalCategoryViewController(
+            kind: sectionKind,
+            feature: novel,
+            themeProvider: assembly.appearance
+        )
+        category.onSelectBook = { [weak self] book in self?.showNovel(book) }
+        navigation.pushViewController(category, animated: animated)
+    }
+
     private func startupPage() -> MeowfilmStartupViewController {
         let page = MeowfilmStartupViewController(themeProvider: assembly.appearance)
         page.isLoading = !assembly.startupFailed
@@ -495,7 +521,35 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             },
             { [weak self] in
                 guard let self else { return UIViewController() }
-                return MusicLibraryViewController(model: model, appearance: appearance, router: self)
+                guard let novel = self.assembly.novel,
+                      let filmHistory = self.assembly.filmHistory else {
+                    return MusicLibraryViewController(model: model, appearance: appearance, router: self)
+                }
+                let musicLib = MusicLibraryViewController(model: model, appearance: appearance, router: self)
+                let filmLib = FilmPersonalLibraryViewController(
+                    library: self.assembly.filmLibrary,
+                    history: filmHistory,
+                    images: self.assembly.filmImages,
+                    themeProvider: appearance
+                )
+                filmLib.onSelectItem = { [weak self] item in
+                    let kind: FilmPlaybackKind = item.kind == .movie ? .movie : .tv
+                    self?.showFilm(item, kind: kind, entrySurface: "library")
+                }
+                filmLib.onSelectSection = { [weak self] sectionKind in
+                    self?.showFilmPersonalSection(sectionKind)
+                }
+                let novelLib = NovelPersonalLibraryViewController(feature: novel, themeProvider: appearance)
+                novelLib.onSelectBook = { [weak self] book in self?.showNovel(book) }
+                novelLib.onSelectSection = { [weak self] sectionKind in
+                    self?.showNovelPersonalSection(sectionKind)
+                }
+                return MeowfilmLibraryViewController(
+                    musicPage: musicLib,
+                    filmPage: filmLib,
+                    novelPage: novelLib,
+                    themeProvider: appearance
+                )
             }
         ]
         let page = MeowfilmPrimaryShellViewController(
@@ -508,6 +562,23 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 case .novel:
                     guard let home = self.novelHome else { return }
                     content = .novel(discovery: home.discovery)
+                case .library:
+                    let activeTab = (main.contentViewController(for: .library) as? MeowfilmLibraryViewController)?.selectedTab ?? .music
+                    switch activeTab {
+                    case .music:
+                        content = .music(selectedPage: .library)
+                    case .film:
+                        content = .film(settings: self.assembly.filmSettings)
+                    case .novel:
+                        if let home = self.novelHome {
+                            content = .novel(discovery: home.discovery)
+                        } else if let novelPage = main.contentViewController(for: .novel) as? NovelHomeViewController {
+                            self.novelHome = novelPage
+                            content = .novel(discovery: novelPage.discovery)
+                        } else {
+                            content = .music(selectedPage: .library)
+                        }
+                    }
                 default: content = .music(selectedPage: main.selectedPage)
                 }
                 self.root.showSidebar(content: content)

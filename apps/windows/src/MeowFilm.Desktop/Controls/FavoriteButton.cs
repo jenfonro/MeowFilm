@@ -36,7 +36,11 @@ public sealed class FavoriteButton : Button
         Content = icon;
         if (DesktopVisual.TryAppStyle("MeowFilm.GhostButton") is { } ghost) Style = ghost;
         RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => { if (IsFavorited) RefreshGlyph(); });
-        Loaded += (_, _) => RefreshGlyph();
+        Loaded += (_, _) =>
+        {
+            themeObserver?.Dispose();
+            themeObserver = DesktopTheme.Observe(this, RefreshGlyph);
+        };
         Unloaded += (_, _) => { if (IsLoaded) return; themeObserver?.Dispose(); themeObserver = null; };
         RefreshGlyph();
     }
@@ -45,7 +49,6 @@ public sealed class FavoriteButton : Button
     {
         if (IsFavorited)
         {
-            if (IsLoaded) themeObserver ??= DesktopTheme.Observe(this, RefreshGlyph);
             icon.Glyph = "\uEB52";
             icon.Foreground = DesktopTheme.GetIsHighContrast(this)
                 ? Foreground
@@ -53,7 +56,6 @@ public sealed class FavoriteButton : Button
         }
         else
         {
-            themeObserver?.Dispose(); themeObserver = null;
             icon.Glyph = "\uEB51";
             icon.ClearValue(IconElement.ForegroundProperty);
         }

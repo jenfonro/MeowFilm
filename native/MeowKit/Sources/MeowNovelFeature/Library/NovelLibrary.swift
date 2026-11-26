@@ -62,6 +62,13 @@ public actor NovelLibrary {
             "present": .bool(present)
         ]))
     }
+    public func clearHistory() async throws {
+        try checkOpen()
+        try await database.transaction { db in
+            try NovelLibraryRepository.clearHistory(db)
+        }
+        DebugRuntime.log(.novel, sub: "history", event: "clear", level: .debug)
+    }
     @discardableResult
     public func record(_ book: NovelBook, identity: String, anchor: NovelAnchor) async throws -> String {
         try checkOpen()

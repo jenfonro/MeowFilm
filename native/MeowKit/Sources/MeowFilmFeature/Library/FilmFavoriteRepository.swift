@@ -26,7 +26,7 @@ enum FilmFavoriteRepository {
         try db.query(
             "SELECT favorite_id,keyword,title,poster,score,text_badge,subtitle," +
             "content_kind,year,tmdb_kind,tmdb_id,douban_kind,douban_id,added_at_ms " +
-            "FROM film_favorites ORDER BY position,favorite_id"
+            "FROM film_favorites ORDER BY added_at_ms DESC,position DESC,favorite_id ASC"
         ) { c in
             let favoriteID = try c.text(0)
             let keyword = try c.text(1)

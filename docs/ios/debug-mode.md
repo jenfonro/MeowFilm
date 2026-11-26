@@ -61,9 +61,10 @@ iOS 端解析规则：
 | 目标 / 端点 | iOS 行为 | 说明 |
 | --- | --- | --- |
 | `POST /debug/v1/nav/forward` | `501 UNSUPPORTED_ON_PLATFORM` | iOS 导航栈无前进历史 |
-| `novel.shelf` | `501 UNSUPPORTED_ON_PLATFORM` | iOS 无独立小说书架页（见 [novel.md](novel.md)）；可通过 `storage/query` 查询 `novel_books` 或用 `novel/command` (`toggle_shelf`) 操控 |
+| `history` / `history.film` / `history.novel` | `501 UNSUPPORTED_ON_PLATFORM` | Windows 桌面专属公共历史页；iOS 请使用 `library` / `library.film` / `library.novel` |
 | `settings.media-controls` | `501 UNSUPPORTED_ON_PLATFORM` | Windows 桌面专属快捷键设置页 |
 | `settings.general` (`window` / `shortcuts`) | `501 UNSUPPORTED_ON_PLATFORM` | Windows 桌面专属窗口/快捷键分组 |
+| `library` / `library.music` / `library.film` / `library.novel` | 打开底栏「我的」`MeowfilmLibraryViewController` 并切至对应子标签（可选 `section: "favorites" \| "history"` 直达二级网格） | 音乐曲库、影视收藏/历史、小说收藏/历史统一入口 |
 | `music.history` | 打开 `MusicQueueViewController` 并切至 `songs` | iOS 历史单曲统一承载于队列浮层 |
 | `music.archives` | 打开 `MusicQueueViewController` 并切至历史歌单卡片（空历史时落回 `songs`） | 对应已播队列记录 |
 | `music.personal` / `music.favorites` | 映射至 `MusicLibraryViewController` 或收藏歌单 `MusicCollectionViewController` | 归并展示于曲库 |

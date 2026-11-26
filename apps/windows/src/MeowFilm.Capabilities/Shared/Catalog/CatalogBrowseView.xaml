@@ -100,7 +100,10 @@
          <Button Tag="{x:Bind}" Click="More_Click" Style="{StaticResource Catalog.ShelfTitleButton}" AutomationProperties.Name="{x:Bind Title, Converter={StaticResource Catalog.ActionName}, ConverterParameter=查看更多}">
           <StackPanel Orientation="Horizontal"><TextBlock Text="{x:Bind Title}" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" VerticalAlignment="Center" /><FontIcon Glyph="&#xE76C;" FontSize="12" Margin="8,0,0,0" VerticalAlignment="Center" /></StackPanel>
          </Button>
-         <Button Grid.Column="1" Click="HomeRefresh_Click" Style="{StaticResource Catalog.ShelfRefreshButton}" IsEnabled="{x:Bind CanRefresh, Mode=OneWay}" AutomationProperties.Name="{x:Bind Title, Converter={StaticResource Catalog.ActionName}, ConverterParameter=刷新}"><FontIcon Glyph="&#xE72C;" FontSize="16" /></Button>
+         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <Button Tag="{x:Bind}" Content="{x:Bind ActionText}" Click="HomeAction_Click" Style="{StaticResource Catalog.MoreButton}" IsEnabled="{x:Bind CanAction, Mode=OneWay}" Visibility="{x:Bind ShowAction, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="{x:Bind ActionText}" />
+          <Button Click="HomeRefresh_Click" Style="{StaticResource Catalog.ShelfRefreshButton}" IsEnabled="{x:Bind CanRefresh, Mode=OneWay}" Visibility="{x:Bind ShowRefresh, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="{x:Bind Title, Converter={StaticResource Catalog.ActionName}, ConverterParameter=刷新}"><FontIcon Glyph="&#xE72C;" FontSize="16" /></Button>
+         </StackPanel>
         </Grid>
         <local:CatalogShelf Admitted="Shelf_Admitted" ItemActivated="Shelf_ItemActivated" RetryRequested="Shelf_RetryRequested" />
        </StackPanel>
@@ -123,7 +126,10 @@
       <ColumnDefinition Width="Auto" />
      </Grid.ColumnDefinitions>
      <TextBlock x:Name="DataTitle" Text="{x:Bind Controller.BrowseActiveData.Title, Mode=OneWay}" Style="{StaticResource MeowFilm.SectionHeading}" />
-     <Button Grid.Column="1" Content="刷新" Click="DataRefresh_Click" Style="{StaticResource Catalog.MoreButton}" IsEnabled="{x:Bind Controller.BrowseActiveData.CanRefresh, Mode=OneWay}" AutomationProperties.Name="{x:Bind Controller.DataRefreshAutomationName}" />
+     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+      <Button Content="{x:Bind Controller.BrowseActiveData.ActionText, Mode=OneWay}" Click="DataAction_Click" Style="{StaticResource Catalog.MoreButton}" IsEnabled="{x:Bind Controller.BrowseActiveData.CanAction, Mode=OneWay}" Visibility="{x:Bind Controller.BrowseActiveData.ShowAction, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="{x:Bind Controller.DataActionAutomationName, Mode=OneWay}" />
+      <Button Content="刷新" Click="DataRefresh_Click" Style="{StaticResource Catalog.MoreButton}" IsEnabled="{x:Bind Controller.BrowseActiveData.CanRefresh, Mode=OneWay}" Visibility="{x:Bind Controller.BrowseActiveData.ShowRefresh, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="{x:Bind Controller.DataRefreshAutomationName}" />
+     </StackPanel>
     </Grid>
     <Border Margin="0,0,0,20" Visibility="{x:Bind Controller.BrowseActiveData.FiltersVisibility, Mode=OneWay}">
      <ItemsControl x:Name="DataFilters" ItemsSource="{x:Bind Controller.BrowseActiveData.FilterRows, Mode=OneWay}">

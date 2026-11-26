@@ -75,6 +75,10 @@ public final class NovelFeature: ObservableObject {
             try await reloadLocal()
         }
     }
+    public func clearHistory() async throws {
+        try await library.clearHistory()
+        try await reloadLocal()
+    }
     public func saveSettings(_ settings: NovelReadingSettings) async throws {
         try await library.saveSettings(settings); try await reloadLocal()
         for session in sessions.values { session.reprocess() }

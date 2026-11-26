@@ -26,6 +26,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     var loading = false
     var loadError: String?
     private var renderedPlaylistAppearance: MusicPlaylistAppearance?
+    public override var usesPageHeader: Bool { false }
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
         self.model = model; self.router = router
         super.init(appearance: appearance)
@@ -176,18 +177,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         )
     }
 
-    public func configurePrimaryHeader(
-        _ header: PageHeaderView,
-        title pageTitle: String,
-        host: PageViewController,
-        openSearch: @escaping @MainActor () -> Void
-    ) -> ((PageTheme) -> Void)? {
-        let titleButton = PageHeaderTextButton(title: pageTitle) {}
-        titleButton.contentHorizontalAlignment = .leading
-        titleButton.titleLabel?.font = .systemFont(ofSize: 20)
-        titleButton.accessibilityIdentifier = "app.primary.title"
-        titleButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        header.setTitleView(titleButton)
+    public func makeHeaderTrailingButtons(host: PageViewController) -> [UIView] {
         let layout = PageHeaderButton(image: PageIcon.image(.list), accessibilityLabel: "切换为列表") { [weak self] in
             self?.togglePlaylistAppearance()
         }
@@ -204,7 +194,22 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             self?.requestCreatePlaylist()
         }
         add.accessibilityIdentifier = "app.primary.add"
-        header.setTrailing([layout, add])
+        return [layout, add]
+    }
+
+    public func configurePrimaryHeader(
+        _ header: PageHeaderView,
+        title pageTitle: String,
+        host: PageViewController,
+        openSearch: @escaping @MainActor () -> Void
+    ) -> ((PageTheme) -> Void)? {
+        let titleButton = PageHeaderTextButton(title: pageTitle) {}
+        titleButton.contentHorizontalAlignment = .leading
+        titleButton.titleLabel?.font = .systemFont(ofSize: 20)
+        titleButton.accessibilityIdentifier = "app.primary.title"
+        titleButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        header.setTitleView(titleButton)
+        header.setTrailing(makeHeaderTrailingButtons(host: host))
         return { theme in titleButton.setTitleColor(UIColor(theme.ink), for: .normal) }
     }
 

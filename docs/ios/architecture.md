@@ -89,9 +89,9 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 禁止将大量跨子域文件平铺堆塞在单一目录，UI 模块按清晰职责建立子目录归位：
 
 - `MeowUI/`：`Accounts/`、`Appearance/`、`Artwork/`、`Catalog/`、`Controls/`、`Layout/`、`List/`、`Management/`、`Navigation/`、`Presentation/`、`Search/`、`Settings/`
-- `MeowFilmFeature/`：`Home/`、`Detail/`、`Player/`、`Search/UI/`、`Settings/UI/{Core,Sources,Playback,Rules,Pan}/`、`Debug/`（保留 `Catalog/`、`Library/`、`Pan/`、`Playback/`、`Rules/`、`Settings/`、`SettingsSources/`、`Sources/` 非 UI 业务目录）
+- `MeowFilmFeature/`：`Home/`、`Detail/`、`Library/UI/`、`Player/`、`Search/UI/`、`Settings/UI/{Core,Sources,Playback,Rules,Pan}/`、`Debug/`（保留 `Catalog/`、`Library/`、`Pan/`、`Playback/`、`Rules/`、`Settings/`、`SettingsSources/`、`Sources/` 非 UI 业务目录）
 - `MeowMusicFeature/`：`Appearance/`、`Artwork/`、`Catalog/{Browse,Channels,DailyStyle}/`、`Library/UI/`、`Playback/{Artwork,Cache,FM,FullPlayer,Lyrics,MiniPlayer,Model,Presentation,Queue,Sources}/`、`Presentation/`、`Search/UI/`、`Settings/{State,Pages,Accounts,Sources,Search}/`、`Debug/`
-- `MeowNovelFeature/`：`Artwork/`、`Browse/`、`Detail/`、`Reader/`、`Settings/`、`Web/`、`Debug/`（保留 `Library/`、`Reading/`、`Runtime/`）
+- `MeowNovelFeature/`：`Artwork/`、`Browse/`、`Detail/`、`Library/UI/`、`Reader/`、`Settings/`、`Web/`、`Debug/`（保留 `Library/`、`Reading/`、`Runtime/`）
 - `apps/ios/Debug/`：`Host/`、`Navigation/`、`Inspection/`、`Actions/`
 
 ### 主题传播、布局与外观策略
@@ -131,7 +131,7 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 - 推荐／频道／影视／小说／我的是五个独立页面；切换时各页连同自己的页头按页面顺序左右滑动，页头不在页面间移动或共用，底部栏选中态在切换开始时同步；减少动态效果时直接切换。底部入口为「首页／影视／小说／我的」，「首页」进入推荐页；频道页也高亮「首页」，但仍保持真实频道页面身份和不透明 dock 背景。
 - 推荐页头依次为菜单、搜索胶囊与原功能按钮；频道页头依次为菜单、频道滚动条、频道选择及圆形搜索按钮，不再提供「推荐／频道」页面切换控件。频道切换条在频道数据到达后显示，搜索进入既有搜索页。频道通过现有内容入口或侧边栏「频道」进入；底部「首页」、音乐侧边栏「首页」及屏幕左边缘右滑均返回推荐。边缘返回沿用统一距离／速度规则，短滑或取消保留当前频道；频道内容区横滑切换频道，分页、栏目、轮播和列表滚动都等待边缘手势失败后才接管触摸。
 - 影视页头为菜单与占据其余标题区域的搜索胶囊；菜单打开影视侧边栏，胶囊进入统一搜索页（默认选中影视目标），返回保留原影视页面与滚动位置。影视侧边栏「首页」返回影视首页。播放器与底部栏固定在屏幕底部，不随键盘升起，键盘只增加内容的底部避让。进入／返回非主页面时底部栏只做上下收放，按钮行保持固定高度与横向位置，不随页面左右滑动；这是既定效果。
-- 音乐、影视与小说共用侧边栏框架：保留原窗口底色和顶部居中 App 图标，菜单按内容高度排列，图标槽与文字列统一对齐，选中项使用圆角底色与主题强调色；普通文字保持系统 Regular。菜单区域可独立滚动，带图标、左对齐文字和尾部箭头的“设置”固定在底部安全区上方，不随列表滚动。音乐主菜单为首页／频道；“我的”沿用音乐内容。影视主菜单为首页／视频源（视频源行当前仅展示，不接入首页切源）。音乐与影视侧边栏均不提供数据源快捷切换。小说主菜单为首页／已添加书源（可发现书源切换同一发现会话，详见[小说](novel.md)）；二级页仍使用返回入口。
+- 音乐、影视与小说共用侧边栏框架：保留原窗口底色和顶部居中 App 图标，菜单按内容高度排列，图标槽与文字列统一对齐，选中项使用圆角底色与主题强调色；普通文字保持系统 Regular。菜单区域可独立滚动，带图标、左对齐文字和尾部箭头的“设置”固定在底部安全区上方，不随列表滚动。音乐主菜单为首页／频道；“我的”（`MeowfilmLibraryViewController`）页头居中展示「音乐／影视／小说」三标签，随下方 `UIPageViewController` 横向滑动与点击连续插值下划线及文字颜色，右侧仅在「音乐」页显示视图切换与新建歌单按钮，左侧菜单按当前激活子标签打开音乐／影视／小说侧边栏，其中「影视」与「小说」子页复用 `PosterHomeViewController` 固定呈现「我的收藏」「历史记录」两栏及二级网格。影视主菜单为首页／视频源（视频源行当前仅展示，不接入首页切源）。音乐与影视侧边栏均不提供数据源快捷切换。小说主菜单为首页／已添加书源（可发现书源切换同一发现会话，详见[小说](novel.md)）；二级页仍使用返回入口。
 - 页面跳转由路由显式调用，不通过业务状态标志触发。
 - 上层呈现通过视图层级阻挡下层触摸。
 - 资源活跃、页面可见及浮层呈现时机分别管理；待处理的错误在页面稳定出现或导航／呈现转场完成后处理，不因此重新加载业务。

@@ -32,13 +32,14 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 `apps/windows/src/MeowFilm.Desktop` 按职责划分为 `Appearance/`、`Artwork/`、`Contracts/`、`Controls/`、`Dialogs/`、`Management/`、`MediaControls/`、`Navigation/`、`Shell/{Window,Coordinators,Views,Debug}/`、`Theme/`、`Viewport/`（资源入口为 `ms-appx:///MeowFilm.Desktop/Theme/Theme.xaml`，详细接线见[桌面壳](desktop-shell.md)）。
 
-`apps/windows/src/MeowFilm.Capabilities` 根部按垂直领域与共享层收口为 6 个目录：
+`apps/windows/src/MeowFilm.Capabilities` 根部按垂直领域与共享层收口为 7 个目录：
 
 | 目录 | 责任 |
 | --- | --- |
 | `Music/` | 唯一音乐能力垂直域：`Composition/`（`MusicCapability`、`MusicNavigation`、`MusicRuntimeContext`、`MusicDialogs`、`MusicPlatformInfo`、`MusicNativeApplication`、`MusicDebugAdapter`）、`Accounts/{Owners,Protocol,Storage,Presentation}/`、`Catalog/`（`MusicCatalogController`、`MusicDiscoveryController`、`Services/MusicCatalogOptionalReadService`、`Presentation/` 及显式 `MusicCatalogContext`、`MusicCatalogSectionView`/`MusicCatalogCardView`）、`Feedback/`、`Library/{Owners,Storage}/`、`Lyrics/`、`Platforms/`、`Playback/`（`MusicPlaybackController`、`MusicSourceSession`、`MusicPlaybackClock` 及声明式 `MusicFmPanelView`/`MusicSourcePickerDialogView`）、`PlaybackCache/`、`Recommendations/`、`Scripting/`（LX 音源脚本管理）、`Search/`、`Settings/`（`MusicSettingsController` 与 `Presentation/MusicSettingsConverters.cs`）、`Sync/`、`Presentation/`（含 `MusicView`、`MusicContentMenus`、`MusicTheme.xaml` 与声明式 `MusicPlaylistNameDialogView`） |
 | `Film/` | 影视垂直域：`Composition/`（`FilmCapability`、`FilmDebugAdapter`、`FilmRuntimeSettings`）、`Home/`、`Playback/`、`Library/`、`Rules/`、`Search/`、`Sources/` 与 `Presentation/{Controls,Dialogs,Settings,Views}/`（含声明式 `FilmEpisodeDirectoryView`、`FilmManualMatchDialogView`、`FilmDirectoryDialogView` 及全声明式 `FilmSettingsView` 表格单元模板） |
 | `Novel/` | 小说垂直域：`Composition/`（`NovelCapability`、`NovelDebugAdapter`、`NovelWork`）、`Domain/`（书源配置、本地书架/历史/净化库、规则与会话）与 `Presentation/{Controls,Dialogs,Reader,Settings,Views}/`（含 `NovelTheme.xaml`、声明式 XAML 页面、`ManagementList` 规则设置及 Win2D／DirectWrite 原生阅读器） |
+| `History/` | 跨影视与小说的公共收藏与历史记录页：`HistoryPage`（`IDesktopPage`）、`HistoryPage.xaml(.cs)`（顶部 `影视`／`小说` 双标签，复用 `CatalogBrowseView` 固定展示 `我的收藏` 与 `历史记录` 两栏及二级全部网格／清空历史）、`HistoryDomainController`、`HistoryModels` 与 `HistoryDebugAdapter` |
 | `Pan/` | 内置网盘账号配置与声明式 `Presentation/` 视图 |
 | `Search/` | 跨能力统一搜索页：`SearchResultsPage`、`SearchResultsPage.xaml(.cs)`（全声明式小说/影视/音乐结果投影）与 `SearchResultsDebugAdapter` |
 | `Shared/` | 跨能力共享 UI 设施（对具体业务域零反向依赖）：`CapabilityFilePicker`（三能力统一 Windows App SDK 文件选择器）、`Accounts/`（含 `AccountLoginSurface`、`AccountSettingsTheme.xaml`、`QrCodeImage`）、`Catalog/`（影视与小说复用的 `CatalogModels`、`CatalogShelf`、`CatalogBrowseView`）、`Controls/`（`CardMotion`、`Shelf`、`AdaptiveCardPanel`、`AspectRatioDecorator`、`SeekBar`、`SkipButton`、`UserScrollIntent`）、`Settings/`（`ISettingsPriorityItem`、`SettingsPriorityList`、`SettingsReorderDrag`/`Shift`、`SettingsLayout`、`SettingsTheme.xaml`）、`Theme/`（`CapabilityTheme.xaml`、`CardBrushes.xaml`） |

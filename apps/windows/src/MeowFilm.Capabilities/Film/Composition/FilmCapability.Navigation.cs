@@ -44,6 +44,7 @@ public sealed partial class FilmCapability
             return;
         }
         await filmPlayback.LeaveAsync(retainedOwner: filmPlayback.CanRetainMedia);
+        HistoryInvalidated?.Invoke(this, EventArgs.Empty);
         if (route == DataRoute)
         {
             if (ActiveData.CanSeedFromHome)
@@ -94,11 +95,48 @@ public sealed partial class FilmCapability
             ObservePresentationLeave(owner.LeaveAsync(owner.CanRetainMedia));
     }
 
-    public Task LeaveNavigationAsync()
+    public async Task LeaveNavigationAsync()
     {
         navigationGeneration++;
         RetireRequests();
-        return filmPlayback.LeaveAsync(filmPlayback.CanRetainMedia);
+        await filmPlayback.LeaveAsync(filmPlayback.CanRetainMedia);
+        HistoryInvalidated?.Invoke(this, EventArgs.Empty);
+    }
+
+    internal async Task<(FilmCardItem[] Items, System.Text.Json.JsonElement? NextCursor)> ReadHistoryCardsAsync(
+        int limit,
+        System.Text.Json.JsonElement? historyAfter,
+        CancellationToken cancellationToken)
+    {
+        var response = await business.ReadHistoryListAsync(limit, historyAfter, cancellationToken);
+        var items = new List<FilmCardItem>();
+        foreach (var row in FilmJson.Array(response, "history"))
+        {
+            if (FilmJson.Member(row, "card") is not { ValueKind: System.Text.Json.JsonValueKind.Object } cardJson)
+                continue;
+            try
+            {
+                var entry = FilmEntry.Read(cardJson);
+                items.Add(new FilmCardItem(entry.TargetId, entry.Title, entry.Poster, entry.Score)
+                {
+                    TextBadge = entry.TextBadge,
+                    Subtitle = entry.SiteLabel,
+                    Entry = entry
+                });
+            }
+            catch (FilmPlaybackException) { }
+        }
+        System.Text.Json.JsonElement? nextCursor =
+            FilmJson.Member(response, "historyAfter") is { ValueKind: System.Text.Json.JsonValueKind.Object } cursor
+                ? cursor.Clone()
+                : null;
+        return (items.ToArray(), nextCursor);
+    }
+
+    internal async Task ClearHistoryAsync(CancellationToken cancellationToken)
+    {
+        await business.ClearHistoryAsync(null, cancellationToken);
+        HistoryInvalidated?.Invoke(this, EventArgs.Empty);
     }
 
     internal void ResumePresentation()

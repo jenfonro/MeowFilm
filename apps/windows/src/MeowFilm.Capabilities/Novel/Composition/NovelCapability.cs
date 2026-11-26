@@ -10,7 +10,7 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopImmersiveSource, IDesktopSidebarSource, IDebugModuleAdapterSource, ICatalogBrowseController
 {
-    public const string HomeRoute = "novel-home", DataRoute = "novel-data", ShelfRoute = "novel-shelf", HistoryRoute = "novel-history", BookRoute = "novel-book", ReaderRoute = "novel-reader";
+    public const string HomeRoute = "novel-home", DataRoute = "novel-data", BookRoute = "novel-book", ReaderRoute = "novel-reader";
     private readonly NovelWork work = new();
     private CancellationTokenSource presentation = new();
     private readonly Dictionary<string, NovelBookSession> sessions = [];
@@ -35,8 +35,6 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         Navigation = [new(HomeRoute, "小说", "\uE8F1", ShowInSidebar: false)
             { IconData = "M12,5 C9,3 6,3 3,4 L3,19 C6,18 9,18 12,20 C15,18 18,18 21,19 L21,4 C18,3 15,3 12,5 L12,20" },
             new(DataRoute, "栏目详情", "\uE8F1", ShowInSidebar: false),
-            new(ShelfRoute, "书架", "\uE82D"),
-            new(HistoryRoute, "阅读历史", "\uE81C"),
             new(BookRoute, "书籍详情", "\uE8F1", ShowInSidebar: false), new(ReaderRoute, "阅读", "\uE8F1", ShowInSidebar: false)];
         view = new(this); settings = new(this); debugAdapter = new(this);
         Library.Changed += LibraryChanged; Sources.Changed += SourcesChanged; Sources.ApplyFailed += SourceApplyFailed;
@@ -182,6 +180,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         var entry = Library.Find(book, key) ?? new(Guid.NewGuid().ToString("N"), key, book);
         ReceiveEntry(entry);
     }
+    public void ReceiveLibraryEntry(NovelEntry entry) => ReceiveEntry(entry);
     private void ReceiveEntry(NovelEntry entry)
     {
         if (!sessions.TryGetValue(entry.BookId, out var session))

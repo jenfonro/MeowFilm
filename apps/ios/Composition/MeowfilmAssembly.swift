@@ -50,6 +50,7 @@ final class MeowfilmAssembly: ObservableObject {
     let musicImages = MusicArtworkImages()
     @Published var music: MusicViewModel?
     private(set) var filmSettings: FilmSettingsModel?
+    private(set) var filmHistory: FilmHistoryModel?
     private(set) var filmSearch: FilmSearchService?
     @Published private(set) var novel: NovelFeature?
     private var closeNovel: (@MainActor @Sendable () async -> Void)?
@@ -220,6 +221,7 @@ final class MeowfilmAssembly: ObservableObject {
             for await _ in await resources.scriptSession.connections() {
                 guard !Task.isCancelled, let self, !self.closed else { return }
                 self.filmSearch?.runtimeDidBecomeAvailable()
+                self.filmHistory?.reload()
                 for model in self.filmModels { model.runtimeDidBecomeAvailable() }
             }
         }
@@ -244,6 +246,9 @@ final class MeowfilmAssembly: ObservableObject {
                                              tmdb: tmdb, douban: douban, pan: pan, playback: playbackSettings,
                                              player: playerPreferences)
         self.filmSettings = filmSettings
+        self.filmHistory = FilmHistoryModel(transport: FilmPlaybackTransport {
+            try await resources.scriptSession.connection()
+        })
         filmSettings.start()
         guard !closed, !Task.isCancelled else { return }
         await resources.musicScripts.start()
@@ -294,6 +299,7 @@ final class MeowfilmAssembly: ObservableObject {
         closed = true
         music?.prepareForClose()
         filmSettings?.close()
+        filmHistory?.close()
         automaticSync?.stop()
         runtimeAvailability?.cancel(); runtimeAvailability = nil
         startup?.cancel(); scriptStartup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
