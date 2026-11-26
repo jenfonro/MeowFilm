@@ -80,7 +80,7 @@ final class PlaybackAudioInput: AudioByteInput, @unchecked Sendable {
             }
             if offset >= total { return Data() }
             let requestCount = Int(min(Int64(count), total - offset))
-            let data = try wait {
+            let data = try source.readAvailable(offset: offset, count: requestCount) ?? wait {
                 try await source.read(offset: offset, count: requestCount)
             }
             guard data.count <= count, Int64(data.count) <= total - offset else {

@@ -501,21 +501,29 @@ extension NovelSettingsViewController: DebugPageInspectable, DebugPageActionable
     }
 }
 
-extension NovelSourcesViewController: DebugPageInspectable {
+extension NovelSourcesViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(target: "settings.novel", moduleId: "novel", route: "settings/novel/sources", title: "书源管理", settingsDomain: "novel", settingsSection: "sources")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.novel", kind: "settings", settings: .object(["domain": .string("novel"), "section": .string("sources")]))
+        DebugContentSnapshot(target: "settings.novel", kind: "settings", rows: debugManagementRows(maxItems: maxItems), settings: .object(["domain": .string("novel"), "section": .string("sources")]))
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeManagementRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on NovelSourcesViewController")
     }
 }
 
-extension NovelRulesViewController: DebugPageInspectable {
+extension NovelRulesViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(target: "settings.novel", moduleId: "novel", route: "settings/novel/rules", title: "替换净化", settingsDomain: "novel", settingsSection: "rules")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.novel", kind: "settings", settings: .object(["domain": .string("novel"), "section": .string("rules")]))
+        DebugContentSnapshot(target: "settings.novel", kind: "settings", rows: debugManagementRows(maxItems: maxItems), settings: .object(["domain": .string("novel"), "section": .string("rules")]))
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeManagementRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on NovelRulesViewController")
     }
 }
 

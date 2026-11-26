@@ -10,7 +10,11 @@ public final class SettingsTableView: UITableView {
     public init() {
         super.init(frame: .zero, style: .insetGrouped)
         backgroundColor = .clear
-        separatorStyle = .none
+        separatorStyle = .singleLine
+        separatorInset = UIEdgeInsets(
+            top: 0, left: SettingsVisualMetrics.rowHorizontalPadding,
+            bottom: 0, right: SettingsVisualMetrics.rowHorizontalPadding
+        )
         directionalLayoutMargins = NSDirectionalEdgeInsets(
             top: 0, leading: SettingsVisualMetrics.cardHorizontalInset,
             bottom: 0, trailing: SettingsVisualMetrics.cardHorizontalInset

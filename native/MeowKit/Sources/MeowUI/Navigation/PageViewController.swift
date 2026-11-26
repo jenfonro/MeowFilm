@@ -6,6 +6,17 @@ import Combine
 /// visibility. Returning to a retained page does not reactivate its content.
 @MainActor
 open class PageViewController: UIViewController {
+    private final class ModalPresentationObserver: NSObject, UIAdaptivePresentationControllerDelegate {
+        func presentationControllerWillDismiss(_ presentationController: UIPresentationController) {
+            PageViewController.reconcileWindowModalCoverage(from: presentationController.presentingViewController)
+        }
+        func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+            PageViewController.reconcileWindowModalCoverage(from: presentationController.presentingViewController)
+        }
+        func presentationControllerDidAttemptToDismiss(_ presentationController: UIPresentationController) {
+            PageViewController.reconcileWindowModalCoverage(from: presentationController.presentingViewController)
+        }
+    }
     /// Declarative chrome policy read by the app shell/coordinator.
     open var pageChromePolicy: PageChromePolicy { .standard }
     public let themeProvider: any PageThemeProviding
@@ -41,6 +52,7 @@ open class PageViewController: UIViewController {
     public private(set) var isPageVisible = false
     private var contentVisible = false
     private var foreground = false
+    private var modalCovered = false
     private var invalidated = false
     private weak var completedAppearanceTransition: (any UIViewControllerTransitionCoordinator)?
     private weak var presentedPageModal: UIViewController?
@@ -61,6 +73,7 @@ open class PageViewController: UIViewController {
     private weak var defaultBackButton: PageHeaderButton?
     private var hasOwnHeader = false
     private let feedbackQueue = PageFeedbackQueue()
+    private let modalPresentationObserver = ModalPresentationObserver()
 
     var hasActivePresentedModal: Bool {
         if presentedViewController != nil { return true }
@@ -139,20 +152,48 @@ open class PageViewController: UIViewController {
 
     open override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        Self.reconcileWindowModalCoverage(from: self)
         finishAppearance()
     }
 
     open override func present(_ viewControllerToPresent: UIViewController, animated flag: Bool,
                                completion: (() -> Void)? = nil) {
+        if !(viewControllerToPresent is UIAlertController),
+           viewControllerToPresent.presentationController?.delegate == nil {
+            viewControllerToPresent.presentationController?.delegate = modalPresentationObserver
+        }
         super.present(viewControllerToPresent, animated: flag) { [weak self, weak viewControllerToPresent] in
             if let self, let viewControllerToPresent,
                viewControllerToPresent.presentingViewController != nil || presentedViewController === viewControllerToPresent {
                 presentedPageModal = viewControllerToPresent
             }
+            if let self { Self.reconcileWindowModalCoverage(from: self) }
             completion?()
         }
         if viewControllerToPresent.presentingViewController != nil || presentedViewController === viewControllerToPresent {
             presentedPageModal = viewControllerToPresent
+        }
+        if let transition = viewControllerToPresent.transitionCoordinator {
+            _ = transition.animate(alongsideTransition: nil) { [weak self] _ in
+                if let self { Self.reconcileWindowModalCoverage(from: self) }
+            }
+        } else {
+            Self.reconcileWindowModalCoverage(from: self)
+        }
+    }
+
+    open override func dismiss(animated flag: Bool, completion: (() -> Void)? = nil) {
+        let presenter = presentingViewController ?? self
+        let windowRoot = viewIfLoaded?.window?.rootViewController ?? presenter
+        super.dismiss(animated: flag) { [weak windowRoot] in
+            PageViewController.updateModalCoverage(in: windowRoot)
+            completion?()
+        }
+        PageViewController.updateModalCoverage(in: windowRoot)
+        if let transition = transitionCoordinator {
+            _ = transition.animate(alongsideTransition: nil) { [weak windowRoot] _ in
+                PageViewController.updateModalCoverage(in: windowRoot)
+            }
         }
     }
 
@@ -165,6 +206,13 @@ open class PageViewController: UIViewController {
         super.viewWillDisappear(animated)
         departingContainer = nil
         completedAppearanceTransition = nil
+        Self.reconcileWindowModalCoverage(from: presentingViewController ?? navigationController?.presentingViewController ?? self)
+        if let transition = (navigationController ?? self).transitionCoordinator {
+            let host = presentingViewController ?? navigationController?.presentingViewController
+            _ = transition.animate(alongsideTransition: nil) { [weak host] _ in
+                Self.reconcileWindowModalCoverage(from: host)
+            }
+        }
         guard let container = leavingContainer() else { return }
         if let coordinator = container.transitionCoordinator,
            coordinator.animate(alongsideTransition: nil, completion: { [weak container] context in
@@ -180,6 +228,7 @@ open class PageViewController: UIViewController {
         super.viewDidDisappear(animated)
         contentVisible = false
         updateVisibility()
+        Self.reconcileWindowModalCoverage(from: presentingViewController ?? navigationController?.presentingViewController ?? self)
         if let container = departingContainer {
             departingContainer = nil
             Self.invalidatePages(in: container)
@@ -475,6 +524,10 @@ open class PageViewController: UIViewController {
         return true
     }
 
+    var noticeHost: (any PageNoticeHost)? {
+        viewIfLoaded?.window?.rootViewController as? any PageNoticeHost
+    }
+
     public func enqueueError(_ message: String?, retry: (@MainActor () -> Void)? = nil,
                              acknowledged: (@MainActor () -> Void)? = nil) {
         feedbackQueue.enqueueError(message, retry: retry, acknowledged: acknowledged, presenter: self)
@@ -508,12 +561,30 @@ open class PageViewController: UIViewController {
         feedbackQueue.clearErrorSource(sourceKey)
     }
 
-    public func clearQueuedFeedback() {
-        feedbackQueue.clear()
+    static func reconcileWindowModalCoverage(from source: UIViewController?) {
+        guard let source else { return }
+        var root = source.viewIfLoaded?.window?.rootViewController ?? source
+        while let presenter = root.presentingViewController { root = presenter }
+        while let parent = root.parent { root = parent }
+        updateModalCoverage(in: root)
     }
 
-    public func drainQueuedFeedback() {
-        feedbackQueue.drain(presenter: self)
+    static func updateModalCoverage(in root: UIViewController?, ancestorCovered: Bool = false) {
+        guard let root else { return }
+        let modal = root.presentedViewController
+        let ownsCover = modal != nil && !(modal is UIAlertController) &&
+            modal?.isBeingPresented == false && modal?.isBeingDismissed == false
+        let covered = ancestorCovered || ownsCover
+        if let page = root as? PageViewController, page.modalCovered != covered {
+            page.modalCovered = covered
+            page.updateVisibility()
+        }
+        for child in root.children {
+            updateModalCoverage(in: child, ancestorCovered: covered)
+        }
+        if let modal {
+            updateModalCoverage(in: modal, ancestorCovered: false)
+        }
     }
 
     // MARK: - Modals & Lifecycle
@@ -583,7 +654,7 @@ open class PageViewController: UIViewController {
     }
 
     private func updateVisibility() {
-        let visible = contentVisible && foreground && isPageActive
+        let visible = contentVisible && foreground && isPageActive && !modalCovered
         guard isPageVisible != visible else { return }
         isPageVisible = visible
         if visible {
@@ -604,7 +675,6 @@ open class PageViewController: UIViewController {
         if let transition { completedAppearanceTransition = transition }
         completion?()
         if canPresentPageAlert {
-            drainQueuedFeedback()
             pageDidFinishAppearing()
         }
     }

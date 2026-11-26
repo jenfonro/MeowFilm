@@ -18,6 +18,7 @@ final class MeowfilmDockView: UIView, PageThemeable {
     private var surfaceHeight: NSLayoutConstraint!
     private var navigationHeight: NSLayoutConstraint!
     private var stackBottom: NSLayoutConstraint!
+    private var dockVisible = true
     private var playerSurfaceVisible = true
     private var currentTheme = PageTheme()
     var occupiesBottom: Bool { navigationVisible || playerSurfaceVisible }
@@ -105,11 +106,18 @@ final class MeowfilmDockView: UIView, PageThemeable {
         isUserInteractionEnabled = occupiesBottom
     }
 
+    func setDockVisible(_ visible: Bool) {
+        dockVisible = visible
+        isHidden = !visible
+        surface.setHostVisible(dockVisible && playerSurfaceVisible)
+    }
+
     func setPlayerSurfaceVisible(_ visible: Bool) {
         playerSurfaceVisible = visible
         surfaceHost.isHidden = !visible
         surfaceHeight.constant = visible ? surface.dockHeight : 0
         isUserInteractionEnabled = occupiesBottom
+        surface.setHostVisible(dockVisible && playerSurfaceVisible)
         setNeedsLayout()
     }
 

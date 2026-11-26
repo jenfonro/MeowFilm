@@ -16,6 +16,11 @@ open class SettingsFormViewController: PageViewController {
     private weak var activeField: UIView?
     private var formThemeables = ThemeableRegistry()
     private var mutedLabels = WeakLabelRegistry()
+    private var focusObservers: [NSObjectProtocol] = []
+
+    deinit {
+        for observer in focusObservers { NotificationCenter.default.removeObserver(observer) }
+    }
 
     open override func viewDidLoad() {
         super.viewDidLoad()
@@ -57,6 +62,23 @@ open class SettingsFormViewController: PageViewController {
             constraints.append(form.topAnchor.constraint(equalTo: contentTopAnchor))
         }
         NSLayoutConstraint.activate(constraints)
+        let center = NotificationCenter.default
+        focusObservers = [
+            center.addObserver(forName: UITextView.textDidBeginEditingNotification, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, let field = note.object as? UIView, field.isDescendant(of: self.form) else { return }
+                    self.activeField = field
+                    self.needsFocusedFieldReveal = true
+                    self.view.setNeedsLayout()
+                }
+            },
+            center.addObserver(forName: UITextView.textDidEndEditingNotification, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, let field = note.object as? UIView, self.activeField === field else { return }
+                    self.activeField = nil
+                }
+            },
+        ]
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
             (page: SettingsFormViewController, _: UITraitCollection) in
             page.setNeedsThemeUpdate()

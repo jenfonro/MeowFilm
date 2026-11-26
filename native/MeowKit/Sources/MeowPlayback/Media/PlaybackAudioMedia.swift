@@ -8,7 +8,6 @@ import MeowContracts
 final class PlaybackAudioMedia {
     let resource: PlaybackResource
     private let options: PlaybackNetworkOptions
-    private let byteSource: (any PlaybackByteSource)?
     private var preparing: Task<Void, Error>?
     private var closing: Task<Void, Error>?
     private var cancelled = false
@@ -26,7 +25,6 @@ final class PlaybackAudioMedia {
     init(resource: PlaybackResource, options: PlaybackNetworkOptions = .init()) {
         self.resource = resource
         self.options = options
-        self.byteSource = resource.byteSource
     }
 
     func prepare() async throws {
@@ -132,7 +130,7 @@ final class PlaybackAudioMedia {
     private func cancelResources() {
         session?.cancel()
         input?.cancelReads()
-        byteSource?.retire()
+        resource.byteSource?.retire()
         route?.invalidate()
     }
 
@@ -173,7 +171,7 @@ final class PlaybackAudioMedia {
         let activeSession = session
         let activeInput = input
         let activeRoute = route
-        let activeSource = byteSource
+        let activeSource = resource.byteSource
         guard activeSession != nil || activeInput != nil || activeRoute != nil || activeSource != nil else { return }
         activeInput?.cancelReads()
         activeSource?.retire()

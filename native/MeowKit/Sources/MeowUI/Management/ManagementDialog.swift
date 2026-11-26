@@ -115,6 +115,12 @@ open class ManagementDialog: FloatingCardDialogController {
 
     public func addInput(_ input: UITextField, title: String) {
         (input as? SettingsTextField)?.inputAppearance = .underline
+        if input.accessibilityLabel?.isEmpty != false {
+            input.accessibilityLabel = title
+        }
+        if input.placeholder == title {
+            input.placeholder = nil
+        }
         let section = SettingsInputSection(title: title, input: input)
         addBodyView(section)
     }
@@ -186,42 +192,9 @@ open class ManagementDialog: FloatingCardDialogController {
         ]
     }
 
-    open override func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String {
-        if let kind {
-            if kind == "confirm" || kind == "default" {
-                commit()
-                return actionTitle
-            }
-            if kind == "cancel" {
-                requestDismiss()
-                return "取消"
-            }
-        }
-        if let index {
-            switch index {
-            case 0:
-                requestDismiss()
-                return "取消"
-            case 1:
-                commit()
-                return actionTitle
-            default:
-                throw DebugAPIError.invalidArgument("\(debugDialogTypeName) button index out of range: \(index)")
-            }
-        }
-        if let label {
-            if label == "取消" {
-                requestDismiss()
-                return "取消"
-            }
-            if label == actionTitle {
-                commit()
-                return actionTitle
-            }
-            throw DebugAPIError.notFound("\(debugDialogTypeName) button not found: \(label)")
-        }
-        commit()
-        return actionTitle
+    open override func performDebugDialogAction(_ action: DebugDialogActionDescriptor) throws {
+        if action.index == 0 { requestDismiss() }
+        else { commit() }
     }
 }
 #endif

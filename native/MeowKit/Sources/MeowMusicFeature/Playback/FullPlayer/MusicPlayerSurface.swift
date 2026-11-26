@@ -31,6 +31,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
     private var subscriptions: [AnyCancellable] = []
     private var observers: [NSObjectProtocol] = []
     private var foreground = false
+    private var hostVisible = true
     private var outsideInteraction: MusicDockInteractionObserver?
     public var moreAnchor: UIView { controls.moreAnchor }
 
@@ -56,6 +57,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         addSubview(artworkHost)
         for (button, name) in [(cover, "open"), (cardCover, "card.open")] {
             button.imageView?.contentMode = .scaleAspectFill
+            button.imageView?.layer.minificationFilter = .trilinear
             button.contentHorizontalAlignment = .fill
             button.contentVerticalAlignment = .fill
             button.clipsToBounds = true
@@ -86,7 +88,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         addGestureRecognizer(titlePan)
         bodyTap.require(toFail: titlePan)
         subscriptions = [
-            content.dockChanges.sink { [weak self] in self?.updateForm(); self?.updateRendering() },
+            content.dockChanges.sink { [weak self] in self?.updateForm(); self?.updateVisibility() },
             content.artworkChanges.sink { [weak self] in self?.updateArtwork() },
             content.appearanceChanges.sink { [weak self] in self?.updateBackground() },
             content.playbackChanges.sink { [weak self] in self?.reconcileTitleSwipe() },
@@ -97,7 +99,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
                 [weak self] notification in
                 MainActor.assumeIsolated {
                     self?.foreground = notification.name == UIApplication.didBecomeActiveNotification
-                    self?.updateRendering()
+                    self?.updateVisibility()
                 }
             })
         }
@@ -299,7 +301,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
             animator.finishAnimation(at: .end)
             layer.removeAnimation(forKey: "dock.shadow")
         }
-        updateRendering()
+        updateVisibility()
     }
 
     public override func layoutSubviews() {
@@ -367,10 +369,16 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         animator.startAnimation()
     }
 
-    private func updateRendering() {
-        let rendering = window != nil && foreground && !content.presentation.isFullPlayerPresented
-        if !rendering { cancelTitleSwipe() }
-        controls.setRendering(rendering)
+    public func setHostVisible(_ visible: Bool) {
+        guard hostVisible != visible else { return }
+        hostVisible = visible
+        updateVisibility()
+    }
+
+    public func updateVisibility() {
+        let visible = hostVisible && window != nil && foreground && !content.presentation.isFullPlayerPresented
+        if !visible { cancelTitleSwipe() }
+        controls.setRendering(visible)
     }
 
     private func updateArtwork() {

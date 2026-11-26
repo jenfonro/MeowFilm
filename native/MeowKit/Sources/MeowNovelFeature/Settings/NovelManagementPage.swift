@@ -6,14 +6,11 @@ import MeowUI
 @MainActor
 class NovelManagementPage: ManagementPageViewController {
     let feature: NovelFeature
-    let manager = ManagementListView()
     init(feature: NovelFeature, themeProvider: any PageThemeProviding) { self.feature = feature; super.init(themeProvider: themeProvider) }
     override func viewDidLoad() {
-        super.viewDidLoad(); view.addSubview(manager); manager.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([manager.topAnchor.constraint(equalTo: contentTopAnchor), manager.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor), manager.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor), manager.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
+        super.viewDidLoad()
         observe(feature, whenVisible: true) { [weak self] in self?.render() }
     }
-    override func applyTheme() { super.applyTheme(); if isViewLoaded { manager.applyTheme(theme) } }
     func render() {}
     func perform(_ operation: @escaping @MainActor () async throws -> Void) {
         guard !hasActivePageTask(key: "action"), isPageActive else { return }

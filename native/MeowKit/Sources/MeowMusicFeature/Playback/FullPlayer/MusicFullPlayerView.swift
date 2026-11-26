@@ -36,6 +36,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     let lyricViewport = UIView()
     let lyricTable = UITableView(frame: .zero, style: .plain)
     let lyricStatus = UILabel()
+    let lyricLoading = UIActivityIndicatorView(style: .medium)
     let previewTime = UILabel()
     let previewRule = UIView()
     let previewSeek = UIButton(type: .system)
@@ -152,6 +153,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         lyricViewport.clipsToBounds = true
         lyricStatus.textAlignment = .center
         lyricStatus.isAccessibilityElement = true
+        lyricLoading.hidesWhenStopped = true
 
         lyricBackdrop.contentMode = .scaleAspectFill
         lyricBackdrop.clipsToBounds = true
@@ -606,6 +608,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         let colors = MusicPlayerBackgroundView.lyricColors(palette: content.appearance.effectivePalette,
             artwork: content.appearance.preferences.lyricBackground)
         lyricStatus.textColor = UIColor(colors.normal)
+        lyricLoading.color = UIColor(colors.normal)
         previewTime.textColor = UIColor(colors.normal)
         previewRule.backgroundColor = UIColor(colors.highlight).withAlphaComponent(0.28)
         route?.tintColor = UIColor(theme.ink)

@@ -1,6 +1,5 @@
 #if os(iOS)
 import UIKit
-import ImageIO
 import MeowDebug
 import MeowUI
 
@@ -51,36 +50,14 @@ public final class NovelImageStore {
                 kind: kind
             )
             try Task.checkCancellation()
-            guard let decoded = Self.decodeOriginalSize(bytes) else { throw NovelError.invalidResponse }
+            guard let decoded = ArtworkImageDecoder.decode(
+                bytes,
+                maxPixelSize: kind == "cover" ? 360 : 1_440,
+                requireCompleteContainer: false
+            ) else { throw NovelError.invalidResponse }
             return .init(image: decoded)
         }
         return output.image
-    }
-
-    private nonisolated static func decodeOriginalSize(_ data: Data) -> UIImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(
-                source,
-                0,
-                [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
-              ) else { return nil }
-        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-        let orientationRaw = properties?[kCGImagePropertyOrientation] as? UInt32
-        let orientation = orientationRaw.flatMap(CGImagePropertyOrientation.init(rawValue:)).map(Self.uiOrientation) ?? .up
-        return UIImage(cgImage: cgImage, scale: 1, orientation: orientation)
-    }
-
-    private nonisolated static func uiOrientation(_ orientation: CGImagePropertyOrientation) -> UIImage.Orientation {
-        switch orientation {
-        case .up: return .up
-        case .upMirrored: return .upMirrored
-        case .down: return .down
-        case .downMirrored: return .downMirrored
-        case .leftMirrored: return .leftMirrored
-        case .right: return .right
-        case .rightMirrored: return .rightMirrored
-        case .left: return .left
-        }
     }
 
     public func invalidate(activeSources: [NovelSource]) {

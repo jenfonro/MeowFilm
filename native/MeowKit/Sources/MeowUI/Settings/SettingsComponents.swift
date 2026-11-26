@@ -90,6 +90,7 @@ public final class SettingsSegmentedControl: UISegmentedControl, PageThemeable {
         switch style {
         case .settings:
             let colors = theme.settings
+            layer.borderWidth = 0
             backgroundColor = UIColor(colors.input)
             selectedSegmentTintColor = UIColor(colors.surface)
             let attributes: [NSAttributedString.Key: Any] = [
@@ -105,20 +106,11 @@ public final class SettingsSegmentedControl: UISegmentedControl, PageThemeable {
             selectedSegmentTintColor = UIColor(colors.accent)
             layer.borderColor = UIColor(colors.border).cgColor
             layer.borderWidth = 1
-            let normalBG = Self.solidImage(UIColor(colors.surface))
-            let selectedBG = Self.solidImage(UIColor(colors.accent))
-            let clearDivider = Self.solidImage(.clear)
-            setBackgroundImage(normalBG, for: .normal, barMetrics: .default)
-            setBackgroundImage(selectedBG, for: .selected, barMetrics: .default)
-            for left in [UIControl.State.normal, .selected] {
-                for right in [UIControl.State.normal, .selected] {
-                    setDividerImage(clearDivider, forLeftSegmentState: left, rightSegmentState: right, barMetrics: .default)
-                }
-            }
             setTitleTextAttributes([.font: font, .foregroundColor: UIColor(colors.ink)], for: .normal)
             setTitleTextAttributes([.font: font, .foregroundColor: UIColor(colors.onAccent)], for: .selected)
         case .header:
             let font = UIFont.systemFont(ofSize: 13, weight: .regular)
+            layer.borderWidth = 0
             backgroundColor = UIColor(theme.control)
             selectedSegmentTintColor = UIColor(theme.surface)
             setTitleTextAttributes([.font: font, .foregroundColor: UIColor(theme.muted)], for: .normal)
@@ -126,14 +118,5 @@ public final class SettingsSegmentedControl: UISegmentedControl, PageThemeable {
             setTitleTextAttributes([.font: font, .foregroundColor: UIColor(theme.muted).withAlphaComponent(0.5)], for: .disabled)
         }
     }
-
-    private static func solidImage(_ color: UIColor) -> UIImage {
-        UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).image { context in
-            color.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
-        }
-    }
 }
-
-extension SettingsStatusBadge: PageThemeable {}
 #endif

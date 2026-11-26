@@ -83,13 +83,8 @@ extension MeowfilmDebugNavigator {
             case "confirm":
                 chosen = registered.first(where: { $0.kind != "cancel" }) ?? registered.first
             case "dismiss":
-                if alert.isBeingPresented {
-                    await waitForTransitionIfNeeded(of: alert)
-                }
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    alert.dismiss(animated: false) { continuation.resume() }
-                }
-                await waitForTransitionIfNeeded(of: alert, expectDismissed: true)
+                if alert.isBeingPresented { await waitForTransitionIfNeeded(of: alert) }
+                await dismissAndWait(alert)
                 return .object(["dismissed": .bool(true), "type": .string("UIAlertController")])
             case "button":
                 if let idx = params["index"]?.intValue {
@@ -103,17 +98,12 @@ extension MeowfilmDebugNavigator {
                 throw DebugAPIError.invalidArgument("Unknown dialog action: \(dialogAction)")
             }
             if let chosen {
-                if alert.isBeingPresented {
-                    await waitForTransitionIfNeeded(of: alert)
-                }
+                if alert.isBeingPresented { await waitForTransitionIfNeeded(of: alert) }
                 chosen.handler()
                 if alert.isBeingDismissed {
                     await waitForTransitionIfNeeded(of: alert, expectDismissed: true)
                 } else if alert.presentingViewController != nil {
-                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                        alert.dismiss(animated: false) { continuation.resume() }
-                    }
-                    await waitForTransitionIfNeeded(of: alert, expectDismissed: true)
+                    await dismissAndWait(alert)
                 }
                 return .object([
                     "invoked": .string(chosen.label),
@@ -125,26 +115,19 @@ extension MeowfilmDebugNavigator {
         }
 
         if let dialogVC = activeDialogController(), let dialog = dialogVC as? any DebugDialogControllable {
-            if dialogVC.isBeingPresented {
-                await waitForTransitionIfNeeded(of: dialogVC)
-            }
+            if dialogVC.isBeingPresented { await waitForTransitionIfNeeded(of: dialogVC) }
             let snapshot = dialog.debugDialogSnapshot()
             switch dialogAction {
             case "confirm":
                 let label = try dialog.debugInvokeDialogAction(kind: "confirm", index: nil, label: nil)
-                if dialogVC.isBeingDismissed {
-                    await waitForTransitionIfNeeded(of: dialogVC, expectDismissed: true)
-                }
+                if dialogVC.isBeingDismissed { await waitForTransitionIfNeeded(of: dialogVC, expectDismissed: true) }
                 return .object(["invoked": .string(label), "type": .string(snapshot.typeName)])
             case "cancel":
                 let label = try dialog.debugInvokeDialogAction(kind: "cancel", index: nil, label: nil)
                 if dialogVC.isBeingDismissed {
                     await waitForTransitionIfNeeded(of: dialogVC, expectDismissed: true)
                 } else if dialogVC.presentingViewController != nil {
-                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                        dialogVC.dismiss(animated: false) { continuation.resume() }
-                    }
-                    await waitForTransitionIfNeeded(of: dialogVC, expectDismissed: true)
+                    await dismissAndWait(dialogVC)
                 }
                 return .object(["invoked": .string(label), "dismissed": .bool(true), "type": .string(snapshot.typeName)])
             case "dismiss":
@@ -152,17 +135,11 @@ extension MeowfilmDebugNavigator {
                     if dialogVC.isBeingDismissed {
                         await waitForTransitionIfNeeded(of: dialogVC, expectDismissed: true)
                     } else if dialogVC.presentingViewController != nil {
-                        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                            dialogVC.dismiss(animated: false) { continuation.resume() }
-                        }
-                        await waitForTransitionIfNeeded(of: dialogVC, expectDismissed: true)
+                        await dismissAndWait(dialogVC)
                     }
                     return .object(["invoked": .string(label), "dismissed": .bool(true), "type": .string(snapshot.typeName)])
                 }
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    dialogVC.dismiss(animated: false) { continuation.resume() }
-                }
-                await waitForTransitionIfNeeded(of: dialogVC, expectDismissed: true)
+                await dismissAndWait(dialogVC)
                 return .object(["dismissed": .bool(true), "type": .string(snapshot.typeName)])
             case "button":
                 let idx = params["index"]?.intValue
@@ -171,9 +148,7 @@ extension MeowfilmDebugNavigator {
                     throw DebugAPIError.invalidArgument("Provide 'index' or 'label' for dialog button action")
                 }
                 let invoked = try dialog.debugInvokeDialogAction(kind: nil, index: idx, label: labelArg)
-                if dialogVC.isBeingDismissed {
-                    await waitForTransitionIfNeeded(of: dialogVC, expectDismissed: true)
-                }
+                if dialogVC.isBeingDismissed { await waitForTransitionIfNeeded(of: dialogVC, expectDismissed: true) }
                 var payload: [String: DebugJSONValue] = [
                     "invoked": .string(invoked),
                     "type": .string(snapshot.typeName)
@@ -186,16 +161,18 @@ extension MeowfilmDebugNavigator {
         }
 
         if dialogAction == "dismiss", let sheet = presentedModalChain().last {
-            if sheet.isBeingPresented {
-                await waitForTransitionIfNeeded(of: sheet)
-            }
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                sheet.dismiss(animated: false) { continuation.resume() }
-            }
-            await waitForTransitionIfNeeded(of: sheet, expectDismissed: true)
+            if sheet.isBeingPresented { await waitForTransitionIfNeeded(of: sheet) }
+            await dismissAndWait(sheet)
             return .object(["dismissed": .bool(true), "type": .string(String(describing: type(of: sheet)))])
         }
         throw DebugAPIError.invalidState("No active dialog is currently presented")
+    }
+
+    private func dismissAndWait(_ controller: UIViewController) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            controller.dismiss(animated: false) { continuation.resume() }
+        }
+        await waitForTransitionIfNeeded(of: controller, expectDismissed: true)
     }
 
     private func waitForTransitionIfNeeded(of controller: UIViewController, expectDismissed: Bool = false) async {

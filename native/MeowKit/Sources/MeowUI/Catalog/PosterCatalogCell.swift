@@ -14,14 +14,34 @@ public struct PosterCatalogMetrics: Sendable {
     }
 }
 
-public enum PosterCatalogArtwork {
-    case url(URL?, ArtworkImages)
-    case custom(
+public struct PosterCatalogArtwork {
+    public let id: AnyHashable?
+    public let placeholderSymbol: String?
+    public let cached: @MainActor () -> UIImage?
+    public let load: @MainActor () async -> UIImage?
+
+    public init(
         id: AnyHashable?,
-        placeholderSymbol: String?,
-        cached: @MainActor () -> UIImage?,
-        load: @MainActor () async -> UIImage?
-    )
+        placeholderSymbol: String? = nil,
+        cached: @escaping @MainActor () -> UIImage?,
+        load: @escaping @MainActor () async -> UIImage?
+    ) {
+        self.id = id
+        self.placeholderSymbol = placeholderSymbol
+        self.cached = cached
+        self.load = load
+    }
+
+    public static func url(_ url: URL?, images: ArtworkImages) -> Self {
+        Self(
+            id: url.map { AnyHashable($0) },
+            cached: { url.flatMap { images.cached($0) } },
+            load: {
+                guard let url else { return nil }
+                return try? await images.read(url).0
+            }
+        )
+    }
 }
 
 public struct PosterCatalogCard: Equatable {
@@ -30,7 +50,6 @@ public struct PosterCatalogCard: Equatable {
     public let textBadge: String
     public let label: String
     public let accessibilityIdentifier: String
-    public let artworkIdentity: AnyHashable?
     public let artwork: PosterCatalogArtwork
 
     public init(
@@ -39,7 +58,6 @@ public struct PosterCatalogCard: Equatable {
         textBadge: String = "",
         label: String = "",
         accessibilityIdentifier: String,
-        artworkIdentity: AnyHashable?,
         artwork: PosterCatalogArtwork
     ) {
         self.id = id
@@ -47,17 +65,13 @@ public struct PosterCatalogCard: Equatable {
         self.textBadge = textBadge
         self.label = label
         self.accessibilityIdentifier = accessibilityIdentifier
-        self.artworkIdentity = artworkIdentity
         self.artwork = artwork
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.id == rhs.id &&
-            lhs.title == rhs.title &&
-            lhs.textBadge == rhs.textBadge &&
-            lhs.label == rhs.label &&
-            lhs.accessibilityIdentifier == rhs.accessibilityIdentifier &&
-            lhs.artworkIdentity == rhs.artworkIdentity
+        lhs.id == rhs.id && lhs.title == rhs.title && lhs.textBadge == rhs.textBadge &&
+            lhs.label == rhs.label && lhs.accessibilityIdentifier == rhs.accessibilityIdentifier &&
+            lhs.artwork.id == rhs.artwork.id
     }
 }
 
@@ -66,6 +80,7 @@ public struct PosterCatalogSection: Equatable {
     public let title: String
     public let hasMore: Bool
     public let actionTitle: String?
+    public let isLoading: Bool
     public let statusText: String
     public let items: [PosterCatalogCard]
 
@@ -74,6 +89,7 @@ public struct PosterCatalogSection: Equatable {
         title: String,
         hasMore: Bool,
         actionTitle: String? = nil,
+        isLoading: Bool = false,
         statusText: String,
         items: [PosterCatalogCard]
     ) {
@@ -81,6 +97,7 @@ public struct PosterCatalogSection: Equatable {
         self.title = title
         self.hasMore = hasMore
         self.actionTitle = actionTitle
+        self.isLoading = isLoading
         self.statusText = statusText
         self.items = items
     }
@@ -90,17 +107,12 @@ public struct PosterCatalogSection: Equatable {
 public final class PosterCatalogCell: UICollectionViewCell, PageThemeable {
     public static let reuseIdentifier = "PosterCatalogCell"
 
-    private var artwork: ArtworkView?
-    private var currentPosterURL: URL?
-
-    private let customContainer = UIView()
-    private let customImageView = UIImageView()
-    private let customPlaceholder = UIImageView()
-    private var customToken = UUID()
-    private var representedCustomID: AnyHashable?
-    private var customCached: (@MainActor () -> UIImage?)?
-    private var customLoader: (@MainActor () async -> UIImage?)?
-    private nonisolated(unsafe) var customPending: Task<Void, Never>?
+    private let posterContainer = UIView()
+    private let imageView = UIImageView()
+    private let placeholder = UIImageView()
+    private var artworkSpec: PosterCatalogArtwork?
+    private var loadToken = UUID()
+    private nonisolated(unsafe) var pendingLoad: Task<Void, Never>?
 
     private let titleLabel = UILabel()
     private let badge = UILabel(), sourceLabel = UILabel()
@@ -113,16 +125,15 @@ public final class PosterCatalogCell: UICollectionViewCell, PageThemeable {
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
-        customContainer.clipsToBounds = true
-        customContainer.layer.cornerRadius = 7
-        customContainer.isHidden = true
-        customImageView.contentMode = .scaleAspectFill
-        customImageView.clipsToBounds = true
-        customPlaceholder.contentMode = .scaleAspectFit
-        customPlaceholder.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 24, weight: .regular)
-        customContainer.addSubview(customImageView)
-        customContainer.addSubview(customPlaceholder)
-        contentView.addSubview(customContainer)
+        posterContainer.clipsToBounds = true
+        posterContainer.layer.cornerRadius = 7
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        placeholder.contentMode = .scaleAspectFit
+        placeholder.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 24, weight: .regular)
+        posterContainer.addSubview(imageView)
+        posterContainer.addSubview(placeholder)
+        contentView.addSubview(posterContainer)
 
         titleLabel.font = .systemFont(ofSize: 13)
         titleLabel.numberOfLines = 2
@@ -159,41 +170,9 @@ public final class PosterCatalogCell: UICollectionViewCell, PageThemeable {
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public func configure(card: PosterCatalogCard, theme: PageTheme, loadArtwork: Bool = true) {
-        switch card.artwork {
-        case .url(let url, let images):
-            cancelCustomPending()
-            representedCustomID = nil
-            customCached = nil
-            customLoader = nil
-            customImageView.image = nil
-            customContainer.isHidden = true
-            if artwork == nil {
-                let image = ArtworkView(size: 0, images: images)
-                image.layer.cornerRadius = 7
-                contentView.insertSubview(image, at: 0)
-                artwork = image
-            }
-            artwork?.isHidden = false
-            currentPosterURL = url
-            if loadArtwork {
-                artwork?.load(url)
-            } else {
-                artwork?.cancelPendingLoad()
-            }
-
-        case .custom(let id, let symbol, let cached, let load):
-            currentPosterURL = nil
-            artwork?.load(nil)
-            artwork?.isHidden = true
-            customContainer.isHidden = false
-            if let symbol, !symbol.isEmpty {
-                customPlaceholder.image = UIImage(systemName: symbol)
-            } else {
-                customPlaceholder.image = nil
-            }
-            configureCustomArtwork(id: id, cached: cached, load: load, loadImmediately: loadArtwork)
-        }
-
+        let spec = card.artwork
+        placeholder.image = spec.placeholderSymbol.flatMap { $0.isEmpty ? nil : UIImage(systemName: $0) }
+        configureArtwork(spec, loadImmediately: loadArtwork)
         titleLabel.text = card.title
         badge.text = card.textBadge
         badge.isHidden = card.textBadge.isEmpty
@@ -207,67 +186,50 @@ public final class PosterCatalogCell: UICollectionViewCell, PageThemeable {
         setNeedsLayout()
     }
 
-    private func configureCustomArtwork(
-        id: AnyHashable?,
-        cached: @escaping @MainActor () -> UIImage?,
-        load: @escaping @MainActor () async -> UIImage?,
-        loadImmediately: Bool
-    ) {
-        guard let id else {
-            cancelCustomPending()
-            representedCustomID = nil
-            customCached = nil
-            customLoader = nil
-            customImageView.image = nil
-            customPlaceholder.isHidden = customPlaceholder.image == nil
+    private func configureArtwork(_ spec: PosterCatalogArtwork, loadImmediately: Bool) {
+        guard let id = spec.id else {
+            cancelPendingLoad()
+            artworkSpec = nil
+            imageView.image = nil
+            placeholder.isHidden = placeholder.image == nil
             return
         }
-        customCached = cached
-        customLoader = load
-        if representedCustomID == id, customImageView.image != nil || (customPending != nil && loadImmediately) {
+        let sameID = artworkSpec?.id == id
+        artworkSpec = spec
+        if sameID, imageView.image != nil || (pendingLoad != nil && loadImmediately) { return }
+        cancelPendingLoad()
+        if let image = spec.cached() {
+            imageView.image = image
+            placeholder.isHidden = true
             return
         }
-        cancelCustomPending()
-        representedCustomID = id
-        if let image = cached() {
-            customImageView.image = image
-            customPlaceholder.isHidden = true
-            return
-        }
-        customImageView.image = nil
-        customPlaceholder.isHidden = customPlaceholder.image == nil
-        if loadImmediately {
-            startCustomLoad(expectedID: id)
-        }
+        imageView.image = nil
+        placeholder.isHidden = placeholder.image == nil
+        if loadImmediately { startLoad(expectedID: id, loader: spec.load) }
     }
 
-    private func startCustomLoad(expectedID: AnyHashable) {
-        guard let loader = customLoader else { return }
+    private func startLoad(expectedID: AnyHashable, loader: @escaping @MainActor () async -> UIImage?) {
         let token = UUID()
-        customToken = token
-        customPending = Task { [weak self] in
+        loadToken = token
+        pendingLoad = Task { [weak self] in
             let image = await loader()
-            guard !Task.isCancelled, let self,
-                  self.customToken == token,
-                  self.representedCustomID == expectedID else { return }
-            self.customPending = nil
-            if let image {
-                self.customImageView.image = image
-                self.customPlaceholder.isHidden = true
+            guard !Task.isCancelled, let self, self.loadToken == token, self.artworkSpec?.id == expectedID else { return }
+            self.pendingLoad = nil
+            guard let image else { return }
+            if self.imageView.image == nil {
+                self.imageView.image = image
+            } else {
+                UIView.transition(with: self.imageView, duration: 0.2, options: .transitionCrossDissolve) {
+                    self.imageView.image = image
+                }
             }
+            self.placeholder.isHidden = true
         }
-    }
-
-    private func cancelCustomPending() {
-        customToken = UUID()
-        customPending?.cancel()
-        customPending = nil
     }
 
     public func applyTheme(_ theme: PageTheme) {
-        artwork?.backgroundColor = UIColor(theme.chip)
-        customContainer.backgroundColor = UIColor(theme.chip)
-        customPlaceholder.tintColor = UIColor(theme.muted.mixed(with: theme.ink, ratio: 0.25))
+        posterContainer.backgroundColor = UIColor(theme.chip)
+        placeholder.tintColor = UIColor(theme.muted.mixed(with: theme.ink, ratio: 0.25))
         titleLabel.textColor = UIColor(theme.ink)
         sourceLabel.textColor = UIColor(PageColor(rgb: theme.dark ? 0x9ca3af : 0x6b7280))
         sourceContainer.backgroundColor = theme.dark ? UIColor.white.withAlphaComponent(0.06) : UIColor(PageColor(rgb: 0xf8fafc))
@@ -277,68 +239,54 @@ public final class PosterCatalogCell: UICollectionViewCell, PageThemeable {
     public override func layoutSubviews() {
         feedback.layoutAtRest { super.layoutSubviews() }
         let height = contentView.bounds.width * 1.5
-        let posterFrame = CGRect(x: 0, y: 0, width: contentView.bounds.width, height: height)
-        artwork?.frame = posterFrame
-        customContainer.frame = posterFrame
-        customImageView.frame = customContainer.bounds
-        customPlaceholder.frame = CGRect(
-            x: (customContainer.bounds.width - 28) / 2,
-            y: (customContainer.bounds.height - 28) / 2,
-            width: 28,
-            height: 28
-        )
+        posterContainer.frame = CGRect(x: 0, y: 0, width: contentView.bounds.width, height: height)
+        imageView.frame = posterContainer.bounds
+        if !placeholder.isHidden {
+            placeholder.frame = CGRect(x: (posterContainer.bounds.width - 28) / 2,
+                                       y: (posterContainer.bounds.height - 28) / 2, width: 28, height: 28)
+        }
         titleLabel.frame = CGRect(x: 0, y: height + 7, width: contentView.bounds.width, height: 32)
-        let badgeWidth = min(contentView.bounds.width * 0.7, ceil(badge.intrinsicContentSize.width) + 16)
-        badgeContainer.frame = CGRect(x: contentView.bounds.width - badgeWidth - 8, y: 8,
-                                      width: badgeWidth, height: 19)
-        badge.frame = badgeContainer.bounds.insetBy(dx: 8, dy: 2)
-        badgeContainer.layer.shadowPath = UIBezierPath(roundedRect: badgeContainer.bounds, cornerRadius: 8).cgPath
-        let sourceWidth = min(contentView.bounds.width, ceil(sourceLabel.intrinsicContentSize.width) + 18)
-        sourceContainer.frame = CGRect(x: (contentView.bounds.width - sourceWidth) / 2, y: height + 41,
-                                       width: sourceWidth, height: 18)
-        sourceLabel.frame = sourceContainer.bounds.insetBy(dx: 9, dy: 3)
+        if !badgeContainer.isHidden {
+            let badgeWidth = min(contentView.bounds.width * 0.7, ceil(badge.intrinsicContentSize.width) + 16)
+            badgeContainer.frame = CGRect(x: contentView.bounds.width - badgeWidth - 8, y: 8, width: badgeWidth, height: 19)
+            badge.frame = badgeContainer.bounds.insetBy(dx: 8, dy: 2)
+            badgeContainer.layer.shadowPath = UIBezierPath(roundedRect: badgeContainer.bounds, cornerRadius: 8).cgPath
+        }
+        if !sourceContainer.isHidden {
+            let sourceWidth = min(contentView.bounds.width, ceil(sourceLabel.intrinsicContentSize.width) + 18)
+            sourceContainer.frame = CGRect(x: (contentView.bounds.width - sourceWidth) / 2, y: height + 41, width: sourceWidth, height: 18)
+            sourceLabel.frame = sourceContainer.bounds.insetBy(dx: 9, dy: 3)
+        }
     }
 
     public override func prepareForReuse() {
         super.prepareForReuse()
         resetPressFeedback()
-        currentPosterURL = nil
-        artwork?.load(nil)
-        cancelCustomPending()
-        representedCustomID = nil
-        customCached = nil
-        customLoader = nil
-        customImageView.image = nil
-        customPlaceholder.isHidden = false
+        cancelPendingLoad()
+        artworkSpec = nil
+        imageView.image = nil
+        placeholder.isHidden = false
     }
 
     public func cancelPendingLoad() {
-        artwork?.cancelPendingLoad()
-        cancelCustomPending()
+        loadToken = UUID()
+        pendingLoad?.cancel()
+        pendingLoad = nil
     }
 
     public func resumePendingLoad() {
-        if let url = currentPosterURL {
-            artwork?.load(url)
+        guard let spec = artworkSpec, let id = spec.id, imageView.image == nil, pendingLoad == nil else { return }
+        if let image = spec.cached() {
+            imageView.image = image
+            placeholder.isHidden = true
             return
         }
-        guard let id = representedCustomID, customImageView.image == nil, customPending == nil else { return }
-        if let image = customCached?() {
-            customImageView.image = image
-            customPlaceholder.isHidden = true
-            return
-        }
-        startCustomLoad(expectedID: id)
+        startLoad(expectedID: id, loader: spec.load)
     }
 
     public override func didMoveToWindow() {
         super.didMoveToWindow()
-        guard window != nil else { resetPressFeedback(); return }
-        var ancestor = superview
-        while let view = ancestor {
-            (view as? UIScrollView)?.delaysContentTouches = false
-            ancestor = view.superview
-        }
+        if window == nil { resetPressFeedback() }
     }
 
     public func resetPressFeedback() {
@@ -346,15 +294,16 @@ public final class PosterCatalogCell: UICollectionViewCell, PageThemeable {
         feedback.reset()
     }
 
-    nonisolated deinit {
-        customPending?.cancel()
-    }
+    nonisolated deinit { pendingLoad?.cancel() }
 }
 
 @MainActor
 final class PosterSectionHeaderView: UICollectionReusableView {
     static let reuseIdentifier = "PosterSectionHeaderView"
-    private let titleLabel = UILabel()
+    private static let chevronImage = UIImage(
+        systemName: "chevron.forward",
+        withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+    )
     private let titleButton = UIButton(type: .system)
     private let actionButton = UIButton(type: .system)
     private var onMore: (() -> Void)?
@@ -362,18 +311,12 @@ final class PosterSectionHeaderView: UICollectionReusableView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        titleLabel.font = .systemFont(ofSize: 18)
-        titleLabel.accessibilityTraits = .header
         var configuration = UIButton.Configuration.plain()
-        configuration.image = UIImage(systemName: "chevron.forward")
-        configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         configuration.imagePlacement = .trailing
         configuration.imagePadding = 8
         configuration.contentInsets = .zero
         configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
-            var attributes = $0
-            attributes.font = .systemFont(ofSize: 18)
-            return attributes
+            var attributes = $0; attributes.font = .systemFont(ofSize: 18); return attributes
         }
         titleButton.configuration = configuration
         titleButton.contentHorizontalAlignment = .leading
@@ -385,7 +328,6 @@ final class PosterSectionHeaderView: UICollectionReusableView {
         actionButton.contentHorizontalAlignment = .trailing
         actionButton.addAction(UIAction { [weak self] _ in self?.onAction?() }, for: .touchUpInside)
 
-        addSubview(titleLabel)
         addSubview(titleButton)
         addSubview(actionButton)
     }
@@ -411,16 +353,17 @@ final class PosterSectionHeaderView: UICollectionReusableView {
         actionTitle: String? = nil,
         onAction: (() -> Void)? = nil
     ) {
-        titleLabel.text = title
-        titleLabel.textColor = UIColor(theme.ink)
         self.onMore = onMore
         self.onAction = onAction
-        titleLabel.isHidden = onMore != nil
-        titleButton.isHidden = onMore == nil
-        titleButton.configuration?.title = title
-        titleButton.configuration?.baseForegroundColor = UIColor(theme.ink)
-        titleButton.accessibilityIdentifier = moreAccessibilityID
-        titleButton.accessibilityLabel = "查看更多\(title)"
+        var configuration = titleButton.configuration ?? .plain()
+        configuration.title = title
+        configuration.image = onMore == nil ? nil : Self.chevronImage
+        configuration.baseForegroundColor = UIColor(theme.ink)
+        titleButton.configuration = configuration
+        titleButton.isUserInteractionEnabled = onMore != nil
+        titleButton.accessibilityTraits = onMore == nil ? .header : [.button, .header]
+        titleButton.accessibilityIdentifier = onMore == nil ? nil : moreAccessibilityID
+        titleButton.accessibilityLabel = onMore == nil ? title : "查看更多\(title)"
 
         let hasAction = actionTitle != nil && onAction != nil
         actionButton.isHidden = !hasAction
@@ -438,9 +381,8 @@ final class PosterSectionHeaderView: UICollectionReusableView {
             : max(44, ceil(actionButton.intrinsicContentSize.width) + 8)
         actionButton.frame = CGRect(x: max(0, bounds.width - actionWidth), y: 0, width: actionWidth, height: bounds.height)
         let availableWidth = max(0, bounds.width - (actionWidth > 0 ? actionWidth + 8 : 0))
-        let width = min(availableWidth, ceil(titleButton.intrinsicContentSize.width))
+        let width = onMore == nil ? availableWidth : min(availableWidth, ceil(titleButton.intrinsicContentSize.width))
         titleButton.frame = CGRect(x: 0, y: 0, width: width, height: bounds.height)
-        titleLabel.frame = CGRect(x: 0, y: 8, width: availableWidth, height: bounds.height - 16)
     }
 }
 
@@ -448,12 +390,21 @@ final class PosterSectionHeaderView: UICollectionReusableView {
 final class PosterEmptyCell: UICollectionViewCell {
     static let reuseIdentifier = "PosterEmptyCell"
     let label = UILabel()
+    let activity = UIActivityIndicatorView(style: .medium)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         label.font = .systemFont(ofSize: 13)
+        label.textAlignment = .center
+        activity.hidesWhenStopped = true
         contentView.addSubview(label)
+        contentView.addSubview(activity)
         label.pinEdges(to: contentView)
+        activity.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            activity.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            activity.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
     }
 
     @available(*, unavailable)

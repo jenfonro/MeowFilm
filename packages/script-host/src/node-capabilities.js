@@ -21,7 +21,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { performance } from 'node:perf_hooks';
 import { createRequire } from 'node:module';
 import { readFileSync, realpathSync, lstatSync } from 'node:fs';
-import { dirname, extname, resolve, posix } from 'node:path';
+import { dirname, extname, relative, resolve, sep, posix } from 'node:path';
 import { fault, requireValue } from './errors.js';
 import { PrivateVolume, inside } from './private-volume.js';
 import { NativeResources } from './cat-resources.js';

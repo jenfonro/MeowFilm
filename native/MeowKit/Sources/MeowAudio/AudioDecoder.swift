@@ -42,10 +42,6 @@ public final class AudioDecoder: @unchecked Sendable {
         }
     }
 
-    public func information() async throws -> AudioStreamInformation {
-        try await run { try self.readInformation() }
-    }
-
     public func read() async throws -> AudioPCMChunk? {
         try await run({
             if let pending = self.pendingPCM { return pending }
@@ -75,19 +71,6 @@ public final class AudioDecoder: @unchecked Sendable {
             self.pendingPCM = chunk
             return chunk
         }, delivered: { _ in self.pendingPCM = nil })
-    }
-
-    /// Decodes and validates frames without copying PCM samples (used for cache inspection).
-    public func readFrameCount() async throws -> Int {
-        try await run {
-            guard let native = self.native else { throw AudioCoreError.invalidMedia }
-            self.pendingPCM = nil
-            var position = 0.0
-            let count = meow_audio_decoder_read(native, nil, nil, Int32(Self.readBlockFrames), &position)
-            guard count >= 0 else { throw self.failure(count) }
-            guard Int(count) <= Self.readBlockFrames else { throw AudioCoreError.invalidMedia }
-            return Int(count)
-        }
     }
 
     public func seek(to position: Double) async throws {

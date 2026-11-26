@@ -189,40 +189,46 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
 private final class ManagementCheckButton: UIButton, PageThemeable {
     private let shape: String, size: CGFloat, fontSize: CGFloat
     private var currentTheme: PageTheme?
+
     init(round: Bool) {
-        shape = round ? "circle" : "square"; size = round ? 20 : 18; fontSize = round ? 14 : 13
+        shape = round ? "circle" : "square"
+        size = round ? 20 : 18
+        fontSize = round ? 14 : 13
         super.init(frame: .zero)
-        titleLabel?.numberOfLines = 0; titleLabel?.lineBreakMode = .byWordWrapping; titleLabel?.adjustsFontForContentSizeCategory = true
-        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitPreferredContentSizeCategory.self]) { (button: ManagementCheckButton, _: UITraitCollection) in button.applyStyle() }
-        applyStyle()
-    }
-    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
-    override func didMoveToWindow() { super.didMoveToWindow(); if window != nil { applyStyle() } }
-    override var intrinsicContentSize: CGSize {
-        let size = super.intrinsicContentSize
-        guard let titleLabel, titleLabel.preferredMaxLayoutWidth > 0 else { return size }
-        let titleSize = titleLabel.sizeThatFits(.init(width: titleLabel.preferredMaxLayoutWidth, height: .greatestFiniteMagnitude))
-        return .init(width: size.width, height: max(size.height, ceil(titleSize.height)))
-    }
-    override func layoutSubviews() {
-        let width = max(0, contentRect(forBounds: bounds).width - (currentImage?.size.width ?? 0))
-        if titleLabel?.preferredMaxLayoutWidth != width {
-            titleLabel?.preferredMaxLayoutWidth = width; invalidateIntrinsicContentSize()
+        var config = UIButton.Configuration.plain()
+        config.contentInsets = .zero
+        config.titleLineBreakMode = .byWordWrapping
+        configuration = config
+        configurationUpdateHandler = { [weak self] button in
+            self?.refreshConfiguration(button)
         }
-        super.layoutSubviews()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitPreferredContentSizeCategory.self]) {
+            (button: ManagementCheckButton, _: UITraitCollection) in button.setNeedsUpdateConfiguration()
+        }
     }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
     func applyTheme(_ theme: PageTheme) {
         currentTheme = theme
-        applyStyle()
+        setNeedsUpdateConfiguration()
     }
-    private func applyStyle() {
+
+    private func refreshConfiguration(_ button: UIButton) {
+        guard var config = button.configuration else { return }
         let settings = (currentTheme ?? PageTheme(dark: traitCollection.userInterfaceStyle == .dark)).settings
-        titleLabel?.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: fontSize), compatibleWith: traitCollection)
-        let config = UIImage.SymbolConfiguration(pointSize: size, weight: .regular)
-        setImage(UIImage(systemName: shape, withConfiguration: config)?.withTintColor(UIColor(settings.muted), renderingMode: .alwaysOriginal), for: .normal)
-        setImage(UIImage(systemName: "checkmark.\(shape).fill", withConfiguration: config)?.withTintColor(UIColor(settings.accent), renderingMode: .alwaysOriginal), for: .selected)
-        setTitleColor(UIColor(settings.ink), for: .normal); setTitleColor(UIColor(settings.ink), for: .selected)
-        invalidateIntrinsicContentSize()
+        let symbol = button.isSelected ? "checkmark.\(shape).fill" : shape
+        let symbolConfig = UIImage.SymbolConfiguration(pointSize: size, weight: .regular)
+        config.image = UIImage(systemName: symbol, withConfiguration: symbolConfig)?
+            .withTintColor(UIColor(button.isSelected ? settings.accent : settings.muted), renderingMode: .alwaysOriginal)
+        config.baseForegroundColor = UIColor(settings.ink)
+        config.background.backgroundColor = .clear
+        let font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: fontSize), compatibleWith: traitCollection)
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+            var attrs = incoming; attrs.font = font; return attrs
+        }
+        button.configuration = config
     }
 }
 #endif

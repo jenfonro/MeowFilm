@@ -134,7 +134,7 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
 }
 
 @MainActor
-final class NovelRuleEditor: ManagementPageViewController {
+final class NovelRuleEditor: PageViewController {
     private var rule: NovelRule
     private let feature: NovelFeature
     private let form = ManagementFormView(contentTopSpacing: SettingsVisualMetrics.contentTopSpacing)
@@ -143,7 +143,7 @@ final class NovelRuleEditor: ManagementPageViewController {
     override func viewDidLoad() {
         super.viewDidLoad(); view.accessibilityIdentifier = "novel.rule.editor"; form.boxedInputs = true
         let save = PageHeaderButton(image: ManagementIcon.save, accessibilityLabel: "保存") { [weak self] in self?.save() }; save.accessibilityIdentifier = "novel.rule.save"
-        setManagementActions([save, PageHeaderButton(image: ManagementIcon.more, accessibilityLabel: "更多", menu: UIMenu(children: [UIAction(title: "复制规则") { [weak self] _ in self?.copy() }, UIAction(title: "粘贴规则") { [weak self] _ in self?.paste() }]))])
+        pageHeader.setTrailing([save, PageHeaderButton(image: ManagementIcon.more, accessibilityLabel: "更多", menu: UIMenu(children: [UIAction(title: "复制规则") { [weak self] _ in self?.copy() }, UIAction(title: "粘贴规则") { [weak self] _ in self?.paste() }]))])
         view.addSubview(form); form.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([form.topAnchor.constraint(equalTo: contentTopAnchor), form.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12), form.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12), form.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor)])
         render()

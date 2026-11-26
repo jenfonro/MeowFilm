@@ -49,9 +49,15 @@ extension MusicFullPlayerView {
 
     func updateLyrics() {
         let next = content.model.lyricLines
-        lyricStatus.text = next.isEmpty ? (content.model.lyricState == "disabled" ? "歌词已关闭" :
-            content.model.lyricState == "loading" ? "歌词加载中" : "暂无歌词") : nil
-        lyricTable.backgroundView = lyricStatus.text == nil ? nil : lyricStatus
+        if next.isEmpty, content.model.lyricState == "loading" {
+            lyricStatus.text = nil
+            lyricLoading.startAnimating()
+            lyricTable.backgroundView = lyricLoading
+        } else {
+            lyricLoading.stopAnimating()
+            lyricStatus.text = next.isEmpty ? (content.model.lyricState == "disabled" ? "歌词已关闭" : "暂无歌词") : nil
+            lyricTable.backgroundView = lyricStatus.text == nil ? nil : lyricStatus
+        }
         let update = lyricProjection.update(section: 0, items: next, id: \.id)
         guard update.hasChanges else {
             updateLyricPreview(force: true)

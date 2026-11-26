@@ -6,28 +6,13 @@ import MeowDebug
 
 @MainActor
 extension PlaybackController {
-    /// Convenience playback command using the current owner's default policy.
-    public func play(resource: PlaybackResource, owner: String) {
-        _ = playAttempt(resource: resource, owner: owner)
-    }
-
     /// The returned attempt is the requested attempt even if a synchronous
     /// callback replaces it before this call returns. Preflight failures also
     /// get identities and a typed failure event, but never create an item.
     @discardableResult
     public func playAttempt(
-        resource: PlaybackResource, owner: String, autoplay: Bool = true
-    ) -> PlayAttempt {
-        playAttempt(resource: resource, owner: owner, autoplay: autoplay, network: .init())
-    }
-
-    /// Explicit media classification for extensionless HLS, or a progressive
-    /// resource even when no headers are needed. Defaults preserve the existing
-    /// entry point and function references. No implicit backend/source fallback.
-    @discardableResult
-    public func playAttempt(
         resource: PlaybackResource, owner: String, autoplay: Bool = true,
-        network: PlaybackNetworkOptions
+        network: PlaybackNetworkOptions = .init()
     ) -> PlayAttempt {
         mutationDepth += 1
         defer { finishMutation() }
@@ -94,11 +79,15 @@ extension PlaybackController {
         return attempt
     }
 
+    func resolvedVolume(for owner: String) -> Double {
+        let saved = volumePreferences?.volume(for: owner) ?? 1
+        return saved.isFinite && (0...1).contains(saved) ? saved : 1
+    }
+
     func configureControls(owner: String) {
         if controlsOwner != owner {
             controlsOwner = owner; controlsRate = 1
-            let saved = volumePreferences?.volume(for: owner) ?? 1
-            controlsVolume = saved.isFinite && (0...1).contains(saved) ? saved : 1
+            controlsVolume = resolvedVolume(for: owner)
         }
     }
 

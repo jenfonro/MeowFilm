@@ -294,13 +294,13 @@ extension FilmCatSourcesViewController: DebugPageInspectable, DebugPageActionabl
 
 extension FilmVideoSourcesViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
-        DebugPageStatus(target: "settings.film", moduleId: "film", route: "settings/film/videos", title: pageTitle ?? "视频源管理", settingsDomain: "film", settingsSection: "videos")
+        DebugPageStatus(target: "settings.film", moduleId: "film", route: "settings/film/videos", title: pageTitle ?? "视频源管理", isBusy: busy || detecting, settingsDomain: "film", settingsSection: "videos")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.film", kind: "settings", rows: debugContentRows(maxItems: maxItems), settings: .object(["domain": .string("film"), "section": .string("videos")]))
+        DebugContentSnapshot(target: "settings.film", kind: "settings", loading: busy || detecting, rows: debugManagementRows(maxItems: maxItems), settings: .object(["domain": .string("film"), "section": .string("videos")]))
     }
     public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
-        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
+        if request.action == "list.item.invoke" { return try debugInvokeManagementRow(params: request.params) }
         throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on FilmVideoSourcesViewController")
     }
 }

@@ -162,6 +162,7 @@ private final class MusicRecordRotorView: UIView {
         context.addEllipse(in: cover)
         context.clip()
         if let image, image.size.width > 0, image.size.height > 0 {
+            context.interpolationQuality = .high
             let scale = max(size / image.size.width, size / image.size.height)
             let width = image.size.width * scale, height = image.size.height * scale
             image.draw(in: CGRect(x: cover.midX - width / 2, y: cover.midY - height / 2,
@@ -295,17 +296,14 @@ final class MusicRecordDiscView: UIView {
     private let outerShadow = CALayer()
     private let shadowMask = CAShapeLayer()
     private let coverHost = MusicRecordRotorView()
-    private let starHost = CALayer()
     private let sheen = CAGradientLayer()
     private let sheenMask = CALayer()
-    private let starMask = CALayer()
     private var theme = PageTheme()
     private var rotating = false
     private var suspended = false
     private var rotationStartTime: CFTimeInterval?
     private var rotationStartAngle: CGFloat = 0
     private static let rotationDuration: CFTimeInterval = 32
-    private var stars: [CAShapeLayer] = []
 
     override var isHidden: Bool {
         didSet { updateRotation() }
@@ -321,47 +319,12 @@ final class MusicRecordDiscView: UIView {
         outerShadow.mask = shadowMask
         shadowMask.fillRule = .evenOdd
         addSubview(coverHost)
-        coverHost.layer.addSublayer(starHost)
         layer.addSublayer(sheen)
 
         sheen.type = .conic
         sheen.startPoint = CGPoint(x: 0.5, y: 0.5)
         sheen.endPoint = CGPoint(x: 0.78, y: 0.08)
         sheen.mask = sheenMask
-        starHost.mask = starMask
-
-        for index in 0..<24 {
-            let star = CAShapeLayer()
-            let edge = CGFloat(3 + index % 4)
-            let points = [CGPoint(x: 0.5, y: 0), CGPoint(x: 0.6, y: 0.39),
-                          CGPoint(x: 1, y: 0.5), CGPoint(x: 0.6, y: 0.6),
-                          CGPoint(x: 0.5, y: 1), CGPoint(x: 0.4, y: 0.6),
-                          CGPoint(x: 0, y: 0.5), CGPoint(x: 0.4, y: 0.39)]
-            let path = CGMutablePath()
-            for (offset, point) in points.enumerated() {
-                let position = CGPoint(x: point.x * edge, y: point.y * edge)
-                if offset == 0 { path.move(to: position) } else { path.addLine(to: position) }
-            }
-            path.closeSubpath()
-            star.path = path
-            star.bounds = CGRect(x: 0, y: 0, width: edge, height: edge)
-            star.fillColor = UIColor(PageColor(rgb: 0xffffef)).cgColor
-            star.opacity = 0.55
-            star.transform = CATransform3DMakeScale(0.8, 0.8, 1)
-            let core = CAShapeLayer()
-            core.frame = star.bounds
-            core.path = UIBezierPath(ovalIn: star.bounds.insetBy(dx: edge * 0.23, dy: edge * 0.23)).cgPath
-            core.fillColor = UIColor.white.withAlphaComponent(0.6).cgColor
-            core.shadowColor = UIColor(PageColor(rgb: 0xffffdf)).cgColor
-            core.shadowOpacity = 0.55
-            core.shadowRadius = 2
-            core.shadowOffset = .zero
-            core.shadowPath = UIBezierPath(ovalIn: star.bounds.insetBy(dx: edge * 0.23 - 1,
-                                                                      dy: edge * 0.23 - 1)).cgPath
-            star.addSublayer(core)
-            starHost.addSublayer(star)
-            stars.append(star)
-        }
 
         coverHost.layer.speed = 0
         NotificationCenter.default.addObserver(
@@ -484,7 +447,6 @@ final class MusicRecordDiscView: UIView {
         rotation.repeatCount = .infinity
         rotation.timingFunction = CAMediaTimingFunction(name: .linear)
         layer.add(rotation, forKey: "record.rotation")
-        installSparkles(at: time)
         CATransaction.commit()
     }
 
@@ -507,26 +469,6 @@ final class MusicRecordDiscView: UIView {
         layer.removeAnimation(forKey: "record.rotation")
         CATransaction.commit()
         rotationStartTime = nil
-    }
-
-    private func installSparkles(at time: CFTimeInterval) {
-        for (index, star) in stars.enumerated() where star.animation(forKey: "record.sparkle") == nil {
-            let scale = CAKeyframeAnimation(keyPath: "transform.scale")
-            scale.values = [0.6, 1.5, 0.6]
-            scale.keyTimes = [0, 0.48, 1]
-            scale.timingFunctions = [.init(name: .easeInEaseOut), .init(name: .easeInEaseOut)]
-            let opacity = CAKeyframeAnimation(keyPath: "opacity")
-            opacity.values = [0.3, 0.95, 0.3]
-            opacity.keyTimes = scale.keyTimes
-            opacity.timingFunctions = scale.timingFunctions
-            let shimmer = CAAnimationGroup()
-            shimmer.animations = [scale, opacity]
-            shimmer.duration = 3.4 + Double(index % 7) * 0.43
-            shimmer.beginTime = time
-            shimmer.timeOffset = time + Double(index) * 0.71
-            shimmer.repeatCount = .infinity
-            star.add(shimmer, forKey: "record.sparkle")
-        }
     }
 
     private struct MaskKey: Hashable {
@@ -582,21 +524,12 @@ final class MusicRecordDiscView: UIView {
         // A rotating view's frame is undefined; keep its untransformed geometry fixed.
         coverHost.bounds = CGRect(origin: .zero, size: bounds.size)
         coverHost.center = CGPoint(x: bounds.midX, y: bounds.midY)
-        starHost.frame = bounds
         sheen.frame = bounds
         let maskChanged = sheenMask.bounds.size != bounds.size || scaleChanged || sheenMask.contents == nil
         sheenMask.frame = bounds
-        starMask.frame = bounds
         if maskChanged, bounds.width > 0, bounds.height > 0,
            let maskCG = Self.cachedRingMask(bounds: bounds, scale: traitCollection.displayScale) {
             sheenMask.contents = maskCG
-            starMask.contents = maskCG
-        }
-        for (index, star) in stars.enumerated() {
-            let angle = Double(index) * 2.399963 + 0.45
-            let radius = (31.2 + Double(index * 47 % 160) / 10) / 100
-            star.position = CGPoint(x: bounds.midX + bounds.width * cos(angle) * radius,
-                                    y: bounds.midY + bounds.height * sin(angle) * radius)
         }
         // CSS outer box-shadow excludes the disc interior, even through transparent covers.
         let shadowPadding = outerShadow.shadowRadius * 3 + abs(outerShadow.shadowOffset.height)

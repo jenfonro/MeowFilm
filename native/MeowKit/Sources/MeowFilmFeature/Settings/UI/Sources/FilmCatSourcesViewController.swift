@@ -4,12 +4,9 @@ import MeowDebug
 import MeowUI
 
 @MainActor
-final class FilmCatSourcesViewController: FilmSourcePageController {
-    override var usesSettingsTable: Bool { false }
-    let manager = ManagementListView()
+final class FilmCatSourcesViewController: FilmSourceManagementController {
     private var selected = Set<String>()
     private var query = ""
-    private var updateGeneration = UUID()
     private lazy var addButton = PageHeaderButton(image: UIImage(systemName: "plus")!,
         accessibilityLabel: "导入猫源", menu: UIMenu(children: [
             UIAction(title: "本地导入") { [weak self] _ in self?.importSource(local: true) },
@@ -18,9 +15,7 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
 
     override func viewDidLoad() {
         pageTitle = "猫源"
-        super.viewDidLoad()
         view.accessibilityIdentifier = "film.cats"
-        pageHeader.setTrailing([addButton])
         manager.accessibilityIdentifier = "film.cats.managementList"
         manager.search.placeholder = "搜索猫源"
         manager.onSearch = { [weak self] in self?.query = $0; self?.render() }
@@ -31,17 +26,10 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
         }
         manager.onDelete = { [weak self] in self?.removeSelected() }
         manager.configureToolbar(showsSearch: true, buttons: [])
-        view.addSubview(manager)
-        manager.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            manager.topAnchor.constraint(equalTo: contentTopAnchor),
-            manager.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-            manager.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            manager.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
-        manager.applyTheme(theme)
-        render()
+        super.viewDidLoad()
+        pageHeader.setTrailing([addButton])
     }
+
     override func render() {
         guard isViewLoaded else { return }
         let cats = snapshot?.cats ?? []
@@ -81,6 +69,7 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
         updateFooterMenu()
         presentRuntimeError()
     }
+
     private func presentRuntimeError() {
         let runtimeError = snapshot?.runtimeError
         let message = (runtimeError?.isEmpty == false) ? "运行器不可用：\(runtimeError!)" : nil
@@ -89,35 +78,70 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
             self.perform({ [service] in try await service.start() })
         })
     }
+
     override func applyTheme() {
         super.applyTheme()
-        guard isViewLoaded else { return }
-        manager.applyTheme(theme)
-        addButton.tintColor = UIColor(theme.ink)
+        if isViewLoaded { addButton.tintColor = UIColor(theme.ink) }
     }
+
     func importSource(local: Bool) {
         guard isPageActive, isPageVisible, !busy else { return }
-        let editor = FilmCatEditorController(service: service, mode: .importSource(local: local),
-            themeProvider: themeProvider)
         if local {
-            navigationController?.pushViewController(editor, animated: true)
-        } else {
-            editor.isFloating = true
-            let modal = FilmFloatingEditorController(editor: editor, themeProvider: themeProvider)
-            let close = { [weak self, weak modal] in
-                guard let self, let modal else { return }
-                dismissPageModal(modal)
-            }
-            editor.onSaved = close
-            editor.onCancel = close
-            presentPageModal(modal)
+            navigationController?.pushViewController(
+                FilmCatEditorController(service: service, mode: .importLocal, themeProvider: themeProvider),
+                animated: true
+            )
+            return
         }
+        let dialog = ManagementDialog(title: "导入猫源", action: "保存", themeProvider: themeProvider)
+        dialog.view.accessibilityIdentifier = "film.cat.networkImport.modal"
+        let name = ManagementDialog.input(placeholder: "名称")
+        name.accessibilityIdentifier = "film.cat.editor.name"
+        let sourceURL = ManagementDialog.input(placeholder: "URL")
+        sourceURL.keyboardType = .URL
+        sourceURL.accessibilityIdentifier = "film.cat.editor.url"
+        dialog.addInput(name, title: "名称")
+        dialog.addInput(sourceURL, title: "URL")
+        var targetID: String?
+        let cats = snapshot?.cats ?? []
+        if !cats.isEmpty {
+            let targetButton = UIButton(type: .system)
+            targetButton.contentHorizontalAlignment = .leading
+            targetButton.showsMenuAsPrimaryAction = true
+            targetButton.accessibilityIdentifier = "film.cat.editor.target"
+            func syncTargetMenu() {
+                let currentTitle = targetID.flatMap { id in cats.first { $0.installationId == id }?.name } ?? "新安装"
+                targetButton.setTitle(currentTitle, for: .normal)
+                targetButton.menu = UIMenu(children: [
+                    UIAction(title: "新安装", state: targetID == nil ? .on : .off) { _ in targetID = nil; syncTargetMenu() }
+                ] + cats.map { cat in
+                    UIAction(title: cat.name, state: targetID == cat.installationId ? .on : .off) { _ in
+                        targetID = cat.installationId; syncTargetMenu()
+                    }
+                })
+            }
+            syncTargetMenu()
+            dialog.addBodyView(targetButton)
+        }
+        dialog.submit = { [service] in
+            let trimmedName = name.text ?? ""
+            let trimmedURL = sourceURL.text ?? ""
+            if let targetID {
+                _ = try await service.editCat(targetID, name: trimmedName, sourceType: "network", sourceURL: trimmedURL)
+            } else {
+                _ = try await service.importNetwork(name: trimmedName, sourceURL: trimmedURL)
+            }
+            return true
+        }
+        presentPageModal(dialog)
     }
+
     private func edit(_ cat: FilmCatSource) {
         guard isPageActive, isPageVisible, !busy else { return }
         navigationController?.pushViewController(FilmCatEditorController(service: service, mode: .edit(cat),
             themeProvider: themeProvider), animated: true)
     }
+
     private func remove(_ cats: [FilmCatSource]) {
         guard !cats.isEmpty else { return }
         presentPageConfirmation(
@@ -133,40 +157,47 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
             }
         )
     }
+
     func batch(_ action: Int) {
         let cats = (snapshot?.cats ?? []).filter { selected.contains(rowID($0.installationId)) }
-        let generation = sourcePageGeneration
         if action == 4 {
             remove(cats)
         } else if action == 2 {
             update(cats)
         } else if action == 3 {
             let restartable = cats.filter(\.canRestart)
-            var completedCount = 0
-            perform({ [weak self, service] in
-                while completedCount < restartable.count {
-                    guard self?.canContinueSourceBatch(generation) == true else { return }
-                    _ = try await service.restartCat(restartable[completedCount].installationId)
-                    // Advance only after the service confirms the complete operation.
-                    completedCount += 1
+            var index = 0
+            runBatch(retry: { [weak self] in self?.batch(action) }) { [weak self, service] in
+                while index < restartable.count {
+                    try Task.checkCancellation()
+                    guard self?.isPageActive == true, self?.isPageVisible == true else { return }
+                    let id = restartable[index].installationId
+                    _ = try await Task { try await service.restartCat(id) }.value
+                    index += 1
                 }
-            })
+            }
         } else {
-            var completedCount = 0
-            perform({ [weak self, service] in
-                while completedCount < cats.count {
-                    guard self?.canContinueSourceBatch(generation) == true else { return }
-                    _ = try await service.enableCat(cats[completedCount].installationId, enabled: action == 0)
-                    completedCount += 1
+            var index = 0
+            let enabled = action == 0
+            runBatch(retry: { [weak self] in self?.batch(action) }) { [weak self, service] in
+                while index < cats.count {
+                    try Task.checkCancellation()
+                    guard self?.isPageActive == true, self?.isPageVisible == true else { return }
+                    let id = cats[index].installationId
+                    _ = try await Task { try await service.enableCat(id, enabled: enabled) }.value
+                    index += 1
                 }
-            })
+            }
         }
     }
+
     private func rowID(_ id: String) -> String { "film.cat.\(id)" }
+
     private func removeSelected() {
         guard !busy else { return }
         remove((snapshot?.cats ?? []).filter { selected.contains(rowID($0.installationId)) })
     }
+
     private func updateFooterMenu() {
         let values = (snapshot?.cats ?? []).filter { selected.contains(rowID($0.installationId)) }
         manager.deleteButton.isEnabled = !busy && !values.isEmpty
@@ -178,6 +209,7 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
             UIAction(title: "重启所选", attributes: values.isEmpty || busy ? .disabled : []) { [weak self] _ in self?.batch(3) },
         ])
     }
+
     private func update(_ cats: [FilmCatSource]) {
         guard let first = cats.first else { return }
         if first.sourceType == "local" {
@@ -190,17 +222,17 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
             }
             navigationController?.pushViewController(editor, animated: true)
         } else {
-            let generation = updateGeneration
-            perform({ [service] in _ = try await service.updateCat(first.installationId, source: nil) },
+            runBatch(
+                retry: { [weak self] in self?.update(cats) },
                 completed: { [weak self] in
-                    guard let self, updateGeneration == generation, isPageActive, isPageVisible,
-                          navigationController?.topViewController === self else { return }
+                    guard let self, navigationController?.topViewController === self else { return }
                     update(Array(cats.dropFirst()))
-                })
+                }
+            ) { [service] in
+                _ = try await Task { try await service.updateCat(first.installationId, source: nil) }.value
+            }
         }
     }
-    override func pageDidBecomeHidden() { super.pageDidBecomeHidden(); updateGeneration = UUID() }
-    override func pageDidBecomeInactive() { super.pageDidBecomeInactive(); updateGeneration = UUID() }
 }
 
 @MainActor
@@ -262,74 +294,6 @@ final class FilmCatDetailController: FilmSourcePageController {
         guard let navigationController, navigationController.topViewController === self else { return }
         let editor = FilmCatEditorController(service: service, mode: mode, themeProvider: themeProvider)
         navigationController.setViewControllers(Array(navigationController.viewControllers.dropLast()) + [editor], animated: true)
-    }
-}
-
-@MainActor
-final class FilmFloatingEditorController: FloatingCardDialogController {
-    override var showsHeaderDivider: Bool { true }
-    override var cardMaxWidth: CGFloat { 480 }
-    private let editor: FilmCatEditorController
-
-    init(editor: FilmCatEditorController, themeProvider: any PageThemeProviding) {
-        self.editor = editor
-        super.init(title: editor.pageTitle ?? "导入猫源", themeProvider: themeProvider)
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.accessibilityIdentifier = "film.cat.networkImport.modal"
-        cardView.accessibilityIdentifier = "film.cat.networkImport.card"
-        scrollView.isScrollEnabled = false
-
-        addChild(editor)
-        addBodyView(editor.view)
-        editor.view.translatesAutoresizingMaskIntoConstraints = false
-        let preferredHeight = editor.view.heightAnchor.constraint(equalToConstant: 420)
-        preferredHeight.priority = .defaultHigh
-        let boundedHeight = editor.view.heightAnchor.constraint(
-            lessThanOrEqualTo: scrollView.frameLayoutGuide.heightAnchor,
-            constant: -36
-        )
-        boundedHeight.priority = UILayoutPriority(999)
-        NSLayoutConstraint.activate([preferredHeight, boundedHeight])
-        editor.didMove(toParent: self)
-        applyTheme()
-    }
-
-    override func requestDismiss() {
-        if let onCancel = editor.onCancel {
-            onCancel()
-        } else {
-            super.requestDismiss()
-        }
-    }
-
-    // MARK: - DebugDialogControllable
-
-    override func debugDialogActions() -> [DebugDialogActionDescriptor] {
-        [
-            DebugDialogActionDescriptor(index: 0, label: "关闭", kind: "cancel", enabled: true),
-            DebugDialogActionDescriptor(index: 1, label: editor.isBusy ? "处理中" : "保存", kind: "default", enabled: !editor.isBusy),
-        ]
-    }
-
-    override func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String {
-        if kind == "cancel" || index == 0 || label == "关闭" || label == "取消" {
-            requestDismiss()
-            return "关闭"
-        }
-        if kind == "confirm" || kind == "default" || index == 1 || label == "保存" {
-            guard !editor.isBusy else {
-                throw DebugAPIError.invalidState("FilmFloatingEditorController is busy")
-            }
-            editor.save()
-            return "保存"
-        }
-        if let index {
-            throw DebugAPIError.invalidArgument("FilmFloatingEditorController button index out of range: \(index)")
-        }
-        throw DebugAPIError.notFound("FilmFloatingEditorController action not available")
     }
 }
 #endif

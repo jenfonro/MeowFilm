@@ -113,21 +113,22 @@ public struct PanAccount: Equatable, Sendable {
         revision = nil; configured = nil; fields = nil; status = nil
     }
     init(_ value: RuntimeValue) throws {
-        guard let provider = value.panField("provider")?.panString.flatMap(PanProviderID.init(rawValue:)) else {
+        guard let fieldsObj = value.objectValue,
+              let provider = fieldsObj["provider"]?.stringValue.flatMap(PanProviderID.init(rawValue:)) else {
             throw PanAccountError.invalidResponse
         }
-        if let error = value.panField("errorCode") {
+        if let error = fieldsObj["errorCode"] {
             guard error == .string(ErrorCode.corruptStorage.rawValue) else { throw PanAccountError.invalidResponse }
             self.init(corrupt: provider)
             return
         }
-        guard let revision = value.panField("revision")?.panInteger,
-              let configured = value.panField("configured")?.panBool,
-              let status = value.panField("status")?.panString.flatMap(PanAccountStatus.init(rawValue:)),
+        guard let revision = fieldsObj["revision"]?.panInteger,
+              let configured = fieldsObj["configured"]?.boolValue,
+              let status = fieldsObj["status"]?.stringValue.flatMap(PanAccountStatus.init(rawValue:)),
               status != .unverified,
-              let fields = value.panField("fields")?.panArray else { throw PanAccountError.invalidResponse }
+              let fields = fieldsObj["fields"]?.arrayValue else { throw PanAccountError.invalidResponse }
         let names = try fields.map {
-            guard let field = $0.panString else { throw PanAccountError.invalidResponse }
+            guard let field = $0.stringValue else { throw PanAccountError.invalidResponse }
             return field
         }
         let allowed = PanProvider.all.first { $0.id == provider }!.credentialFields.map(\.rawValue)
@@ -180,10 +181,6 @@ struct PanAccountNotice: Identifiable, Equatable {
 }
 
 extension RuntimeValue {
-    func panField(_ name: String) -> RuntimeValue? { if case .object(let fields) = self { return fields[name] }; return nil }
-    var panString: String? { if case .string(let text) = self { return text }; return nil }
-    var panArray: [RuntimeValue]? { if case .array(let values) = self { return values }; return nil }
-    var panBool: Bool? { if case .bool(let value) = self { return value }; return nil }
     var panInteger: Int64? {
         guard case .number(let value) = self, value.isFinite, value >= 0,
               value.rounded(.towardZero) == value, value <= 9_007_199_254_740_991 else { return nil }

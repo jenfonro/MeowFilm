@@ -100,13 +100,7 @@ extension PlaybackController {
         replacementAdmission = UUID(); replacementOwner = nil; failedReplacementAutoplay = false
         let rate = min(transport.initialRate ?? (controlsOwner == lease.owner ? controlsRate : 1),
                        min(3, transport.kernel.engine.maximumRate))
-        let resolvedVolume: Double
-        if controlsOwner != lease.owner {
-            let saved = volumePreferences?.volume(for: lease.owner) ?? 1
-            resolvedVolume = saved.isFinite && (0...1).contains(saved) ? saved : 1
-        } else {
-            resolvedVolume = controlsVolume
-        }
+        let resolvedVolume = controlsOwner != lease.owner ? self.resolvedVolume(for: lease.owner) : controlsVolume
         let token = state.beginVideo(resourceID: transport.media.resourceID, title: transport.title,
                                     owner: lease.owner, autoplay: !paused)
         let attempt = PlayAttempt(id: token, owner: lease.owner, resourceID: transport.media.resourceID)

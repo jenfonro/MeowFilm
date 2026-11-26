@@ -282,13 +282,24 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         applyTheme()
     }
 
+    open override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        PageViewController.reconcileWindowModalCoverage(from: presentingViewController)
+    }
+
     open override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        PageViewController.reconcileWindowModalCoverage(from: presentingViewController)
         if !didNotifyClose, (isBeingDismissed || presentingViewController == nil) {
             didNotifyClose = true
             cancelDialogTasks()
             dialogWillClose()
         }
+    }
+
+    open override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        PageViewController.reconcileWindowModalCoverage(from: presentingViewController)
     }
 
     /// Hook invoked once when the dialog is dismissed or detached from its presenter.
@@ -433,28 +444,34 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         )
     }
 
-    open func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String {
-        let actions = debugDialogActions()
-        if let kind, kind == "cancel" {
-            requestDismiss()
-            return actions.first(where: { $0.kind == "cancel" })?.label ?? "关闭"
-        }
-        if let index {
-            guard index == 0 else {
-                throw DebugAPIError.invalidArgument("Dialog button index out of range: \(index)")
-            }
-            requestDismiss()
-            return actions.first?.label ?? "关闭"
-        }
-        if let label {
-            if label == "关闭" || label == "取消" {
-                requestDismiss()
-                return label
-            }
-            throw DebugAPIError.notFound("Dialog button not found: \(label)")
-        }
+    open func performDebugDialogAction(_ action: DebugDialogActionDescriptor) throws {
         requestDismiss()
-        return "关闭"
+    }
+
+    open func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String {
+        let descriptors = debugDialogActions()
+        let chosen: DebugDialogActionDescriptor?
+        if let index {
+            guard descriptors.indices.contains(where: { descriptors[$0].index == index }) else {
+                throw DebugAPIError.invalidArgument("\(debugDialogTypeName) button index out of range: \(index)")
+            }
+            chosen = descriptors.first { $0.index == index }
+        } else if let label {
+            chosen = descriptors.first { $0.label == label }
+        } else if let kind {
+            let normalized = kind == "confirm" ? "default" : kind
+            chosen = descriptors.first { $0.kind == kind || $0.kind == normalized }
+        } else {
+            chosen = descriptors.first { $0.kind != "cancel" } ?? descriptors.first
+        }
+        guard let chosen else {
+            throw DebugAPIError.notFound("\(debugDialogTypeName) action not found")
+        }
+        guard chosen.enabled else {
+            throw DebugAPIError.invalidState("\(debugDialogTypeName) action '\(chosen.label)' is disabled")
+        }
+        try performDebugDialogAction(chosen)
+        return chosen.label
     }
 }
 #endif

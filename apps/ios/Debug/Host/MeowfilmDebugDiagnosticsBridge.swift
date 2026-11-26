@@ -102,19 +102,18 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
 
     // MARK: - Diagnostics
 
+    private func fetchNodeDiagnostics() async -> DebugJSONValue {
+        if let resources = await MainActor.run(body: { appDelegate?.assembly?.resources }),
+           let client = await resources.scriptSession.connectionIfStarted() {
+            return await client.debugNodeDiagnostics()
+        }
+        return .object(["available": .bool(false), "reason": .string("RUNTIME_NOT_STARTED")])
+    }
+
     func diagSummary() async -> DebugJSONValue {
         let memory = runtime.diagnostics.memorySnapshot()
         let nativeLeases = await collectActiveLeases()
-
-        var nodeDiag: DebugJSONValue = .object([
-            "available": .bool(false),
-            "reason": .string("RUNTIME_NOT_STARTED")
-        ])
-        if let resources = await MainActor.run(body: { appDelegate?.assembly?.resources }),
-           let client = await resources.scriptSession.connectionIfStarted() {
-            nodeDiag = await client.debugNodeDiagnostics()
-        }
-
+        let nodeDiag = await fetchNodeDiagnostics()
         let meta = runtime.session.currentMetadata
         return .object([
             "platform": .string("ios"),
@@ -135,16 +134,7 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
             (Thread.callStackSymbols, pthread_mach_thread_np(pthread_self()))
         }
         let threads = runtime.diagnostics.threadsSnapshot(mainThreadStack: mainStack, mainMachThread: mainMach)
-
-        var nodeDiag: DebugJSONValue = .object([
-            "available": .bool(false),
-            "reason": .string("RUNTIME_NOT_STARTED")
-        ])
-        if let resources = await MainActor.run(body: { appDelegate?.assembly?.resources }),
-           let client = await resources.scriptSession.connectionIfStarted() {
-            nodeDiag = await client.debugNodeDiagnostics()
-        }
-
+        let nodeDiag = await fetchNodeDiagnostics()
         return .object([
             "platform": .string("ios"),
             "threadCount": .int(threads.count),

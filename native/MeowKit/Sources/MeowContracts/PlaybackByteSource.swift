@@ -22,7 +22,12 @@ public protocol PlaybackByteSource: AnyObject, Sendable {
     var id: UUID { get }
     var progress: PlaybackCacheProgress { get }
     func information() async throws -> PlaybackByteInformation
+    func readAvailable(offset: Int64, count: Int) throws -> Data?
     func read(offset: Int64, count: Int) async throws -> Data
     func updates() -> AsyncStream<PlaybackCacheProgress>
     func retire()
+}
+
+public extension PlaybackByteSource {
+    func readAvailable(offset: Int64, count: Int) throws -> Data? { nil }
 }

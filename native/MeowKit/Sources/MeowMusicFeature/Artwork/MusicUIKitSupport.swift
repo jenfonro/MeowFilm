@@ -138,7 +138,9 @@ final class MusicArtworkView: ArtworkView {
     }
     override func didLoadImage(_ image: UIImage, data: Data?) {
         sharedImages?.unregisterFailed(self)
-        if let sharedImages, let songID = representedSongID, let url = requestedURL, let requested = selectionOriginURL {
+        if let sharedImages, let songID = representedSongID, let url = requestedURL,
+           let requested = selectionOriginURL, url != requested {
+            selectionOriginURL = url
             selectionTask?.cancel()
             selectionTask = Task { [sharedImages] in
                 try? await sharedImages.succeeded(songID: songID, url: url, replacing: requested)
@@ -159,7 +161,7 @@ final class MusicArtworkView: ArtworkView {
             do {
                 let next = try await images.failed(songID: songID, url: origin, attempted: attempted.union([origin]))
                 guard !Task.isCancelled, let self, self.representedSongID == songID, self.requestedURL == url else { return }
-                self.requestedURL = next; self.selectionOriginURL = next; self.loadSelected(next, songID: songID)
+                self.requestedURL = next; self.loadSelected(next, songID: songID)
             } catch {
                 if !(error is CancellationError) && !Task.isCancelled {
                     DebugRuntime.logError(.musicCatalog, sub: "artwork", event: "fallback.failed", error: error, level: .warn)

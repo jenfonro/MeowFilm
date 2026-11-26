@@ -4,8 +4,7 @@ import MeowRuntime
 
 @MainActor
 extension MeowfilmAssembly {
-    func makeFilmPlayback(item: FilmItem,
-                          entrySurface: String? = nil) throws -> FilmPlaybackModel {
+    func makeFilmPlayback(item: FilmItem) throws -> FilmPlaybackModel {
         guard !closed, resources != nil else { throw FilmPlaybackError(code: "CLOSED") }
         guard let entry = item.entry, !entry.targetId.isEmpty else {
             throw FilmPlaybackError(code: "INVALID_REQUEST")

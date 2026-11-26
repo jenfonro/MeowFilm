@@ -64,7 +64,9 @@ public final class MusicPlayerViewController: MusicPageViewController {
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if !transition.isTransitioning { playerView.installRoutePickerIfNeeded() }
+        if !transition.isTransitioning {
+            playerView.installRoutePickerIfNeeded()
+        }
         drainRequests()
     }
 

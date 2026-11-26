@@ -3,13 +3,131 @@ import UIKit
 import MeowUI
 
 @MainActor
+final class FilmSourcePageState {
+    let service: FilmSourceService
+    private weak var host: PageViewController?
+    private let onRender: @MainActor () -> Void
+    private(set) var snapshot: FilmSourceSnapshot?
+    private(set) var busy = false
+    private var snapshotNeedsRender = false
+
+    init(service: FilmSourceService, host: PageViewController, onRender: @escaping @MainActor () -> Void) {
+        self.service = service
+        self.host = host
+        self.onRender = onRender
+    }
+
+    func observeSnapshots() {
+        host?.runPageTask(key: "snapshots") { [weak self, service] in
+            try await service.initialize()
+            for await snapshot in await service.snapshots() {
+                guard !Task.isCancelled, let self, let host = self.host else { return }
+                self.snapshot = snapshot
+                if host.isPageVisible {
+                    self.snapshotNeedsRender = false
+                    self.onRender()
+                } else {
+                    self.snapshotNeedsRender = true
+                }
+            }
+        }
+    }
+
+    func didBecomeVisible() {
+        if snapshotNeedsRender {
+            snapshotNeedsRender = false
+            onRender()
+        }
+    }
+
+    func markTraitDirty() {
+        if host?.isPageVisible == true { onRender() } else { snapshotNeedsRender = true }
+    }
+
+    func cancelBatch() {
+        host?.cancelPageTask(key: "batch")
+    }
+
+    func perform(_ operation: @escaping @MainActor () async throws -> Void,
+                 success: String? = nil) {
+        guard !busy else { return }
+        busy = true; onRender()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await operation()
+                snapshot = await service.snapshot; busy = false; onRender()
+                if let success { host?.enqueueNotice(title: success) }
+            } catch {
+                snapshot = await service.snapshot; busy = false; onRender()
+                host?.enqueueError(error.localizedDescription, retry: { [weak self] in
+                    self?.perform(operation, success: success)
+                })
+            }
+        }
+    }
+
+    func runBatch(
+        retry: (@MainActor () -> Void)? = nil,
+        completed: (@MainActor () -> Void)? = nil,
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) {
+        guard !busy, let host, host.isPageActive, host.isPageVisible else { return }
+        busy = true; onRender()
+        host.runPageTask(key: "batch") { [weak self, service] in
+            guard let self else { return }
+            do {
+                try await operation()
+                self.snapshot = await service.snapshot
+                self.busy = false
+                self.onRender()
+                if !Task.isCancelled, self.host?.isPageActive == true, self.host?.isPageVisible == true {
+                    completed?()
+                }
+            } catch is CancellationError {
+                self.snapshot = await service.snapshot
+                self.busy = false
+                self.onRender()
+            } catch {
+                self.snapshot = await service.snapshot
+                self.busy = false
+                self.onRender()
+                if !Task.isCancelled, self.host?.isPageActive == true {
+                    self.host?.enqueueError(error.localizedDescription, retry: retry)
+                }
+            }
+        }
+    }
+
+    func deleteBatch<Item>(_ items: [Item],
+                           isPresent: @escaping @MainActor (Item, FilmSourceSnapshot) -> Bool,
+                           operation: @escaping @MainActor (Item) async throws -> Void) {
+        var index = 0
+        runBatch(retry: { [weak self] in
+            self?.deleteBatch(Array(items.dropFirst(index)), isPresent: isPresent, operation: operation)
+        }) { [weak self, service] in
+            while index < items.count {
+                try Task.checkCancellation()
+                guard self?.host?.isPageActive == true, self?.host?.isPageVisible == true else { return }
+                let item = items[index]
+                let current = await service.snapshot
+                try Task.checkCancellation()
+                if isPresent(item, current) {
+                    try await Task { @MainActor in try await operation(item) }.value
+                }
+                index += 1
+            }
+        }
+    }
+}
+
+@MainActor
 class FilmSourcePageController: SettingsListViewController {
     override var avoidsKeyboard: Bool { false }
     let service: FilmSourceService
-    private(set) var snapshot: FilmSourceSnapshot?
-    private(set) var busy = false
-    private(set) var sourcePageGeneration = UUID()
-    private var snapshotNeedsRender = false
+    private lazy var state = FilmSourcePageState(service: service, host: self) { [weak self] in self?.render() }
+    var snapshot: FilmSourceSnapshot? { state.snapshot }
+    var busy: Bool { state.busy }
 
     init(service: FilmSourceService, themeProvider: any PageThemeProviding) {
         self.service = service
@@ -19,87 +137,70 @@ class FilmSourcePageController: SettingsListViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
-            (page: FilmSourcePageController, _: UITraitCollection) in
-            if page.isPageVisible { page.render() } else { page.snapshotNeedsRender = true }
+            (page: FilmSourcePageController, _: UITraitCollection) in page.state.markTraitDirty()
         }
         render()
     }
 
     func render() {}
-
-    override func pageDidBecomeActive() {
-        runPageTask(key: "snapshots") { [weak self, service] in
-            try await service.initialize()
-            for await snapshot in await service.snapshots() {
-                guard !Task.isCancelled, let self else { return }
-                self.snapshot = snapshot
-                if self.isPageVisible {
-                    self.snapshotNeedsRender = false
-                    self.render()
-                } else {
-                    self.snapshotNeedsRender = true
-                }
-            }
-        }
-    }
-
-    override func pageDidBecomeVisible() {
-        super.pageDidBecomeVisible()
-        if snapshotNeedsRender {
-            snapshotNeedsRender = false
-            render()
-        }
-    }
-
-    override func pageDidBecomeHidden() { sourcePageGeneration = UUID() }
-    override func pageDidBecomeInactive() { sourcePageGeneration = UUID() }
-
-    func canContinueSourceBatch(_ generation: UUID) -> Bool {
-        sourcePageGeneration == generation && isPageActive && isPageVisible
-    }
+    override func pageDidBecomeActive() { state.observeSnapshots() }
+    override func pageDidBecomeVisible() { super.pageDidBecomeVisible(); state.didBecomeVisible() }
 
     func perform(_ operation: @escaping @MainActor () async throws -> Void,
-                 success: String? = nil, completed: (() -> Void)? = nil) {
-        guard !busy else { return }
-        let generation = sourcePageGeneration
-        busy = true; render()
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await operation()
-                snapshot = await service.snapshot; busy = false; render()
-                if canContinueSourceBatch(generation) { completed?() }
-                if let success { enqueueNotice(title: success) }
-            } catch {
-                snapshot = await service.snapshot; busy = false; render()
-                enqueueError(error.localizedDescription, retry: { [weak self] in
-                    self?.perform(operation, success: success, completed: completed)
-                })
-            }
-        }
+                 success: String? = nil) {
+        state.perform(operation, success: success)
     }
 
     func sourceStateRows(empty: Bool) -> [SettingsListRow] {
-        if busy || snapshot == nil { return [SettingsListRow(id: "film.sources.busy", title: "加载中", enabled: false)] }
+        if busy || snapshot == nil { return [SettingsListRow(id: "film.sources.busy", accessory: .loading(accessibilityLabel: "加载中"), enabled: false)] }
         if empty { return [SettingsListRow(id: "film.sources.empty", title: "无来源", enabled: false)] }
         return []
+    }
+}
+
+@MainActor
+class FilmSourceManagementController: ManagementPageViewController {
+    let service: FilmSourceService
+    private lazy var state = FilmSourcePageState(service: service, host: self) { [weak self] in self?.render() }
+    var snapshot: FilmSourceSnapshot? { state.snapshot }
+    var busy: Bool { state.busy }
+
+    init(service: FilmSourceService, themeProvider: any PageThemeProviding) {
+        self.service = service
+        super.init(themeProvider: themeProvider)
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
+            (page: FilmSourceManagementController, _: UITraitCollection) in page.state.markTraitDirty()
+        }
+        render()
+    }
+
+    func render() {}
+    override func pageDidBecomeActive() { state.observeSnapshots() }
+    override func pageDidBecomeVisible() { super.pageDidBecomeVisible(); state.didBecomeVisible() }
+    override func pageDidBecomeHidden() { state.cancelBatch() }
+    override func pageDidBecomeInactive() { state.cancelBatch() }
+
+    func perform(_ operation: @escaping @MainActor () async throws -> Void,
+                 success: String? = nil) {
+        state.perform(operation, success: success)
+    }
+
+    func runBatch(
+        retry: (@MainActor () -> Void)? = nil,
+        completed: (@MainActor () -> Void)? = nil,
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) {
+        state.runBatch(retry: retry, completed: completed, operation)
     }
 
     func deleteBatch<Item>(_ items: [Item],
                            isPresent: @escaping @MainActor (Item, FilmSourceSnapshot) -> Bool,
-                           completed: (() -> Void)? = nil,
                            operation: @escaping @MainActor (Item) async throws -> Void) {
-        let generation = sourcePageGeneration
-        perform({ [weak self, service] in
-            for item in items {
-                guard self?.canContinueSourceBatch(generation) == true else { return }
-                let current = await service.snapshot
-                guard self?.canContinueSourceBatch(generation) == true else { return }
-                if isPresent(item, current) { try await operation(item) }
-            }
-        }, completed: { [weak self] in
-            if self?.canContinueSourceBatch(generation) == true { completed?() }
-        })
+        state.deleteBatch(items, isPresent: isPresent, operation: operation)
     }
 }
 

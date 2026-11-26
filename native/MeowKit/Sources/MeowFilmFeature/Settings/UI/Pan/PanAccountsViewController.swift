@@ -258,7 +258,7 @@ private final class PanAccountTableCell: UITableViewCell {
     }
 
     func configureHeader(theme: PageTheme, first: Bool, last: Bool, accessibilityLayout: Bool) {
-        background.update(theme: theme, first: first, last: last, selected: false, settings: true, showsSeparator: !last)
+        background.update(theme: theme, first: first, last: last, selected: false, settings: true)
         accessibilityIdentifier = "pan.accounts.header"
         columns.setAccessibilityLayout(accessibilityLayout)
         columns.columns[1].alignment = .fill
@@ -290,7 +290,7 @@ private final class PanAccountTableCell: UITableViewCell {
         accessibilityLayout: Bool,
         onAction: @escaping @MainActor (PanAccountAction) -> Void
     ) {
-        background.update(theme: theme, first: first, last: last, selected: false, settings: true, showsSeparator: !last)
+        background.update(theme: theme, first: first, last: last, selected: false, settings: true)
         accessibilityIdentifier = "pan.accounts.row.\(row.id.rawValue)"
         columns.setAccessibilityLayout(accessibilityLayout)
         self.onAction = onAction

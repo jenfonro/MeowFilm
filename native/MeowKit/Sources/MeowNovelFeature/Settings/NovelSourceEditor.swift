@@ -3,7 +3,7 @@ import UIKit
 import MeowUI
 
 @MainActor
-final class NovelSourceEditor: ManagementPageViewController {
+final class NovelSourceEditor: PageViewController {
     private let feature: NovelFeature
     private var source: NovelSource?
     private var draft: NovelSourceDraft
@@ -26,7 +26,7 @@ final class NovelSourceEditor: ManagementPageViewController {
         saveButton.addAction(UIAction { [weak self] _ in self?.save() }, for: .touchUpInside); saveButton.accessibilityIdentifier = "novel.source.save"
         let more = PageHeaderButton(image: ManagementIcon.more, accessibilityLabel: "更多", menu: UIMenu(children: [
             UIAction(title: "复制书源") { [weak self] _ in self?.copy() }, UIAction(title: "导出书源") { [weak self] _ in self?.export() }]))
-        setManagementActions([saveButton, more])
+        pageHeader.setTrailing([saveButton, more])
         controls.alignment = .center; controls.spacing = 10
         typeLabel.text = "类型"; typeLabel.adjustsFontForContentSizeCategory = true; controls.addArrangedSubview(typeLabel)
         let names = ["文本", "音频", "图片", "文件"]

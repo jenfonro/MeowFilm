@@ -32,17 +32,17 @@ final class PanSettingsStore: @unchecked Sendable {
     }
 
     func replace(_ provider: PanProviderID, credentials: RuntimeValue) async throws -> PanAccount {
-        guard let supplied = credentials.panObject else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
+        guard let supplied = credentials.objectValue else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
         let fields = PanProvider.all.first { $0.id == provider }!.credentialFields
         let filtered = RuntimeValue.object(RuntimeObject(uniqueKeysWithValues: fields.compactMap { field in
             supplied[field.rawValue].map { (field.rawValue, $0) }
         }))
         try Self.validateCredentials(provider, filtered)
         let allowed = Set(fields.map(\.rawValue))
-        let cookie = allowed.contains("cookie") ? supplied["cookie"]?.panString : nil
-        let username = allowed.contains("username") ? supplied["username"]?.panString : nil
-        let password = allowed.contains("password") ? supplied["password"]?.panString : nil
-        let authorization = allowed.contains("authorization") ? supplied["authorization"]?.panString : nil
+        let cookie = allowed.contains("cookie") ? supplied["cookie"]?.stringValue : nil
+        let username = allowed.contains("username") ? supplied["username"]?.stringValue : nil
+        let password = allowed.contains("password") ? supplied["password"]?.stringValue : nil
+        let authorization = allowed.contains("authorization") ? supplied["authorization"]?.stringValue : nil
         let refreshedAtMs = allowed.contains("refreshedAt") ? supplied["refreshedAt"]?.panInteger : nil
         let updated: [FilmPanAccountRecord]
         do {
@@ -121,14 +121,14 @@ final class PanSettingsStore: @unchecked Sendable {
     }
 
     public static func validateCredentials(_ provider: PanProviderID, _ credentials: RuntimeValue) throws {
-        guard let fields = credentials.panObject else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
+        guard let fields = credentials.objectValue else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
         let allowed = PanProvider.all.first { $0.id == provider }!.credentialFields
         for (name, value) in fields {
             guard let field = allowed.first(where: { $0.rawValue == name }) else { continue }
             if field.isNumber {
                 guard value.panInteger != nil else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
             } else {
-                guard let text = value.panString, !text.utf8.contains(0),
+                guard let text = value.stringValue, !text.utf8.contains(0),
                       field == .password || !text.utf8.contains(where: { $0 == 13 || $0 == 10 }) else {
                     throw RuntimeHTTPError.remote("INVALID_REQUEST")
                 }
@@ -151,7 +151,7 @@ final class PanSettingsStore: @unchecked Sendable {
         let allowed = PanProvider.all.first { $0.id == provider }!.credentialFields
         let fields = allowed.compactMap { field -> String? in
             guard let val = fieldValue(record, field) else { return nil }
-            if let text = val.panString { return text.isEmpty ? nil : field.rawValue }
+            if let text = val.stringValue { return text.isEmpty ? nil : field.rawValue }
             return (val.panInteger ?? 0) > 0 ? field.rawValue : nil
         }.sorted()
         return PanAccount(provider: provider, revision: record?.accountRevision ?? 0,
@@ -184,8 +184,4 @@ final class PanSettingsStore: @unchecked Sendable {
         }
         return Data(hasher.finalize())
     }
-}
-
-extension RuntimeValue {
-    var panObject: RuntimeObject? { if case .object(let fields) = self { return fields }; return nil }
 }

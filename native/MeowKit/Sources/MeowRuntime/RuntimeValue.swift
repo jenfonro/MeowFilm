@@ -32,6 +32,70 @@ public indirect enum RuntimeValue: Sendable, Equatable {
         default: return false
         }
     }
+
+    public subscript(_ key: String) -> RuntimeValue {
+        guard case .object(let fields) = self else { return .null }
+        return fields[key] ?? .null
+    }
+
+    public var stringValue: String? {
+        if case .string(let value) = self { return value }
+        return nil
+    }
+
+    public var trimmedString: String? {
+        guard let value = stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
+    }
+
+    public var boolValue: Bool? {
+        if case .bool(let value) = self { return value }
+        return nil
+    }
+
+    public var doubleValue: Double? {
+        switch self {
+        case .number(let value): return value.isFinite ? value : nil
+        case .exactNumber(let number):
+            if let value = Double(number.literal), value.isFinite { return value }
+            return nil
+        default: return nil
+        }
+    }
+
+    public var intValue: Int? {
+        switch self {
+        case .number(let value):
+            guard value.isFinite, value.rounded(.towardZero) == value,
+                  value >= Double(Int.min), value <= Double(Int.max) else { return nil }
+            return Int(value)
+        case .exactNumber(let number):
+            return Int(number.literal)
+        default: return nil
+        }
+    }
+
+    public var int64Value: Int64? {
+        switch self {
+        case .number(let value):
+            guard value.isFinite, value.rounded(.towardZero) == value,
+                  value >= Double(Int64.min), value < Double(Int64.max) else { return nil }
+            return Int64(value)
+        case .exactNumber(let number):
+            return Int64(number.literal)
+        default: return nil
+        }
+    }
+
+    public var arrayValue: [RuntimeValue]? {
+        if case .array(let items) = self { return items }
+        return nil
+    }
+
+    public var objectValue: RuntimeObject? {
+        if case .object(let fields) = self { return fields }
+        return nil
+    }
 }
 
 /// Swift String equality normalizes canonically equivalent spellings. JSON

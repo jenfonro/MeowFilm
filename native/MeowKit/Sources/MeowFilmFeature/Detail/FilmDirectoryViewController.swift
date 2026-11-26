@@ -70,12 +70,14 @@ final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybac
         )
         guard let selected, ownsSelection, selected.directoryError == nil, !selected.directoryRawItems.isEmpty else {
             let loading = selected?.directoryLoading == true
-            let state = loading ? "加载中" : "暂无可用视频源"
+            let state = loading ? "loading" : "暂无可用视频源"
             if displayedEntries != nil || displayedState != state {
                 displayedEntries = nil
                 displayedState = state
                 applySections([SettingsListSection(id: "directory", rows: [
-                    SettingsListRow(id: "film.directory.state", title: state, enabled: false),
+                    loading
+                        ? SettingsListRow(id: "film.directory.state", accessory: .loading(accessibilityLabel: "加载中"), enabled: false)
+                        : SettingsListRow(id: "film.directory.state", title: state, enabled: false),
                 ])])
             }
             return

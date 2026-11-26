@@ -8,9 +8,12 @@ import MeowDebug
 public final class SettingsTableCell: UITableViewCell {
     public static let reuseIdentifier = "meow.settings.cell"
 
-    private let normalBackground = SettingsRowBackgroundView(selected: false)
-    private let selectedBackground = SettingsRowBackgroundView(selected: true)
+    private let cardBackground = SettingsRowBackgroundView(selected: false)
     private var heightConstraint: NSLayoutConstraint?
+    private var currentTheme = PageTheme()
+    private var isFirstRow = true
+    private var isLastRow = true
+    private var currentUsesSettingsColors = true
 
     // Persistent standard row slot hierarchy (allocated once in init, updated in place).
     private let rowStack = UIStackView()
@@ -37,8 +40,8 @@ public final class SettingsTableCell: UITableViewCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         DebugUIMetrics.shared.increment("settings.cell.created")
         backgroundColor = .clear
-        backgroundView = normalBackground
-        selectedBackgroundView = selectedBackground
+        backgroundView = cardBackground
+        selectedBackgroundView = UIView()
         selectionStyle = .default
 
         let constraint = contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: SettingsVisualMetrics.rowHeight)
@@ -180,8 +183,8 @@ public final class SettingsTableCell: UITableViewCell {
         switch row.accessory {
         case .toggle(let isOn, _, let onChange):
             switchView.changed = onChange
-            if switchView.control.isOn != isOn {
-                switchView.control.setOn(isOn, animated: true)
+            if switchView.isOn != isOn {
+                switchView.setOn(isOn, animated: true)
             }
         case .menu(_, let menu, _):
             menuButton.menu = menu
@@ -192,6 +195,13 @@ public final class SettingsTableCell: UITableViewCell {
         }
     }
 
+    public override func updateConfiguration(using state: UICellConfigurationState) {
+        super.updateConfiguration(using: state)
+        let active = currentUsesSettingsColors && selectionStyle != .none && (state.isHighlighted || state.isSelected)
+        cardBackground.update(theme: currentTheme, first: isFirstRow, last: isLastRow,
+                              selected: active, settings: currentUsesSettingsColors)
+    }
+
     public func configure(
         row: SettingsListRow,
         theme: PageTheme,
@@ -200,17 +210,14 @@ public final class SettingsTableCell: UITableViewCell {
         usesSettingsColors: Bool = true
     ) {
         DebugUIMetrics.shared.increment("settings.cell.configured")
-        let showsSeparator = !last
-        normalBackground.update(theme: theme, first: first, last: last, selected: false,
-                                settings: usesSettingsColors, showsSeparator: showsSeparator)
-        backgroundView = normalBackground
-        if usesSettingsColors {
-            selectedBackground.update(theme: theme, first: first, last: last, selected: true,
-                                      settings: true, showsSeparator: showsSeparator)
-            selectedBackgroundView = selectedBackground
-        } else {
-            selectedBackgroundView = nil
-        }
+        currentTheme = theme
+        isFirstRow = first
+        isLastRow = last
+        currentUsesSettingsColors = usesSettingsColors
+        cardBackground.update(theme: theme, first: first, last: last,
+                              selected: usesSettingsColors && selectionStyle != .none && (isHighlighted || isSelected),
+                              settings: usesSettingsColors)
+        backgroundView = cardBackground
         tintColor = UIColor(usesSettingsColors ? theme.settings.accent : theme.accent)
         heightConstraint?.constant = usesSettingsColors ? SettingsVisualMetrics.rowHeight : 56
 
@@ -343,12 +350,12 @@ public final class SettingsTableCell: UITableViewCell {
         if let toggleSpec {
             switchView.isHidden = false
             switchView.applyTheme(theme)
-            if switchView.control.isOn != toggleSpec.isOn {
-                switchView.control.setOn(toggleSpec.isOn, animated: window != nil)
+            if switchView.isOn != toggleSpec.isOn {
+                switchView.setOn(toggleSpec.isOn, animated: window != nil)
             }
-            switchView.control.isEnabled = row.enabled && toggleSpec.enabled
-            switchView.control.accessibilityLabel = row.accessibilityLabel ?? row.title
-            switchView.control.accessibilityIdentifier = row.id.isEmpty ? nil : row.id
+            switchView.isEnabled = row.enabled && toggleSpec.enabled
+            switchView.accessibilityLabel = row.accessibilityLabel ?? row.title
+            switchView.accessibilityIdentifier = row.id.isEmpty ? nil : row.id
             switchView.changed = toggleSpec.onChange
         } else {
             switchView.changed = nil

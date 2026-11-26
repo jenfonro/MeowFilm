@@ -175,12 +175,15 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     private func configureButton(_ button: UIButton, title: String, symbol: String) {
         var configuration = UIButton.Configuration.plain()
         configuration.title = title
+        configuration.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .regular))
+        configuration.imagePlacement = .leading
+        configuration.imagePadding = 12
         configuration.titleAlignment = .leading
         configuration.titleLineBreakMode = .byWordWrapping
         configuration.background = .clear()
         configuration.background.cornerRadius = 28
         configuration.cornerStyle = .fixed
-        configuration.contentInsets = .init(top: 14, leading: 50, bottom: 14, trailing: 14)
+        configuration.contentInsets = .init(top: 14, leading: 14, bottom: 14, trailing: 14)
         configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { [weak button] attributes in
             var value = attributes
             value.font = UIFont.preferredFont(forTextStyle: .body, compatibleWith: button?.traitCollection)
@@ -190,33 +193,19 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         button.contentHorizontalAlignment = .leading
         button.titleLabel?.numberOfLines = 0
         button.titleLabel?.adjustsFontForContentSizeCategory = true
-        let icon = rowIcon(symbol)
-        button.addSubview(icon)
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 14),
-            icon.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-        ])
         button.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
         button.setContentHuggingPriority(.defaultHigh, for: .vertical)
         button.setContentCompressionResistancePriority(.required, for: .vertical)
         buttons.append(button)
     }
 
-    private func rowIcon(_ symbol: String) -> UIImageView {
-        let icon = UIImageView(image: UIImage(systemName: symbol)?.withAlignmentRectInsets(.zero))
-        icon.preferredSymbolConfiguration = .init(pointSize: 20, weight: .regular)
+    private func displayRow(title: String, symbol: String, identifier: String) -> DisplayRow {
+        let icon = UIImageView(image: UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .regular)))
         icon.contentMode = .scaleAspectFit
-        icon.accessibilityIdentifier = "app.sidebar.rowIcon"
         NSLayoutConstraint.activate([
             icon.widthAnchor.constraint(equalToConstant: 24),
             icon.heightAnchor.constraint(equalToConstant: 24),
         ])
-        return icon
-    }
-
-    private func displayRow(title: String, symbol: String, identifier: String) -> DisplayRow {
-        let icon = rowIcon(symbol)
         let label = UILabel()
         label.text = title
         label.font = .preferredFont(forTextStyle: .body)

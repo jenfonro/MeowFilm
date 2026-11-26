@@ -220,8 +220,8 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         syncFavoritesLabel.font = .preferredFont(forTextStyle: .body)
         syncFavoritesLabel.adjustsFontForContentSizeCategory = true
         registerPrimaryLabel(syncFavoritesLabel)
-        syncFavoritesSwitch.control.accessibilityLabel = "收藏歌曲"
-        syncFavoritesSwitch.control.accessibilityIdentifier = "music.accounts.detail.syncFavorites"
+        syncFavoritesSwitch.accessibilityLabel = "收藏歌曲"
+        syncFavoritesSwitch.accessibilityIdentifier = "music.accounts.detail.syncFavorites"
         syncFavoritesSwitch.changed = { [weak self] enabled in
             self?.actions.perform(.favorites(enabled))
         }
@@ -237,8 +237,8 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         syncPlaylistsLabel.font = .preferredFont(forTextStyle: .body)
         syncPlaylistsLabel.adjustsFontForContentSizeCategory = true
         registerPrimaryLabel(syncPlaylistsLabel)
-        syncPlaylistsSwitch.control.accessibilityLabel = "歌单"
-        syncPlaylistsSwitch.control.accessibilityIdentifier = "music.accounts.detail.syncPlaylists"
+        syncPlaylistsSwitch.accessibilityLabel = "歌单"
+        syncPlaylistsSwitch.accessibilityIdentifier = "music.accounts.detail.syncPlaylists"
         syncPlaylistsSwitch.changed = { [weak self] enabled in
             self?.actions.perform(.playlists(enabled))
         }
@@ -386,10 +386,10 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
             syncContainer.isHidden = false
             let selection = sync.selection(platform)
             let ready = signedIn && !pending && sync.automaticRevision != nil && !sync.busy
-            syncFavoritesSwitch.control.isOn = selection.favorites
-            syncFavoritesSwitch.control.isEnabled = ready
-            syncPlaylistsSwitch.control.isOn = selection.playlists
-            syncPlaylistsSwitch.control.isEnabled = ready
+            syncFavoritesSwitch.isOn = selection.favorites
+            syncFavoritesSwitch.isEnabled = ready
+            syncPlaylistsSwitch.isOn = selection.playlists
+            syncPlaylistsSwitch.isEnabled = ready
             let showConfirm = state.needsDestructiveConfirmation(for: platform)
             syncConfirmButton.isHidden = !showConfirm
             syncConfirmButton.isEnabled = showConfirm && state.canSync && !pending
@@ -515,25 +515,8 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         return items
     }
 
-    override func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String {
-        let descriptors = debugDialogActions()
-        let chosen: DebugDialogActionDescriptor?
-        if let index {
-            chosen = descriptors.first { $0.index == index }
-        } else if let label {
-            chosen = descriptors.first { $0.label == label }
-        } else if let kind {
-            chosen = descriptors.first { $0.kind == kind }
-        } else {
-            chosen = descriptors.first
-        }
-        guard let chosen else {
-            throw DebugAPIError.notFound("Dialog action not found")
-        }
-        guard chosen.enabled else {
-            throw DebugAPIError.invalidState("Dialog action '\(chosen.label)' is disabled")
-        }
-        switch chosen.label {
+    override func performDebugDialogAction(_ action: DebugDialogActionDescriptor) throws {
+        switch action.label {
         case "关闭": actions.close()
         case "刷新资料": actions.perform(.refreshProfile)
         case "退出登录": actions.logout()
@@ -541,7 +524,6 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         case "重置同步状态": actions.resetSync()
         default: break
         }
-        return chosen.label
     }
 }
 #endif

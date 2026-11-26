@@ -67,6 +67,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }
         root.onOpenSettings = { [weak self] in self?.showSettings() }
         window.rootViewController = root
+        root.installNoticeBanner(in: window)
         window.makeKeyAndVisible()
         assembly.$music.receive(on: RunLoop.main).sink { [weak self] model in
             if let model { self?.install(model) }
@@ -251,7 +252,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             themeProvider: assembly.appearance
         )
         category.onSelectItem = { [weak self] item in
-            self?.showFilm(item, kind: item.kind == .movie ? .movie : .tv, entrySurface: "library")
+            self?.showFilm(item, kind: item.kind == .movie ? .movie : .tv)
         }
         navigation.pushViewController(category, animated: animated)
     }
@@ -271,7 +272,6 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         let page = MeowfilmStartupViewController(themeProvider: assembly.appearance)
         page.isLoading = !assembly.startupFailed
         page.openSettings = { [weak self] in self?.showSettings() }
-        page.didFinishAppearing = { [weak self] in self?.showPendingError() }
         return page
     }
 
@@ -361,7 +361,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }
     }
 
-    func showFilm(_ item: FilmItem, kind: FilmPlaybackKind, entrySurface: String? = nil, animated: Bool = true) {
+    func showFilm(_ item: FilmItem, kind: FilmPlaybackKind, animated: Bool = true) {
         let resolvedKind = FilmItemKind(rawValue: kind.rawValue) ?? item.kind
         let updatedEntry = item.entry.map { base in
             FilmEntry(
@@ -390,7 +390,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                             score: item.score, subtitle: item.subtitle,
                             entry: updatedEntry)
         let model: FilmPlaybackModel
-        do { model = try assembly.makeFilmPlayback(item: item, entrySurface: entrySurface) }
+        do { model = try assembly.makeFilmPlayback(item: item) }
         catch {
             (navigation.topViewController as? PageViewController)?.enqueueError(error.localizedDescription)
             return
@@ -505,14 +505,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                         page?.enqueueError("缺少影片类型")
                         return
                     }
-                    self?.showFilm(item, kind: category == .movie ? .movie : .tv, entrySurface: "home")
+                    self?.showFilm(item, kind: category == .movie ? .movie : .tv)
                 }
                 page.onSelectCategory = { [weak self] model in
                     guard let self else { return }
                     let category = FilmCategoryViewController(model: model, images: self.assembly.filmImages,
                                                                themeProvider: appearance)
                     category.onSelectItem = { [weak self] in
-                        self?.showFilm($0, kind: model.category == .movie ? .movie : .tv, entrySurface: "home")
+                        self?.showFilm($0, kind: model.category == .movie ? .movie : .tv)
                     }
                     self.navigation.pushViewController(category, animated: true)
                 }
@@ -549,7 +549,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 )
                 filmLib.onSelectItem = { [weak self] item in
                     let kind: FilmPlaybackKind = item.kind == .movie ? .movie : .tv
-                    self?.showFilm(item, kind: kind, entrySurface: "library")
+                    self?.showFilm(item, kind: kind)
                 }
                 filmLib.onSelectSection = { [weak self] sectionKind in
                     self?.showFilmPersonalSection(sectionKind)
@@ -623,30 +623,18 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     private func showPendingError() {
-        guard UIApplication.shared.applicationState == .active,
-              let page = topAlertHost() else { return }
+        guard UIApplication.shared.applicationState == .active, root.isPageActive else { return }
         if assembly.startupFailed, !startupErrorAcknowledged {
-            page.enqueueError("本地数据不可用", acknowledged: { [weak self] in
+            root.enqueueError("本地数据不可用", acknowledged: { [weak self] in
                 self?.startupErrorAcknowledged = true
             })
             return
         }
         guard let model = assembly.music else { return }
         let error = model.notices.error
-        page.syncErrorSource("music.notice", message: error, acknowledged: { [weak model] in
+        root.syncErrorSource("music.notice", message: error, acknowledged: { [weak model] in
             if model?.notices.error == error { model?.notices.error = nil }
         })
-    }
-
-    private func topAlertHost() -> PageViewController? {
-        let top = presenter()
-        if let nav = top as? UINavigationController, let page = nav.topViewController as? PageViewController {
-            return page
-        }
-        if top === root, let page = navigation.topViewController as? PageViewController {
-            return page
-        }
-        return top as? PageViewController
     }
 
     func presenter() -> UIViewController {
@@ -660,7 +648,6 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
 private final class MeowfilmStartupViewController: PageViewController {
     var isLoading = true { didSet { if isViewLoaded { updateLoading() } } }
     var openSettings: (() -> Void)?
-    var didFinishAppearing: (() -> Void)?
     private let activity = UIActivityIndicatorView(style: .medium)
 
     override func viewDidLoad() {
@@ -684,11 +671,6 @@ private final class MeowfilmStartupViewController: PageViewController {
     override func applyTheme() {
         super.applyTheme()
         activity.color = UIColor(theme.muted)
-    }
-
-    override func pageDidFinishAppearing() {
-        super.pageDidFinishAppearing()
-        didFinishAppearing?()
     }
 
     private func updateLoading() {
