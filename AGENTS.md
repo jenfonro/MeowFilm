@@ -119,6 +119,12 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 
 ## 实现
 
+- **修复与重构的完成标准**：
+  - 修复落在根因所在的 owner 或通用层，即使它不在出现症状的文件里；同时删除被替代的旧机制。交付时列出删除了哪些旧机制。
+  - 重构、清理与解耦的结果是删除：去掉越权调用、中转层和重复实现，而不是在原结构外再包一层。
+  - diff 中新增以下任一项即视为未完成，除非单独说明它保护的实际边界：延迟、节流、防抖、轮询、重试；generation／epoch／stamp 一类过期票据；影子布尔或"同值跳过"字段；向上遍历视图树判断可见性或找宿主；只为拆分而新增的 partial、扩展文件或转发方法；单个页面专属的样式、边距或列宽覆写。
+  - 界面问题先查通用控件与通用样式；修正通用层后，整批删除各页面上的对应补丁。
+  - 现有实现本身是问题来源时，以本文件、`docs` 契约和平台原生能力为准，不以现有实现为参照补齐行为。
 - **当前处于开发期，禁止旧数据兼容与旧逻辑兼容**：
   - 数据库、本地配置与内部业务记录的 schema／格式版本统一固定为 1，不递增、不识别旧表／旧字段、不建历史版本链、不写迁移或自动升级／回退分支；不匹配的旧数据直接拒绝，并发 revision／generation 仍按事务变化递增。已确认保存的数据必须在运行中完成持久化，不能依赖正常退出或 iOS 终止回调才能保存。
   - 接口、协议、状态与内部逻辑改动直接落到最新实现并清理失效路径；禁止保留旧字段别名、旧参数／旧枚举兜底、过渡兼容层、回退开关或新旧逻辑并存。
@@ -130,23 +136,24 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 
 ## 变更范围
 
-- 只修改当前任务必需的内容；每处改动能追溯到需求或必要影响。
+- 只修改当前任务必需的内容；每处改动能追溯到需求或必要影响。修正问题根因所在的 owner 属于当前任务必需，不算扩大范围；"不扩大重构"只约束与本问题没有因果关系的改动。
 - 修改公共契约、数据格式或共享实现时，同步更新受影响的消费者、配置、资源和 `docs`。
 - 清理本次修改产生的孤立代码；既有无关问题单独指出，不扩大为未经授权的重构。
 - 删除或移动移植代码前确认许可来源；仍在使用的许可文件随代码保留。
 
 ## 前端
 
-- Windows 全应用的栏目、卡片和列表显示投影只由内容回执、显式刷新／筛选及账号等业务状态变化更新。滚动与布局事件不得扫描整页控件树来决定业务显示、重建投影或触发刷新。视口只准入尚未看过的资源；已准入请求、图像与取色在当前挂载页面／章节的 owner 内复用，滚出再滚回不得释放重载。原生容器滚动回收只归还视图借用，不退休数据项资源；数据项删除、页面真正卸载、资源身份或 owner 变化才退休；隐藏停止新准入并按 owner 契约取消未完成工作、关闭等待实际排空。这些约束在真实运行与 `--debug` 模式中核对，不设回退开关，不以源码关键字禁令替代行为门禁。尺寸、裁剪、命中区域和绘制等几何更新不得触发业务读取。
+- Windows 栏目、卡片和列表的显示内容只随内容回执、显式刷新／筛选及账号等业务状态变化更新。滚动、布局、尺寸、裁剪、命中区域和绘制不触发业务读取、显示重建或刷新，也不扫描控件树。
+- 图片、取色等资源在第一次可见时请求一次，之后在当前页面内复用：滚出再滚回不重新请求，列表容器回收视图不释放资源；只有数据项删除、页面卸载或资源身份变化才释放。页面隐藏后不再发起新请求，未完成的请求取消，关闭时等它们实际结束。以上按真实运行行为在 `--debug` 中核对，不为此增加开关或关键字禁令。
 - 数据回执按稳定身份增量更新实际变化的元素，保留未变化的集合、控件和资源；加载状态、选择及无关属性通知不得清空重填列表或重建整页。验收检查集合通知、元素身份、读取次数和退休边界，性能数值仅作辅助证据，不能代替处理机制正确性。
 
-- **iOS 界面架构硬性契约**（完整规范见 [`docs/ios/architecture.md`](docs/ios/architecture.md)）：
-  - **100% 纯 UIKit，零 SwiftUI**：iOS App 与 `MeowKit` UI 模块全面采用原生 UIKit（全仓零 `import SwiftUI`、`UIHostingController`、`UIViewRepresentable`）；禁止跨框架嵌套桥接或整树重建 `rootView`。
-  - **统一设置底座与三层弹层**：App 总设置与音乐／影视／小说设置共用 `MeowUI/Settings/` 统一底座（`SettingsListViewController`、`SettingsFormViewController`、常驻槽位复用的 `SettingsTableCell` 与 `SettingsSwitch`），全量统一 `PageTheme`（零冗余设置包装壳与双套配色），`SettingsListRow` 内置 `.loading`／`.hint`／`.action` 且自定义槽位编译期约束 `ThemeableView`；业务弹窗统一收敛为三层浮层契约——`PageAlertPresenter`（全部 `UIAlertController` 唯一入口并 100% 自动注册 `DebugAlertActionRegistry`）、`FloatingCardDialogController`（唯一纯 UIKit 居中卡片弹窗基类，提供托管 `runDialogTask`／`dialogWillClose` 与 `DebugDialogControllable`）与 `FixedSheetTransition`／`VerticalPageTransition`；错误与操作反馈统一走 `PageViewController` 的 `PageFeedbackQueue`（`enqueueError`／`syncErrorSource`）与 keyed／抛出式 `runPageTask`，无业务侧影子去重字段。
-  - **主题传播与布局边界**：禁止递归遍历 `subviews` 猜测叶子视图／分割线刷主题；使用显式 `PageThemeable` 协议与具名组件（`SettingsDividerView`、`SettingsSectionHeaderView`、`SettingsSegmentedControl`）分发主题；子视图禁止调用 `superview?.layoutIfNeeded()` 或 `window?.layoutIfNeeded()`；页面外观能力通过 `PageChromePolicy` 声明，协调器不按具体业务控制器类型做 `is` 透视。
-  - **图片／取色缓存、虚拟化列表与视口退休**：音乐、影视、小说三域均由装配根显式持有独立图片／取色存储（`MusicArtworkImages`、`ArtworkImages`、`NovelImageStore`，无全局 `.shared` 单例），底层共享唯一泛型单飞引擎 `MeowUI/Artwork/SingleFlightImageStore.swift`，后台解码／取色、同页滚出再滚回命中缓存零重载、隐藏取消新准入、页面卸载／关闭排空租约；禁止关闭 `UITableViewCell` 复用、禁止业务列表整表 `table.reloadData()`、禁止用非虚拟化 `UIStackView` 承载长选集／列表（全部 Diffable 列表统一经由 `MeowUI/List/` `DiffableSnapshotBuilder`／`IndexedDiffableProjection` 构建与投影，外部零手写原始 `NSDiffableDataSourceSnapshot`）。
-  - **高频热路径、细粒度观察与音频管线解耦**：高频进度／播放状态与低频浏览／详情状态物理隔离（如 `FilmMediaStateStore` 与 `FilmPresentationStateStore`），宽 `ObservableObject`（>5 `@Published`）在 UI 层全部按消费字段切片观察，禁止整对象 `objectWillChange` 唤醒不可见页面或重跑 `applyTheme()`；逐字歌词由连续单调时钟驱动，仅在状态／倍速／seek／行变更／尺寸变化或漂移超阈值时重建动画，禁止在主线程执行封面高斯模糊或像素取色；音频 PCM 喂流（`AudioOutputPipeline`）完全脱离 `@MainActor` 运行在独立 `.high` 优先级任务并配 24 块 FIFO 缓冲与 4096 帧后台切片上限，`PlaybackSystemSession` 对 NowPlaying 做差分防抖，全屏播放器延后挂载 `AVRoutePickerView` 并缓存唱片位图。
-  - **目录分层规范**：`MeowUI`、`MeowFilmFeature`、`MeowMusicFeature`、`MeowNovelFeature` 与 `apps/ios/Debug` 均按明确职责建子目录归位，禁止将大量跨子域文件平铺堆塞进单一目录。
+- **iOS 界面原则**（现行实现与组件说明见 [`docs/ios/architecture.md`](docs/ios/architecture.md)；该文档描述现状，不构成本节之外的强制要求）：
+  - **纯 UIKit**：iOS App 与 `MeowKit` UI 模块不使用 SwiftUI（零 `import SwiftUI`、`UIHostingController`、`UIViewRepresentable`），不做跨框架桥接或整树重建。
+  - **通用底座**：设置页共用 `MeowUI/Settings/` 底座与 `PageTheme`；弹窗、确认与错误／操作反馈由 `MeowUI` 通用组件统一呈现，需要确认的操作与非阻塞提示分开；业务页不自建同类组件，也不加影子去重字段。
+  - **主题与布局**：主题经显式协议分发，不递归遍历 `subviews`；子视图不调用 `superview?.layoutIfNeeded()` 或 `window?.layoutIfNeeded()`；协调器不按具体业务控制器类型做 `is` 判断。
+  - **图片与列表**：各域图片／取色存储由装配根持有，无全局单例；图片行为同 Windows 条款（首次可见请求一次、同页复用、页面卸载才释放）。列表保持 cell 复用、经 `MeowUI/List/` 增量更新，不整表 `reloadData()`，不用非虚拟化 `UIStackView` 承载长列表。
+  - **可见性与热路径**：页面可见性（含被模态遮挡、宿主隐藏）由导航／呈现层统一计算并下发，不可见页面不被唤醒；高频播放状态与低频页面状态分开发布，宽 `ObservableObject` 按字段观察；主线程不做音频喂流、封面模糊或像素取色。
+  - **目录分层**：`MeowUI`、各 Feature 与 `apps/ios/Debug` 按职责建子目录，不平铺堆放跨子域文件。
 
 - Windows 与 iOS 的普通文字统一使用系统常规字体（Normal／Regular），包括标题、按钮、菜单、标签、选中态和歌词；层级只通过字号区分，不使用 Medium、SemiBold、Bold、斜体或状态切换粗细来强调。阅读器 UI 同样遵守；仅阅读器内可自定义的正文排版保留用户字体／加粗设置。纯图标／符号图形不属于普通文字，不通过该例外给文本加粗。
 
@@ -165,6 +172,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 - 影视纯计算与第三方脚本共用锁定的 QuickJS-NG 0.18.0 源码、Unicode 表及平台载体，但 Runtime/Context、线程和生命周期独立；影视通过 `NativeJsonProgram` 使用 JSON 字符串边界，客户端不再链接第二份引擎。
 - iOS 脚本引擎使用 App 内置 `MeowScriptHost.framework`，复用通用原生核心与固定依赖，构建目标明确区分 device／simulator。原生载体随 App 签名；构建回执、内置身份和 JS／SDK 清单不能用签名前 Mach-O 全文件 hash 代替安装后签名边界，也不能据此放宽桌面 `.node` 校验。
 - 编译成功、静态检查与真实业务/界面运行验证分别记录，不互相冒充。
+- 实跑验证覆盖本次改动的具体路径（如关闭流程、二次启动、滚动中持续播放、弹层打开时的命中），交付时列出场景；只打开页面截图不算这些路径的验收。
 - 外部脚本由 `scripts/accept-sources.mjs` 按实际声明动作验收；未归因、宿主缺失能力、资源超限或清理失败不能因初始化成功而放行。报告只保留脱敏结构和固定分类，见 `docs/runtime/source-acceptance.md`。
 - 交付时说明实际修改范围、验证结果和未覆盖项。
 
@@ -176,6 +184,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 
 ## 文档组织
 
+- 本文件只在用户明确要求时修改；功能与修复改动不改写本文件，实现细节写入对应 `docs`。
 - 按使用范围和真实职责维护文档：共同契约放在 `docs/common/`，端侧 API、系统生命周期、协议、存储与实现差异放在对应端目录；总入口为[文档索引](docs/README.md)。
 - 共同规则以[共同契约索引](docs/common/README.md)中的对应职责文件为唯一来源；端侧直接引用，只补充本端事实与差异，不复制规则或建立重复别名文件。
 - 拆分必须形成独立说明职责；移动、删除或调整范围时同步全部索引和引用，避免失效相对链接及多份同义说明。
