@@ -36,7 +36,6 @@ final class MusicSearchChartRailCell: UITableViewCell, UIScrollViewDelegate {
     private var onRow: ((String, String) -> Void)?
     private var onPlay: ((String) -> Void)?
     private var lastGeometry: Geometry?
-    private var layingOut = false
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -108,7 +107,6 @@ final class MusicSearchChartRailCell: UITableViewCell, UIScrollViewDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        layingOut = true
         let oldOffset = scroll.contentOffset
         let oldWidth = scroll.bounds.width
         let oldContentWidth = scroll.contentSize.width
@@ -121,7 +119,6 @@ final class MusicSearchChartRailCell: UITableViewCell, UIScrollViewDelegate {
         for (index, card) in orderedCards.enumerated() {
             card.frame = CGRect(x: CGFloat(index) * stride, y: 0,
                                 width: width, height: height)
-            card.setNeedsLayout(); card.layoutIfNeeded()
         }
         // The trailing inset lets even the final card settle at its own start.
         let contentWidth = available + CGFloat(max(0, orderedCards.count - 1)) * stride
@@ -130,12 +127,9 @@ final class MusicSearchChartRailCell: UITableViewCell, UIScrollViewDelegate {
         let x = resized ? min(max(0, oldOffset.x), max(0, contentWidth - available)) : oldOffset.x
         let offset = CGPoint(x: x, y: 0)
         if scroll.contentOffset != offset { scroll.setContentOffset(offset, animated: false) }
-        layingOut = false
-        reportViewportChange()
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard !layingOut else { return }
         reportViewportChange()
     }
 
@@ -329,7 +323,6 @@ private final class MusicSearchChartCardView: UIView {
         for (index, button) in orderedRows.enumerated() {
             button.rankColumnWidth = rankWidth
             button.frame = CGRect(x: 0, y: CGFloat(index) * rowHeight, width: width, height: rowHeight)
-            button.setNeedsLayout(); button.layoutIfNeeded()
         }
         empty.frame = members.bounds
         let spinnerSize = spinner.sizeThatFits(members.bounds.size)

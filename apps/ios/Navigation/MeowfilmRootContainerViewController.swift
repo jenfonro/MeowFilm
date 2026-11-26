@@ -3,7 +3,7 @@ import MeowUI
 import MeowMusicFeature
 
 @MainActor
-final class MeowfilmRootContainerViewController: PageViewController {
+final class MeowfilmRootContainerViewController: PageViewController, PageNoticeHost {
     /// The window root hosts the navigation stack and fixed page chrome; the visible header
     /// belongs to the top page inside it.
     override var usesPageHeader: Bool { false }
@@ -11,6 +11,7 @@ final class MeowfilmRootContainerViewController: PageViewController {
     override var childForStatusBarStyle: UIViewController? { navigation }
 
     let navigation: PageNavigationController
+    private let noticeBanner = PageNoticeBannerView()
     private(set) var dock: MeowfilmDockView?
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
     private var sidebar: MeowfilmSidebarView?
@@ -92,16 +93,35 @@ final class MeowfilmRootContainerViewController: PageViewController {
         ])
         self.dock = dock
         dock.applyTheme(theme)
-        dock.isHidden = dockHidden
         dock.setNavigationVisible(rootVisible)
         dock.setPlayerSurfaceVisible(!miniPlayerHidden)
+        dock.setDockVisible(!dockHidden)
         updateBottomBackdrop()
         view.setNeedsLayout()
+    }
+
+    func installNoticeBanner(in window: UIWindow) {
+        guard noticeBanner.window !== window else { return }
+        noticeBanner.translatesAutoresizingMaskIntoConstraints = false
+        window.addSubview(noticeBanner)
+        NSLayoutConstraint.activate([
+            noticeBanner.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: 8),
+            noticeBanner.centerXAnchor.constraint(equalTo: window.centerXAnchor),
+            noticeBanner.leadingAnchor.constraint(greaterThanOrEqualTo: window.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            noticeBanner.trailingAnchor.constraint(lessThanOrEqualTo: window.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            noticeBanner.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
+        ])
+        noticeBanner.applyTheme(theme)
+    }
+
+    func enqueueNotice(_ item: PageNoticeItem) {
+        noticeBanner.enqueue(item)
     }
 
     override func applyTheme() {
         super.applyTheme()
         dock?.applyTheme(theme)
+        noticeBanner.applyTheme(theme)
     }
 
     override func viewSafeAreaInsetsDidChange() {
@@ -156,7 +176,7 @@ final class MeowfilmRootContainerViewController: PageViewController {
 
     func setDockHidden(_ hidden: Bool) {
         dockHidden = hidden
-        dock?.isHidden = hidden
+        dock?.setDockVisible(!hidden)
         updateBottomBackdrop()
         view.setNeedsLayout()
     }

@@ -173,8 +173,8 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             pendingChannel = nil
             select(pending)
         } else if completed, !model.isClosed,
-                  let shown = pager.viewControllers?.first,
-                  let channel = channels.first(where: { pages[$0.identity] === shown }) {
+           let shown = pager.viewControllers?.first,
+           let channel = channels.first(where: { pages[$0.identity] === shown }) {
             selection.selectChannel(channel)
         }
         if channels.isEmpty { renderSelection() }
@@ -218,7 +218,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     }
 
     private var pickerEmptyTitle: String {
-        catalogue?.isLoading == true ? "加载中" : "暂无频道"
+        catalogue?.isLoading == true ? "" : "暂无频道"
     }
 
     private func updateChannelTabs() {

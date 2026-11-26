@@ -76,8 +76,7 @@ public final class FilmHomeViewController: PosterHomeViewController {
             textBadge: textBadge,
             label: label,
             accessibilityIdentifier: "film.poster.\(item.sourceID).\(item.id)",
-            artworkIdentity: item.posterURL.map { AnyHashable($0) },
-            artwork: .url(item.posterURL, images)
+            artwork: .url(item.posterURL, images: images)
         )
     }
 

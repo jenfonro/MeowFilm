@@ -16,7 +16,7 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
     private let edge: Edge
     private let size: (CGSize) -> CGSize
     private weak var controller: UIViewController?
-    private var animation: FixedSheetAnimator?
+    private var animation: SlideModalAnimator?
     private var interaction: UIPercentDrivenInteractiveTransition?
     private var interactionEnding = false
     private var foregroundObserver: NSObjectProtocol?
@@ -149,11 +149,18 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
         return value
     }
 
-    private func makeAnimator(presenting: Bool) -> FixedSheetAnimator {
-        let value = FixedSheetAnimator(
-            presenting: presenting, interactive: interaction != nil, edge: edge
-        ) {
-            [weak self] completed in
+    private func makeAnimator(presenting: Bool) -> SlideModalAnimator {
+        let edgeIsTop = edge == .top
+        let value = SlideModalAnimator(
+            presenting: presenting,
+            interactive: interaction != nil,
+            duration: 0.32,
+            resetToContainerBounds: false,
+            offscreenOffset: { frame, _ in
+                let distance = frame.height + 24
+                return edgeIsTop ? -distance : distance
+            }
+        ) { [weak self] completed in
             self?.animation = nil
             self?.interaction = nil
             self?.interactionEnding = false
@@ -163,85 +170,8 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
         return value
     }
 
-    static func offscreenTranslation(frame: CGRect, edge: Edge) -> CGSize {
-        let distance = frame.height + 24
-        return CGSize(width: 0, height: edge == .top ? -distance : distance)
-    }
-
     deinit {
         if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
-    }
-}
-
-@MainActor
-private final class FixedSheetAnimator: NSObject, UIViewControllerAnimatedTransitioning {
-    private let presenting: Bool
-    private let interactive: Bool
-    private let edge: FixedSheetTransition.Edge
-    private let completion: (Bool) -> Void
-    private var animator: UIViewPropertyAnimator?
-
-    init(presenting: Bool, interactive: Bool, edge: FixedSheetTransition.Edge,
-         completion: @escaping (Bool) -> Void) {
-        self.presenting = presenting; self.interactive = interactive; self.edge = edge
-        self.completion = completion
-        super.init()
-    }
-
-    func transitionDuration(using transitionContext: UIViewControllerContextTransitioning?) -> TimeInterval {
-        UIAccessibility.isReduceMotionEnabled && !interactive ? 0 : 0.32
-    }
-
-    func animateTransition(using context: UIViewControllerContextTransitioning) {
-        interruptibleAnimator(using: context).startAnimation()
-    }
-
-    func interruptibleAnimator(using context: UIViewControllerContextTransitioning) -> UIViewImplicitlyAnimating {
-        if let animator { return animator }
-        guard let controller = context.viewController(forKey: presenting ? .to : .from),
-              let root = context.view(forKey: presenting ? .to : .from) else {
-            let failed = UIViewPropertyAnimator(duration: 0, curve: .linear)
-            failed.addCompletion { [weak self, completion] _ in
-                self?.animator = nil
-                context.completeTransition(false)
-                completion(false)
-            }
-            animator = failed
-            return failed
-        }
-        let frame = presenting ? context.finalFrame(for: controller) : context.initialFrame(for: controller)
-        let translation = FixedSheetTransition.offscreenTranslation(frame: frame, edge: edge)
-        let offscreen = CGAffineTransform(translationX: translation.width, y: translation.height)
-        root.transform = .identity
-        root.frame = frame
-        if presenting {
-            context.containerView.addSubview(root)
-            root.layoutIfNeeded()
-            root.transform = offscreen
-        }
-        let value = UIViewPropertyAnimator(duration: transitionDuration(using: context),
-                                          curve: interactive ? .linear : .easeInOut)
-        value.addAnimations { [presenting] in root.transform = presenting ? .identity : offscreen }
-        value.addCompletion { [weak self, presenting, completion] _ in
-            let completed = !context.transitionWasCancelled
-            root.transform = .identity
-            root.frame = frame
-            if presenting && !completed || !presenting && completed { root.removeFromSuperview() }
-            self?.animator = nil
-            context.completeTransition(completed)
-            completion(completed)
-        }
-        animator = value
-        return value
-    }
-
-    nonisolated deinit {
-        MainActor.assumeIsolated {
-            if let animator, animator.state != .inactive {
-                animator.stopAnimation(true)
-            }
-            animator = nil
-        }
     }
 }
 
@@ -284,9 +214,11 @@ private final class FixedSheetPresentationController: UIPresentationController {
 
     override func presentationTransitionDidEnd(_ completed: Bool) {
         if !completed { shade.removeFromSuperview() }
+        PageViewController.reconcileWindowModalCoverage(from: presentingViewController)
     }
 
     override func dismissalTransitionWillBegin() {
+        PageViewController.reconcileWindowModalCoverage(from: presentingViewController)
         if let coordinator = presentedViewController.transitionCoordinator {
             coordinator.animate(alongsideTransition: { [shade] _ in shade.alpha = 0 })
         } else { shade.alpha = 0 }
@@ -295,6 +227,7 @@ private final class FixedSheetPresentationController: UIPresentationController {
     override func dismissalTransitionDidEnd(_ completed: Bool) {
         if completed { shade.removeFromSuperview() }
         else { shade.alpha = 1 }
+        PageViewController.reconcileWindowModalCoverage(from: presentingViewController)
     }
 
     override func containerViewWillLayoutSubviews() {

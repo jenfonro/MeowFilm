@@ -13,7 +13,7 @@ public final class VerticalPageTransition: NSObject, UIViewControllerTransitioni
     public var isTransitioning: Bool { animation != nil || interaction != nil }
     private weak var controller: UIViewController?
     private let edge: Edge
-    private var animation: VerticalPageAnimator?
+    private var animation: SlideModalAnimator?
     private var interaction: UIPercentDrivenInteractiveTransition?
     private var interactionEnding = false
     private var foregroundObserver: NSObjectProtocol?
@@ -78,10 +78,17 @@ public final class VerticalPageTransition: NSObject, UIViewControllerTransitioni
         VerticalPagePresentationController(presentedViewController: presented, presenting: presenting)
     }
 
-    private func makeAnimator(presenting: Bool) -> VerticalPageAnimator {
-        let value = VerticalPageAnimator(presenting: presenting, edge: edge,
-                                        edgeDismissal: !presenting && interaction != nil) {
-            [weak self] completed in
+    private func makeAnimator(presenting: Bool) -> SlideModalAnimator {
+        let edgeIsTop = edge == .top
+        let value = SlideModalAnimator(
+            presenting: presenting,
+            interactive: !presenting && interaction != nil,
+            duration: 0.38,
+            resetToContainerBounds: true,
+            offscreenOffset: { _, containerBounds in
+                containerBounds.height * (edgeIsTop ? -1 : 1)
+            }
+        ) { [weak self] completed in
             self?.animation = nil
             self?.interaction = nil
             self?.interactionEnding = false
@@ -129,24 +136,34 @@ public final class VerticalPageTransition: NSObject, UIViewControllerTransitioni
 }
 
 @MainActor
-private final class VerticalPageAnimator: NSObject, UIViewControllerAnimatedTransitioning {
+final class SlideModalAnimator: NSObject, UIViewControllerAnimatedTransitioning {
     private let presenting: Bool
-    private let edge: VerticalPageTransition.Edge
-    private let edgeDismissal: Bool
+    private let interactive: Bool
+    private let duration: TimeInterval
+    private let resetToContainerBounds: Bool
+    private let offscreenOffset: (CGRect, CGRect) -> CGFloat
     private let completion: (Bool) -> Void
     private var animator: UIViewPropertyAnimator?
 
-    init(presenting: Bool, edge: VerticalPageTransition.Edge,
-         edgeDismissal: Bool, completion: @escaping (Bool) -> Void) {
+    init(
+        presenting: Bool,
+        interactive: Bool,
+        duration: TimeInterval,
+        resetToContainerBounds: Bool,
+        offscreenOffset: @escaping (CGRect, CGRect) -> CGFloat,
+        completion: @escaping (Bool) -> Void
+    ) {
         self.presenting = presenting
-        self.edge = edge
-        self.edgeDismissal = edgeDismissal
+        self.interactive = interactive
+        self.duration = duration
+        self.resetToContainerBounds = resetToContainerBounds
+        self.offscreenOffset = offscreenOffset
         self.completion = completion
         super.init()
     }
 
     func transitionDuration(using transitionContext: UIViewControllerContextTransitioning?) -> TimeInterval {
-        UIAccessibility.isReduceMotionEnabled && !edgeDismissal ? 0 : 0.38
+        UIAccessibility.isReduceMotionEnabled && !interactive ? 0 : duration
     }
 
     func animateTransition(using context: UIViewControllerContextTransitioning) {
@@ -167,25 +184,24 @@ private final class VerticalPageAnimator: NSObject, UIViewControllerAnimatedTran
             return failed
         }
         let container = context.containerView
-        let offset = container.bounds.height * (edge == .top ? -1 : 1)
         let frame = presenting ? context.finalFrame(for: controller) : context.initialFrame(for: controller)
+        let offscreen = CGAffineTransform(translationX: 0, y: offscreenOffset(frame, container.bounds))
         root.transform = .identity
         root.frame = frame
         if presenting {
             container.addSubview(root)
             root.layoutIfNeeded()
-            root.transform = CGAffineTransform(translationX: 0, y: offset)
+            root.transform = offscreen
         }
         let value = UIViewPropertyAnimator(duration: transitionDuration(using: context),
-                                          curve: edgeDismissal ? .linear : .easeInOut)
+                                           curve: interactive ? .linear : .easeInOut)
         value.addAnimations { [presenting] in
-            root.transform = presenting ? .identity : CGAffineTransform(
-                translationX: 0, y: offset)
+            root.transform = presenting ? .identity : offscreen
         }
-        value.addCompletion { [weak self, presenting, completion] _ in
+        value.addCompletion { [weak self, presenting, resetToContainerBounds, completion] _ in
             let completed = !context.transitionWasCancelled
             root.transform = .identity
-            root.frame = container.bounds
+            root.frame = resetToContainerBounds ? container.bounds : frame
             if presenting && !completed || !presenting && completed { root.removeFromSuperview() }
             self?.animator = nil
             context.completeTransition(completed)
@@ -210,6 +226,18 @@ private final class VerticalPagePresentationController: UIPresentationController
     override var shouldPresentInFullscreen: Bool { true }
     override var shouldRemovePresentersView: Bool { false }
     override var frameOfPresentedViewInContainerView: CGRect { containerView?.bounds ?? .zero }
+
+    override func presentationTransitionDidEnd(_ completed: Bool) {
+        PageViewController.reconcileWindowModalCoverage(from: presentingViewController)
+    }
+
+    override func dismissalTransitionWillBegin() {
+        PageViewController.reconcileWindowModalCoverage(from: presentingViewController)
+    }
+
+    override func dismissalTransitionDidEnd(_ completed: Bool) {
+        PageViewController.reconcileWindowModalCoverage(from: presentingViewController)
+    }
 
     override func containerViewWillLayoutSubviews() {
         super.containerViewWillLayoutSubviews()

@@ -78,7 +78,6 @@ final class PlaybackSeekCompletions {
     private nonisolated let storage = Storage()
 
     var hasPending: Bool { !storage.pending.isEmpty }
-    var registrationCount: Int { storage.registrations.count }
 
     @discardableResult
     func register(
@@ -101,19 +100,6 @@ final class PlaybackSeekCompletions {
 
     func deliverPending() {
         storage.deliverPending()
-    }
-
-    /// Safety net after the owning controller has invalidated its state and
-    /// removed native resources. Normal stop/replacement uses state results.
-    func cancelAll() {
-        let current = storage.registrations
-        storage.registrations.removeAll()
-        for (id, registration) in current {
-            storage.pending.append(Delivery(
-                result: PlaybackSeekResult(attempt: registration.attempt, operationID: id, outcome: .cancelled),
-                completion: registration.completion
-            ))
-        }
     }
 
     nonisolated deinit {

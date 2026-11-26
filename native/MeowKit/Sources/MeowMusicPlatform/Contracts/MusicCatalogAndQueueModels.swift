@@ -74,7 +74,7 @@ public struct MusicPublicBrowseFilter: Codable, Sendable, Hashable, Identifiable
     }
 }
 
-public enum MusicPublicBrowseContent: Sendable {
+public enum MusicPublicBrowseContent: Sendable, Equatable {
     case collection(MusicPublicBrowseCollection)
     case track(MusicRemoteTrack)
     case channel(MusicPublicBrowseChannel)
@@ -83,8 +83,8 @@ public enum MusicPublicBrowseContent: Sendable {
     case unavailable
 }
 
-public struct MusicPublicBrowseRanking: Codable, Sendable {
-    public struct Entry: Codable, Sendable {
+public struct MusicPublicBrowseRanking: Codable, Sendable, Equatable {
+    public struct Entry: Codable, Sendable, Equatable {
         public let id: String
         public let title: String
         public let artist: String
@@ -105,7 +105,7 @@ public struct MusicPublicBrowseRanking: Codable, Sendable {
     }
 }
 
-public struct MusicPublicBrowseItem: Sendable, Identifiable {
+public struct MusicPublicBrowseItem: Sendable, Identifiable, Equatable {
     public enum Kind: String, Codable, Sendable {
         case song, playlist, album, artist, channel, chart, daily, fm, similar, heartbeat, unsupported
         case songCollection = "song-collection"

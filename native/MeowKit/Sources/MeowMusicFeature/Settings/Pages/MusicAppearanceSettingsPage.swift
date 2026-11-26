@@ -222,8 +222,7 @@ final class MusicCustomColorPickerController: UIColorPickerViewController, UICol
             guard let self else { return }
             self.committing = false
             guard saved else {
-                self.presentPageAlert(title: "错误", message: store.persistenceError,
-                                      actions: [PageAlertAction(title: "确定", style: .default)])
+                (self.navigationController?.presentingViewController as? PageViewController)?.enqueueError(store.persistenceError)
                 return
             }
             self.finished = true; store.endColorPreview()

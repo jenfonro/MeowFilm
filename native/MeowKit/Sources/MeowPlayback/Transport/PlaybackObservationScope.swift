@@ -17,8 +17,6 @@ final class PlaybackObservationScope {
 
     nonisolated init() {}
 
-    var count: Int { box.removals.count }
-
     func insert(_ removal: @escaping @MainActor () -> Void) {
         box.removals.append(removal)
     }

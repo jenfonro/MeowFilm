@@ -7,7 +7,7 @@ import MeowDebug
 public enum ArtworkImageDecoder {
     public nonisolated static func decode(
         _ data: Data,
-        maxPixelSize: Int = 1_024,
+        maxPixelSize: Int = 600,
         requireCompleteContainer: Bool = true
     ) -> UIImage? {
         if requireCompleteContainer, !hasCompleteImageContainer(data) { return nil }

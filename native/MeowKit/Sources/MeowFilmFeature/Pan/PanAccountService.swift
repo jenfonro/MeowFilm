@@ -22,13 +22,13 @@ public struct PanLoginChallenge: Equatable, Sendable {
     public let payload: Payload
     public let expiresAt: Date
     init(_ value: RuntimeValue) throws {
-        guard let sessionID = value.panField("sessionId")?.panString, !sessionID.isEmpty,
-              let provider = value.panField("provider")?.panString.flatMap(PanProviderID.init(rawValue:)),
-              value.panField("status") == .string("pending"),
-              let expiresAt = value.panField("expiresAt")?.panInteger,
-              let challenge = value.panField("challenge"),
-              let type = challenge.panField("type")?.panString,
-              let url = challenge.panField("url")?.panString else { throw PanAccountError.invalidResponse }
+        guard let sessionID = value["sessionId"].stringValue, !sessionID.isEmpty,
+              let provider = value["provider"].stringValue.flatMap(PanProviderID.init(rawValue:)),
+              value["status"] == .string("pending"),
+              let expiresAt = value["expiresAt"].panInteger,
+              let challenge = value.objectValue?["challenge"],
+              let type = challenge["type"].stringValue,
+              let url = challenge["url"].stringValue else { throw PanAccountError.invalidResponse }
         self.sessionID = sessionID; self.provider = provider
         self.expiresAt = Date(timeIntervalSince1970: Double(expiresAt) / 1000)
         switch type {
@@ -53,12 +53,13 @@ public struct PanLoginReceipt: Sendable {
     public let progress: PanLoginProgress
     public let account: PanAccount?
     init(_ value: RuntimeValue) throws {
-        guard let id = value.panField("sessionId")?.panString,
-              let progress = value.panField("status")?.panString.flatMap(PanLoginProgress.init(rawValue:)) else {
+        guard let fields = value.objectValue,
+              let id = fields["sessionId"]?.stringValue,
+              let progress = fields["status"]?.stringValue.flatMap(PanLoginProgress.init(rawValue:)) else {
             throw PanAccountError.invalidResponse
         }
         sessionID = id; self.progress = progress
-        account = try value.panField("account").map(PanAccount.init)
+        account = try fields["account"].map(PanAccount.init)
         if let error = account?.errorCode { throw RuntimeHTTPError.remote(error.rawValue) }
         if progress == .confirmed, account?.status != .signedIn { throw PanAccountError.unconfirmed }
     }
@@ -91,7 +92,7 @@ public struct PanAccountService: Sendable {
         let before = try await settings.signature(provider)
         do {
             let value = try await request("refresh", input(provider), nil)
-            guard value.panField("refreshed") == .bool(true), let state = value.panField("account") else {
+            guard value["refreshed"] == .bool(true), let state = value.objectValue?["account"] else {
                 throw PanAccountError.invalidResponse
             }
             return try await settings.accept(account(state, provider: provider))
@@ -113,7 +114,7 @@ public struct PanAccountService: Sendable {
             guard challenge.provider == provider else { throw PanAccountError.invalidResponse }
             return challenge
         } catch {
-            if let id = value.panField("sessionId")?.panString {
+            if let id = value["sessionId"].stringValue {
                 do { try await cancel(id) }
                 catch {
                     DebugRuntime.logError(.storage, sub: "pan", event: "login.start.cancel.error", error: error)

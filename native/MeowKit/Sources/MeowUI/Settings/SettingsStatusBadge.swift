@@ -2,7 +2,7 @@
 import UIKit
 
 @MainActor
-public final class SettingsStatusBadge: UIView {
+public final class SettingsStatusBadge: UIView, PageThemeable {
     public enum Status: Sendable {
         case neutral, success, warning, danger
     }
@@ -62,21 +62,10 @@ public final class SettingsStatusBadge: UIView {
         icon.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .regular))
         backgroundColor = UIColor(colors.surface.mixed(with: ink, ratio: theme.dark ? 0.12 : 0.08))
         invalidateIntrinsicContentSize()
-        setNeedsLayout()
-    }
-
-    public override var intrinsicContentSize: CGSize {
-        let width = bounds.width > 32 ? bounds.width - 32 : CGFloat.greatestFiniteMagnitude
-        let size = label.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-        return CGSize(width: size.width + 32, height: max(12, ceil(size.height)) + 8)
     }
 
     public override func layoutSubviews() {
         super.layoutSubviews()
-        if label.preferredMaxLayoutWidth != label.bounds.width {
-            label.preferredMaxLayoutWidth = label.bounds.width
-            invalidateIntrinsicContentSize()
-        }
         layer.cornerRadius = min(bounds.width, bounds.height) / 2
     }
 }

@@ -26,6 +26,7 @@ open class PosterHomeViewController: PageViewController, UICollectionViewDelegat
     private struct RowEntry: Equatable {
         let row: Row
         let card: PosterCatalogCard?
+        let isLoading: Bool
         let emptyStatusText: String
     }
 
@@ -64,8 +65,10 @@ open class PosterHomeViewController: PageViewController, UICollectionViewDelegat
             guard let card = entry.card else {
                 let cell = view.dequeueReusableCell(withReuseIdentifier: PosterEmptyCell.reuseIdentifier, for: path)
                 if let cell = cell as? PosterEmptyCell {
-                    cell.label.text = entry.emptyStatusText
+                    cell.label.text = entry.isLoading ? nil : entry.emptyStatusText
                     cell.label.textColor = UIColor(self.theme.muted)
+                    cell.activity.color = UIColor(self.theme.muted)
+                    if entry.isLoading { cell.activity.startAnimating() } else { cell.activity.stopAnimating() }
                 }
                 return cell
             }
@@ -144,6 +147,7 @@ open class PosterHomeViewController: PageViewController, UICollectionViewDelegat
                 poster.applyTheme(theme)
             } else if let emptyCell = cell as? PosterEmptyCell {
                 emptyCell.label.textColor = UIColor(theme.muted)
+                emptyCell.activity.color = UIColor(theme.muted)
             }
         }
         updateVisibleHeaders()
@@ -163,10 +167,11 @@ open class PosterHomeViewController: PageViewController, UICollectionViewDelegat
             renderedSections = sections
             let projectedSections = sections.map { section -> (id: String, items: [RowEntry]) in
                 let entries = section.items.map {
-                    RowEntry(row: Row(section: section.id, item: $0.id), card: $0, emptyStatusText: "")
+                    RowEntry(row: Row(section: section.id, item: $0.id), card: $0, isLoading: false, emptyStatusText: "")
                 }
                 let normalized = entries.isEmpty
-                    ? [RowEntry(row: Row(section: section.id, item: nil), card: nil, emptyStatusText: section.statusText)]
+                    ? [RowEntry(row: Row(section: section.id, item: nil), card: nil,
+                                isLoading: section.isLoading, emptyStatusText: section.statusText)]
                     : entries
                 return (id: section.id, items: normalized)
             }
@@ -245,7 +250,7 @@ open class PosterHomeViewController: PageViewController, UICollectionViewDelegat
                                                                heightDimension: .fractionalHeight(1)))
             let group = NSCollectionLayoutGroup.horizontal(layoutSize: .init(
                 widthDimension: empty ? .fractionalWidth(1) : .absolute(metrics.width),
-                heightDimension: .absolute(empty ? 42 : metrics.height)), subitems: [item])
+                heightDimension: .absolute(metrics.height)), subitems: [item])
             let section = NSCollectionLayoutSection(group: group)
             section.orthogonalScrollingBehavior = empty ? .none : .continuous
             section.interGroupSpacing = PosterCatalogMetrics.spacing

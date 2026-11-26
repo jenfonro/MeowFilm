@@ -45,7 +45,7 @@ public struct NovelHomeSection: Identifiable, Equatable, Sendable {
 
     public var statusText: String {
         switch state {
-        case .pending, .loading: return "加载中…"
+        case .pending, .loading: return ""
         case .ready: return "暂无书籍"
         case .failed(let message): return message.isEmpty ? "栏目加载失败" : message
         }

@@ -29,7 +29,7 @@ final class FilmRelatedRailView: UIView, UICollectionViewDelegate, UICollectionV
         collectionView.showsHorizontalScrollIndicator = false
         collectionView.delaysContentTouches = false
         collectionView.delegate = self
-        collectionView.register(FilmRelatedCell.self, forCellWithReuseIdentifier: FilmRelatedCell.reuseIdentifier)
+        collectionView.register(PosterCatalogCell.self, forCellWithReuseIdentifier: PosterCatalogCell.reuseIdentifier)
         collectionView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(collectionView)
         collectionView.pinEdges(to: self)
@@ -47,9 +47,17 @@ final class FilmRelatedRailView: UIView, UICollectionViewDelegate, UICollectionV
         heightConstraint.isActive = true
 
         dataSource = UICollectionViewDiffableDataSource<Int, String>(collectionView: collectionView) { [weak self] cv, indexPath, id in
-            let cell = cv.dequeueReusableCell(withReuseIdentifier: FilmRelatedCell.reuseIdentifier, for: indexPath) as! FilmRelatedCell
+            let cell = cv.dequeueReusableCell(withReuseIdentifier: PosterCatalogCell.reuseIdentifier, for: indexPath) as! PosterCatalogCell
             if let self, let item = self.projection[id] {
-                cell.configure(item: item, images: self.images, theme: self.theme)
+                cell.configure(
+                    card: PosterCatalogCard(
+                        id: id,
+                        title: item.title,
+                        accessibilityIdentifier: "film.similar.\(item.sourceID).\(item.id)",
+                        artwork: .url(item.posterURL, images: self.images)
+                    ),
+                    theme: self.theme
+                )
             }
             return cell
         }
@@ -89,19 +97,19 @@ final class FilmRelatedRailView: UIView, UICollectionViewDelegate, UICollectionV
         self.theme = theme
         emptyLabel.textColor = UIColor(theme.muted)
         for cell in collectionView.visibleCells {
-            (cell as? FilmRelatedCell)?.applyTheme(theme)
+            (cell as? PosterCatalogCell)?.applyTheme(theme)
         }
     }
 
     func cancelVisibleArtworks() {
         for cell in collectionView.visibleCells {
-            (cell as? FilmRelatedCell)?.cancelPendingLoad()
+            (cell as? PosterCatalogCell)?.cancelPendingLoad()
         }
     }
 
     func resumeVisibleArtworks() {
         for cell in collectionView.visibleCells {
-            (cell as? FilmRelatedCell)?.resumePendingLoad()
+            (cell as? PosterCatalogCell)?.resumePendingLoad()
         }
     }
 
@@ -117,87 +125,14 @@ final class FilmRelatedRailView: UIView, UICollectionViewDelegate, UICollectionV
 
     func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
                         forItemAt indexPath: IndexPath) {
-        (cell as? FilmRelatedCell)?.resumePendingLoad()
+        (cell as? PosterCatalogCell)?.resumePendingLoad()
     }
 
     func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
                         forItemAt indexPath: IndexPath) {
-        (cell as? FilmRelatedCell)?.cancelPendingLoad()
-    }
-}
-
-@MainActor
-private final class FilmRelatedCell: UICollectionViewCell {
-    static let reuseIdentifier = "film.detail.related.cell"
-
-    private var artwork: ArtworkView?
-    private let heading = UILabel()
-    private let stack = UIStackView()
-    private var currentURL: URL?
-    private lazy var feedback = PressFeedback(view: contentView)
-
-    override var isHighlighted: Bool {
-        didSet { feedback.setPressed(isHighlighted) }
-    }
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        heading.font = .systemFont(ofSize: 13)
-        heading.numberOfLines = 2
-        stack.axis = .vertical
-        stack.spacing = 7
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(stack)
-        stack.pinEdges(to: contentView)
-        isAccessibilityElement = true
-        accessibilityTraits = .button
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        feedback.setPressed(false)
-        currentURL = nil
-        artwork?.load(nil)
-    }
-
-    func cancelPendingLoad() {
-        artwork?.cancelPendingLoad()
-    }
-
-    func resumePendingLoad() {
-        guard let currentURL else { return }
-        artwork?.load(currentURL)
-    }
-
-    func configure(item: FilmItem, images: ArtworkImages, theme: PageTheme) {
-        let art: ArtworkView
-        if let existing = artwork {
-            art = existing
-        } else {
-            let created = ArtworkView(size: 0, images: images)
-            created.layer.cornerRadius = 7
-            created.heightAnchor.constraint(equalTo: created.widthAnchor, multiplier: 1.5).isActive = true
-            stack.addArrangedSubview(created)
-            stack.addArrangedSubview(heading)
-            artwork = created
-            art = created
-        }
-        if currentURL != item.posterURL {
-            currentURL = item.posterURL
-            art.load(item.posterURL)
-        }
-        heading.text = item.title
-        accessibilityLabel = item.title
-        accessibilityIdentifier = "film.similar.\(item.sourceID).\(item.id)"
-        applyTheme(theme)
-    }
-
-    func applyTheme(_ theme: PageTheme) {
-        artwork?.backgroundColor = UIColor(theme.chip)
-        heading.textColor = UIColor(theme.ink)
+        guard let poster = cell as? PosterCatalogCell else { return }
+        poster.resetPressFeedback()
+        poster.cancelPendingLoad()
     }
 }
 #endif

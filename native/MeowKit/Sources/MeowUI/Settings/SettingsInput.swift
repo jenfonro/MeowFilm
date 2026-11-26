@@ -56,39 +56,28 @@ public final class SettingsTextField: UITextField, PageThemeable {
     }
 
     private func updateAppearance() {
-        backgroundColor = inputAppearance == .outlined ? UIColor(inputTheme.input) : .clear
-        layer.cornerRadius = inputAppearance == .outlined ? min(bounds.width, bounds.height) / 2 : 0
-        layer.borderWidth = inputAppearance == .outlined ? 1 : 0
-        layer.borderColor = UIColor(inputTheme.inputBorder).cgColor
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        underline.isHidden = inputAppearance != .underline
-        underline.backgroundColor = UIColor(inputTheme.separator).cgColor
-        underline.frame = CGRect(x: bounds.minX, y: bounds.maxY - SettingsVisualMetrics.separatorHeight,
-            width: bounds.width, height: SettingsVisualMetrics.separatorHeight)
-        CATransaction.commit()
+        applySettingsInputChrome(
+            appearance: inputAppearance, theme: inputTheme, underline: underline, in: self, pillCorner: true
+        )
     }
 }
 
 @MainActor
-public final class SettingsTextView: UITextView, PageThemeable, UITextViewDelegate {
+public final class SettingsTextView: UITextView, PageThemeable {
     public var inputAppearance: SettingsInputAppearance = .outlined {
         didSet { updateAppearance(); setNeedsLayout() }
     }
-    public var onTextChanged: ((String) -> Void)? {
-        didSet {
-            if onTextChanged != nil, delegate == nil { delegate = self }
-        }
-    }
+    public var onTextChanged: ((String) -> Void)?
     private var inputTheme = PageTheme().settings
     private let underline = CALayer()
     private var minimumRows: Int?
     private var baseMinimumHeight: CGFloat = 0
     private var minimumHeightConstraint: NSLayoutConstraint?
+    private var changeObserver: NSObjectProtocol?
 
     public override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
-        layer.addSublayer(underline)
+        installTextObserver()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (text: SettingsTextView, _: UITraitCollection) in
             text.updateMinimumHeight()
         }
@@ -96,7 +85,23 @@ public final class SettingsTextView: UITextView, PageThemeable, UITextViewDelega
 
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
+        installTextObserver()
+    }
+
+    private func installTextObserver() {
         layer.addSublayer(underline)
+        changeObserver = NotificationCenter.default.addObserver(
+            forName: UITextView.textDidChangeNotification, object: self, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.onTextChanged?(self.text)
+            }
+        }
+    }
+
+    deinit {
+        if let changeObserver { NotificationCenter.default.removeObserver(changeObserver) }
     }
 
     public func configureMinimumRows(_ rows: Int, minimumHeight: CGFloat) {
@@ -137,10 +142,6 @@ public final class SettingsTextView: UITextView, PageThemeable, UITextViewDelega
         }
     }
 
-    public func textViewDidChange(_ textView: UITextView) {
-        onTextChanged?(textView.text)
-    }
-
     func applyInputTheme(_ theme: SettingsTheme) {
         inputTheme = theme; updateAppearance()
     }
@@ -150,18 +151,36 @@ public final class SettingsTextView: UITextView, PageThemeable, UITextViewDelega
     }
 
     private func updateAppearance() {
-        backgroundColor = inputAppearance == .outlined ? UIColor(inputTheme.input) : .clear
-        layer.cornerRadius = 0
-        layer.borderWidth = inputAppearance == .outlined ? 1 : 0
-        layer.borderColor = UIColor(inputTheme.inputBorder).cgColor
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        underline.isHidden = inputAppearance != .underline
-        underline.backgroundColor = UIColor(inputTheme.separator).cgColor
-        underline.frame = CGRect(x: bounds.minX, y: bounds.maxY - SettingsVisualMetrics.separatorHeight,
-            width: bounds.width, height: SettingsVisualMetrics.separatorHeight)
-        CATransaction.commit()
+        applySettingsInputChrome(
+            appearance: inputAppearance, theme: inputTheme, underline: underline, in: self, pillCorner: false
+        )
     }
+}
+
+@MainActor
+private func applySettingsInputChrome(
+    appearance: SettingsInputAppearance,
+    theme: SettingsTheme,
+    underline: CALayer,
+    in view: UIView,
+    pillCorner: Bool
+) {
+    let bounds = view.bounds
+    view.backgroundColor = appearance == .outlined ? UIColor(theme.input) : .clear
+    view.layer.cornerRadius = pillCorner && appearance == .outlined ? min(bounds.width, bounds.height) / 2 : 0
+    view.layer.borderWidth = appearance == .outlined ? 1 : 0
+    view.layer.borderColor = UIColor(theme.inputBorder).cgColor
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    underline.isHidden = appearance != .underline
+    underline.backgroundColor = UIColor(theme.separator).cgColor
+    underline.frame = CGRect(
+        x: bounds.minX,
+        y: bounds.maxY - SettingsVisualMetrics.separatorHeight,
+        width: bounds.width,
+        height: SettingsVisualMetrics.separatorHeight
+    )
+    CATransaction.commit()
 }
 
 /// A field's title and input share the same content edge inside forms and dialogs.

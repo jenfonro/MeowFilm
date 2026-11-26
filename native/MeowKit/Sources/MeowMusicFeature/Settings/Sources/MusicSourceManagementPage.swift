@@ -10,7 +10,6 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     private let model: MusicViewModel
     private let appearance: MusicAppearancePreferencesStore
     let state: MusicSourceManagementState
-    private let listView = ManagementListView()
     private let importingIndicator = UIActivityIndicatorView(style: .medium)
     private var searchQuery = ""
     private var allRows: [ManagementListView.Row] = []
@@ -29,26 +28,18 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
         super.viewDidLoad()
         view.accessibilityIdentifier = "music.sources.page"
         importingIndicator.hidesWhenStopped = true
-        listView.search.placeholder = "搜索音源"
-        listView.footerMoreNeedsSelection = true
-        listView.onSearch = { [weak self] query in
+        manager.search.placeholder = "搜索音源"
+        manager.footerMoreNeedsSelection = true
+        manager.onSearch = { [weak self] query in
             self?.searchQuery = query
             self?.applyFilteredRows()
         }
-        listView.onSelection = { [weak self] in
+        manager.onSelection = { [weak self] in
             guard let self else { return }
-            self.state.selected = self.listView.selected
+            self.state.selected = self.manager.selected
             self.updateFooterState()
         }
-        listView.onDelete = { [weak self] in self?.confirmRemoveSelected() }
-        listView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(listView)
-        NSLayoutConstraint.activate([
-            listView.topAnchor.constraint(equalTo: contentTopAnchor),
-            listView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-            listView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            listView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
-        ])
+        manager.onDelete = { [weak self] in self?.confirmRemoveSelected() }
 
         if state.managesScripts {
             let add = PageHeaderButton(image: PageIcon.image(.plus), accessibilityLabel: "添加音源", menu: UIMenu(children: [
@@ -98,7 +89,6 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
         super.applyTheme()
         guard isViewLoaded else { return }
         view.tintColor = UIColor(theme.settings.accent)
-        listView.applyTheme(theme)
         importingIndicator.color = UIColor(theme.settings.accent)
     }
 
@@ -151,8 +141,8 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
             )
         }
         applyFilteredRows()
-        listView.configureToolbar(showsSearch: true, buttons: [],
-                                  accessories: state.importing ? [importingIndicator] : [])
+        manager.configureToolbar(showsSearch: true, buttons: [],
+                                 accessories: state.importing ? [importingIndicator] : [])
         if state.importing { importingIndicator.startAnimating() } else { importingIndicator.stopAnimating() }
         updateFooterState()
     }
@@ -162,23 +152,23 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
         let visible = term.isEmpty ? allRows : allRows.filter {
             $0.title.lowercased().contains(term) || $0.detail.lowercased().contains(term)
         }
-        listView.setRows(
+        manager.setRows(
             visible,
             total: allRows.count,
             validIDs: Set(allRows.map(\.id)),
             emptyMessage: state.importing ? "正在导入音源" : (allRows.isEmpty ? "暂无音源" : "没有匹配的音源")
         )
-        listView.setSelection(state.selected.intersection(Set(allRows.map(\.id))))
+        manager.setSelection(state.selected.intersection(Set(allRows.map(\.id))))
         updateFooterState()
     }
 
     private func updateFooterState() {
-        let selectedScripts = state.scripts.filter { listView.selected.contains($0.id) }
-        listView.deleteButton.isEnabled = state.isActive && !selectedScripts.isEmpty &&
+        let selectedScripts = state.scripts.filter { manager.selected.contains($0.id) }
+        manager.deleteButton.isEnabled = state.isActive && !selectedScripts.isEmpty &&
             !selectedScripts.contains { state.isPending($0.id) }
-        listView.footerMore.isEnabled = state.isActive && !listView.selected.isEmpty
-        listView.footerMore.menu = UIMenu(children: [
-            UIAction(title: "检测", attributes: listView.selected.isEmpty ? .disabled : []) { [weak state] _ in
+        manager.footerMore.isEnabled = state.isActive && !manager.selected.isEmpty
+        manager.footerMore.menu = UIMenu(children: [
+            UIAction(title: "检测", attributes: manager.selected.isEmpty ? .disabled : []) { [weak state] _ in
                 state?.checkSelected()
             }
         ])

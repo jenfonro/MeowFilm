@@ -16,13 +16,13 @@ extension RuntimeHTTPClient {
         timeout: TimeInterval? = nil
     ) async throws -> DebugRawHTTPResponse {
         guard !isClosed else { throw DebugAPIError.runtimeUnavailable("Node runtime client is closed") }
-        guard let url = URL(string: path, relativeTo: debugBaseURL)?.absoluteURL else {
+        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw DebugAPIError.invalidArgument("Invalid runtime path: \(path)")
         }
         let requestID = UUID().uuidString.lowercased()
         let opId = DebugTraceContext.current.opId ?? DebugTraceContext.nextOpID()
         let traceId = DebugTraceContext.current.traceId
-        let deadline = timeout ?? max(debugDefaultTimeout, 30)
+        let deadline = timeout ?? max(self.timeout, 30)
 
         var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: deadline)
         req.httpMethod = method
@@ -39,7 +39,7 @@ extension RuntimeHTTPClient {
         let started = DispatchTime.now().uptimeNanoseconds
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await debugSession.data(for: req)
+            (data, response) = try await session.data(for: req)
         } catch {
             let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
             DebugRuntime.logError(.runtimeBridge, sub: "debug.forward", event: "error", error: error,
@@ -118,52 +118,42 @@ extension RuntimeHTTPClient {
     }
 
     public func debugNodeDiagnostics() async -> DebugJSONValue {
-        do {
-            let raw = try await debugRawRequest(method: "GET", path: "/v1/debug/diagnostics", timeout: 10)
-            guard raw.statusCode == 200,
-                  let decoded = try? DebugJSONValue.decode(data: raw.data) else {
-                return .object([
-                    "available": .bool(false),
-                    "httpStatus": .int(raw.statusCode),
-                    "reason": .string(raw.statusCode == 404 ? "NODE_DEBUG_ENDPOINT_UNAVAILABLE" : "NODE_DEBUG_ERROR")
-                ])
-            }
-            if case .object(var fields) = decoded {
-                if let value = fields["value"] {
-                    if case .object(var inner) = value {
-                        inner["available"] = .bool(true)
-                        return .object(inner)
-                    }
-                    return .object([
-                        "available": .bool(true),
-                        "data": value
-                    ])
-                }
-                fields["available"] = .bool(true)
-                return .object(fields)
-            }
-            return .object(["available": .bool(true), "data": decoded])
-        } catch {
-            return .object([
-                "available": .bool(false),
-                "reason": .string(error.localizedDescription)
-            ])
-        }
+        await debugNodeProbe(method: "GET", path: "/v1/debug/diagnostics", body: nil, timeout: 10, scalarKey: "data")
     }
 
     public func debugSyncConfig(_ config: DebugJSONValue) async -> Bool {
         guard let body = try? config.encode() else { return false }
-        do {
-            let raw = try await debugRawRequest(method: "POST", path: "/v1/debug/config", body: body, timeout: 10)
-            return raw.statusCode == 200
-        } catch {
-            return false
-        }
+        return (try? await debugRawRequest(method: "POST", path: "/v1/debug/config", body: body, timeout: 10))?.statusCode == 200
     }
 
     public func debugNodeGC() async -> DebugJSONValue {
+        await debugNodeProbe(method: "POST", path: "/v1/debug/gc", body: Data("{}".utf8), timeout: 15, scalarKey: "result")
+    }
+
+    public func debugNodeHeapSnapshot() async throws -> DebugJSONValue {
+        try await debugNodeArtifact(path: "/v1/debug/heapsnapshot", body: Data("{}".utf8), timeout: 120, label: "heapsnapshot")
+    }
+
+    public func debugNodeCPUProfile(durationMs: Int) async throws -> DebugJSONValue {
+        let clamped = min(max(durationMs, 500), 60000)
+        let body = try DebugJSONValue.object(["durationMs": .int(clamped)]).encode()
+        return try await debugNodeArtifact(
+            path: "/v1/debug/cpu-profile",
+            body: body,
+            timeout: Double(clamped) / 1000.0 + 30.0,
+            label: "cpu-profile"
+        )
+    }
+
+    private func debugNodeProbe(
+        method: String,
+        path: String,
+        body: Data?,
+        timeout: TimeInterval,
+        scalarKey: String
+    ) async -> DebugJSONValue {
         do {
-            let raw = try await debugRawRequest(method: "POST", path: "/v1/debug/gc", body: Data("{}".utf8), timeout: 15)
+            let raw = try await debugRawRequest(method: method, path: path, body: body, timeout: timeout)
             guard raw.statusCode == 200,
                   let decoded = try? DebugJSONValue.decode(data: raw.data) else {
                 return .object([
@@ -177,37 +167,19 @@ extension RuntimeHTTPClient {
                 inner["available"] = .bool(true)
                 return .object(inner)
             }
-            return .object(["available": .bool(true), "result": payload])
+            return .object(["available": .bool(true), scalarKey: payload])
         } catch {
             return .object(["available": .bool(false), "reason": .string(error.localizedDescription)])
         }
     }
 
-    public func debugNodeHeapSnapshot() async throws -> DebugJSONValue {
-        let raw = try await debugRawRequest(method: "POST", path: "/v1/debug/heapsnapshot", body: Data("{}".utf8), timeout: 120)
+    private func debugNodeArtifact(path: String, body: Data, timeout: TimeInterval, label: String) async throws -> DebugJSONValue {
+        let raw = try await debugRawRequest(method: "POST", path: path, body: body, timeout: timeout)
         if raw.statusCode == 404 {
-            throw DebugAPIError.runtimeUnavailable("Node /v1/debug/heapsnapshot is not enabled in the current Node runtime build")
+            throw DebugAPIError.runtimeUnavailable("Node \(path) is not enabled in the current Node runtime build")
         }
         guard raw.statusCode == 200, let decoded = try? DebugJSONValue.decode(data: raw.data) else {
-            throw DebugAPIError.runtimeUnavailable("Node heapsnapshot failed with HTTP \(raw.statusCode)")
-        }
-        return decoded["value"] ?? decoded
-    }
-
-    public func debugNodeCPUProfile(durationMs: Int) async throws -> DebugJSONValue {
-        let clamped = min(max(durationMs, 500), 60000)
-        let body = try DebugJSONValue.object(["durationMs": .int(clamped)]).encode()
-        let raw = try await debugRawRequest(
-            method: "POST",
-            path: "/v1/debug/cpu-profile",
-            body: body,
-            timeout: Double(clamped) / 1000.0 + 30.0
-        )
-        if raw.statusCode == 404 {
-            throw DebugAPIError.runtimeUnavailable("Node /v1/debug/cpu-profile is not enabled in the current Node runtime build")
-        }
-        guard raw.statusCode == 200, let decoded = try? DebugJSONValue.decode(data: raw.data) else {
-            throw DebugAPIError.runtimeUnavailable("Node cpu-profile failed with HTTP \(raw.statusCode)")
+            throw DebugAPIError.runtimeUnavailable("Node \(label) failed with HTTP \(raw.statusCode)")
         }
         return decoded["value"] ?? decoded
     }

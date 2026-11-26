@@ -332,7 +332,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         let changedItems = Set(rows.keys.filter { id in
             guard let old = previousRows[id], let row = rows[id] else { return true }
             return old.section.layout != row.section.layout ||
-                (id.item == nil ? !sameItems(old.section.items, row.section.items) : !sameItem(old.item, row.item))
+                (id.item == nil ? old.section.items != row.section.items : old.item != row.item)
         })
         let oldSections = Dictionary(previousSections.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let changedHeaders = Set(sections.filter { section in
@@ -383,7 +383,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 loadingSkeleton.configure(loading: true, visible: isPageVisible, theme: theme)
                 collection.backgroundView = loadingSkeleton
             } else {
-                setStatus(page?.isLoading == true ? "加载中" : page?.loaded == true && page?.nextCursor == nil ? "暂无内容" : nil)
+                setStatus(page?.isLoading == true ? nil : page?.loaded == true && page?.nextCursor == nil ? "暂无内容" : nil)
             }
             loadAutomaticNextPage()
         } else {
@@ -407,44 +407,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     func currentSection(for item: MusicPublicBrowseItem, id: String) -> MusicPublicBrowseSection? {
         guard let section = sections.first(where: { $0.id == id }),
-              let current = section.items.first(where: { $0.id == item.id }), sameItem(item, current) else { return nil }
+              section.items.contains(item) else { return nil }
         return section
-    }
-
-    func sameItems(_ lhs: [MusicPublicBrowseItem], _ rhs: [MusicPublicBrowseItem]) -> Bool {
-        lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { sameItem($0.0, $0.1) }
-    }
-
-    func sameItem(_ lhs: MusicPublicBrowseItem, _ rhs: MusicPublicBrowseItem) -> Bool {
-        guard lhs.id == rhs.id, lhs.title == rhs.title, lhs.subtitle == rhs.subtitle,
-              lhs.artwork == rhs.artwork, lhs.previewSongs == rhs.previewSongs,
-              lhs.coverLabel == rhs.coverLabel,
-              lhs.requiresAccount == rhs.requiresAccount, lhs.kind == rhs.kind, lhs.label == rhs.label,
-              lhs.presentation == rhs.presentation, lhs.coverRef == rhs.coverRef,
-              lhs.contextText == rhs.contextText, lhs.playCount == rhs.playCount,
-              sameRanking(lhs.ranking, rhs.ranking) else { return false }
-        switch (lhs.content, rhs.content) {
-        case (.collection(let lhs), .collection(let rhs)): return lhs == rhs
-        case (.track(let lhs), .track(let rhs)): return lhs == rhs
-        case (.channel(let lhs), .channel(let rhs)): return lhs == rhs
-        case (.daily(let lhs), .daily(let rhs)): return lhs == rhs
-        case (.action(let lhs), .action(let rhs)): return lhs == rhs
-        case (.unavailable, .unavailable): return true
-        default: return false
-        }
-    }
-
-    func sameRanking(_ lhs: MusicPublicBrowseRanking?, _ rhs: MusicPublicBrowseRanking?) -> Bool {
-        switch (lhs, rhs) {
-        case (nil, nil): return true
-        case (.some(let lhs), .some(let rhs)):
-            return lhs.songArtwork == rhs.songArtwork && lhs.updateFrequency == rhs.updateFrequency &&
-                lhs.preview.count == rhs.preview.count && zip(lhs.preview, rhs.preview).allSatisfy {
-                    $0.0.id == $0.1.id && $0.0.title == $0.1.title && $0.0.artist == $0.1.artist &&
-                        $0.0.artwork == $0.1.artwork && $0.0.rank == $0.1.rank && $0.0.lastRank == $0.1.lastRank
-                }
-        default: return false
-        }
     }
 
     func sameHeader(_ lhs: MusicPublicBrowseSection, _ rhs: MusicPublicBrowseSection) -> Bool {
@@ -472,7 +436,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                                           item: MusicPublicBrowseItem) {
         let loading: MusicBrowseCell.PlaybackLoading?
         if let origin = playbackOrigin, page?.isActing == true, page?.actionPageID == origin.page,
-           origin.section == section.id, sameItem(origin.item, item) {
+           origin.section == section.id, origin.item == item {
             loading = origin.preview.map { .preview($0) } ?? .card
         } else { loading = nil }
         cell.setPlaybackLoading(loading, visible: isPageVisible)
@@ -520,7 +484,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         // Published loading and the collection projection settle separately.
         // Never start optional work for a retained cell already replaced by
         // the model, even if the collection has not rendered that replacement.
-        return page.sections.contains { $0.items.contains { sameItem($0, item) } }
+        return page.sections.contains { $0.items.contains(item) }
     }
 
     func loadFMPreview(_ item: MusicPublicBrowseItem, action: MusicHomeAction) {

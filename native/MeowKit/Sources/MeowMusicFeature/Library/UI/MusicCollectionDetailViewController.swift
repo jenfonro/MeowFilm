@@ -438,7 +438,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         }
         if page.isLoading, orderedRows.isEmpty {
             table.backgroundView = nil
-            configureFooter(text: page.collection == nil ? nil : "加载中", loading: page.collection == nil)
+            configureFooter(loading: true)
         } else if page.collection != nil, orderedRows.isEmpty {
             table.backgroundView = nil
             configureFooter(text: page.searchQuery.isEmpty ? "暂无歌曲" : "无匹配歌曲")
@@ -467,9 +467,9 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         if !remoteFilter.isEmpty {
             if orderedRows.isEmpty, page.loaded { text = "无匹配歌曲" }
         } else if page.isLoading {
-            if !orderedRows.isEmpty { text = "加载中" }
+            // Spinner is rendered by statusFooter via `loading: page.isLoading`.
         } else if page.error != nil {
-            // Read errors and retry action are presented via unified alert overlay (`showRemoteReadErrorIfNeeded`).
+            // Read errors and retry action are presented via unified notice banner (`showRemoteReadErrorIfNeeded`).
         } else if page.usesPageNavigation {
             previousTitle = page.canPrevious ? "上一页" : nil
             nextTitle = page.nextCursor == nil ? nil : "下一页"
@@ -479,7 +479,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             text = "暂无歌曲"
         }
         configureFooter(text: text, previousTitle: previousTitle, nextTitle: nextTitle,
-                        loading: page.isLoading && orderedRows.isEmpty && !page.loaded)
+                        loading: page.isLoading && remoteFilter.isEmpty)
         table.backgroundView = nil
         showRemoteActionError()
         showRemoteReadErrorIfNeeded()

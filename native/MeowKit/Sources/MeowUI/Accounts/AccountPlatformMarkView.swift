@@ -50,24 +50,22 @@ public final class AccountPlatformMarkView: UIView, PageThemeable {
 
 /// Pure UIKit capsule input container keeping paired inputs (region + phone, code + send) together.
 @MainActor
-public final class AccountInputCapsuleView: UIView, PageThemeable {
-    public let stack = UIStackView()
+public final class AccountInputCapsuleView: UIStackView, PageThemeable {
+    public var stack: UIStackView { self }
 
     public init(theme: PageTheme = PageTheme()) {
         super.init(frame: .zero)
         layer.borderWidth = 1
         clipsToBounds = true
-        stack.axis = .horizontal
-        stack.alignment = .center
-        stack.spacing = 0
-        addSubview(stack)
-        stack.pinEdges(to: self)
+        axis = .horizontal
+        alignment = .center
+        spacing = 0
         heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         applyTheme(theme)
     }
 
     @available(*, unavailable)
-    public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    public required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func layoutSubviews() {
         super.layoutSubviews()
@@ -95,59 +93,58 @@ public final class AccountCardButton: UIButton, PageThemeable {
     public init(title: String, style: Style = .primary, theme: PageTheme = PageTheme(),
                 action: @escaping @MainActor () -> Void) {
         self.buttonStyle = style
+        self.currentTheme = theme
         super.init(frame: .zero)
-        setTitle(title, for: .normal)
-        titleLabel?.font = .preferredFont(forTextStyle: .body)
-        titleLabel?.adjustsFontForContentSizeCategory = true
-        titleLabel?.lineBreakMode = .byTruncatingTail
-        layer.cornerRadius = 14
-        layer.cornerCurve = .continuous
+        var config = UIButton.Configuration.filled()
+        config.title = title
+        config.titleLineBreakMode = .byTruncatingTail
+        config.cornerStyle = .fixed
+        config.background.cornerRadius = 14
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { [weak self] incoming in
+            var attrs = incoming
+            attrs.font = .preferredFont(forTextStyle: .body, compatibleWith: self?.traitCollection)
+            return attrs
+        }
+        configuration = config
+        configurationUpdateHandler = { [weak self] button in
+            self?.refreshConfiguration(button)
+        }
         heightAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
         addAction(UIAction { _ in action() }, for: .touchUpInside)
-        applyTheme(theme)
+        setNeedsUpdateConfiguration()
     }
 
     @available(*, unavailable)
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    public override var isEnabled: Bool {
-        didSet { updateColors() }
-    }
-
-    public override var isHighlighted: Bool {
-        didSet { alpha = isHighlighted ? 0.85 : 1.0 }
-    }
-
     public func applyTheme(_ theme: PageTheme) {
         currentTheme = theme
-        updateColors()
+        setNeedsUpdateConfiguration()
     }
 
-    private func updateColors() {
+    private func refreshConfiguration(_ button: UIButton) {
+        guard var config = button.configuration else { return }
         let settings = currentTheme.settings
+        let enabled = button.isEnabled
         switch buttonStyle {
         case .primary:
-            if isEnabled {
-                backgroundColor = UIColor(settings.accent)
-                setTitleColor(UIColor(settings.onAccent), for: .normal)
-                layer.borderWidth = 0
-            } else {
-                backgroundColor = UIColor(settings.input)
-                setTitleColor(UIColor(settings.muted), for: .normal)
-                layer.borderWidth = 1
-                layer.borderColor = UIColor(settings.inputBorder).cgColor
-            }
+            config.baseBackgroundColor = UIColor(enabled ? settings.accent : settings.input)
+            config.baseForegroundColor = UIColor(enabled ? settings.onAccent : settings.muted)
+            config.background.strokeWidth = enabled ? 0 : 1
+            config.background.strokeColor = UIColor(settings.inputBorder)
         case .destructive:
-            backgroundColor = UIColor(settings.danger).withAlphaComponent(isEnabled ? 0.14 : 0.08)
-            setTitleColor(UIColor(isEnabled ? settings.danger : settings.muted), for: .normal)
-            layer.borderWidth = 1
-            layer.borderColor = UIColor(settings.danger).withAlphaComponent(isEnabled ? 0.35 : 0.15).cgColor
+            config.baseBackgroundColor = UIColor(settings.danger).withAlphaComponent(enabled ? 0.14 : 0.08)
+            config.baseForegroundColor = UIColor(enabled ? settings.danger : settings.muted)
+            config.background.strokeWidth = 1
+            config.background.strokeColor = UIColor(settings.danger).withAlphaComponent(enabled ? 0.35 : 0.15)
         case .secondary:
-            backgroundColor = UIColor(settings.input)
-            setTitleColor(UIColor(isEnabled ? settings.ink : settings.muted), for: .normal)
-            layer.borderWidth = 1
-            layer.borderColor = UIColor(settings.inputBorder).cgColor
+            config.baseBackgroundColor = UIColor(settings.input)
+            config.baseForegroundColor = UIColor(enabled ? settings.ink : settings.muted)
+            config.background.strokeWidth = 1
+            config.background.strokeColor = UIColor(settings.inputBorder)
         }
+        button.alpha = button.isHighlighted ? 0.85 : 1.0
+        button.configuration = config
     }
 }
 #endif

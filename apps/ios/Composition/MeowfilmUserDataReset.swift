@@ -23,32 +23,27 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
     private let lock = NSLock()
     private var marker: URL { support.appendingPathComponent(markerName) }
 
+    private static let clearSharedNetworkState: @Sendable () throws -> Void = {
+        let cookies = HTTPCookieStorage.shared
+        for cookie in cookies.cookies ?? [] { cookies.deleteCookie(cookie) }
+        guard cookies.cookies?.isEmpty != false else { throw Failure.cookies }
+        URLCache.shared.removeAllCachedResponses()
+    }
+
     static func live() throws -> MeowfilmUserDataReset {
         let fm = FileManager.default
         guard let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
               support.isFileURL else { throw Failure.files }
-        return .init(support: support, temporary: fm.temporaryDirectory,
-            clearNetworkState: {
-                let cookies = HTTPCookieStorage.shared
-                for cookie in cookies.cookies ?? [] { cookies.deleteCookie(cookie) }
-                guard cookies.cookies?.isEmpty != false else { throw Failure.cookies }
-                URLCache.shared.removeAllCachedResponses()
-            })
+        return .init(support: support, temporary: fm.temporaryDirectory, clearNetworkState: clearSharedNetworkState)
     }
 
     static func isolated(dataRoot: URL) throws -> MeowfilmUserDataReset {
         let normalized = dataRoot.standardizedFileURL
-        let markerParent = normalized.deletingLastPathComponent()
         return .init(
-            support: markerParent,
+            support: normalized.deletingLastPathComponent(),
             markerName: ".\(normalized.lastPathComponent)-reset.pending",
             directories: [normalized],
-            clearNetworkState: {
-                let cookies = HTTPCookieStorage.shared
-                for cookie in cookies.cookies ?? [] { cookies.deleteCookie(cookie) }
-                guard cookies.cookies?.isEmpty != false else { throw Failure.cookies }
-                URLCache.shared.removeAllCachedResponses()
-            }
+            clearNetworkState: clearSharedNetworkState
         )
     }
 

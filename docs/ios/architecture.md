@@ -41,7 +41,7 @@ App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/`
 
 装配先完成现有脚本会话的本地配置、启动音乐借用者并绑定账号平台会话（`NativeMusicService` 与 `NativeMusicAccountService` 启动即就绪，仅在退出 `close()` 时关闭，不保留锁屏动态访问撤销网关），再通过同一 `prepareMusic` 路径等待账号 `prepareLocalAccounts()`、首页来源 `homeSourceSelection()` 和展示快照 `restoredHome()`。账号准备与私有请求共享本地初始化，读取失败不能当作游客。三项准备成功后才创建并发布可用的 `MusicViewModel`，Coordinator 据此安装首页；快照由原生服务保留供首页复用，无快照也正常结束启动，由首页沿用首载骨架。整库 `model.load()` 和自动同步在发布后执行，启动页不等待远端账号校验、首页 HTTP 或脚本启动中的网络工作。
 
-本地启动失败通过 `PageViewController.enqueueError` 浮窗报告，原启动页停止 loading，已经打开的设置栈保留，不用全页错误说明替代导航，也不新增清除数据入口。关闭会取消启动任务并关闭原生服务；本地等待随后无论成功或失败都不能再发布模型或启动错误。Coordinator 同时拒绝安装已关闭的模型，避免队列中的旧发布切回首页。
+本地启动失败通过 `PageViewController.enqueueError` 顶部非阻塞下滑提示条报告，原启动页停止 loading，已经打开的设置栈保留，不用全页错误说明替代导航，也不新增清除数据入口。关闭会取消启动任务并关闭原生服务；本地等待随后无论成功或失败都不能再发布模型或启动错误。Coordinator 同时拒绝安装已关闭的模型，避免队列中的旧发布切回首页。
 启动与全链路运行态通过正常构建产物的 `--debug` 模式核对（见[Debug 模式与调试接口](debug-mode.md)）。
 
 ## Swift Package
@@ -102,11 +102,11 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 
 ### 三层浮层与唯一反馈通道
 
-1. **`PageAlertPresenter`**：全仓唯一 `UIAlertController` 构造与呈现入口，封装确认、危险确认、输入、选项单与可重试错误弹窗，统一遵守呈现时机并 100% 自动注册 `DebugAlertActionRegistry`。
+1. **`PageAlertPresenter`**：全仓唯一 `UIAlertController` 构造与呈现入口，封装确认、危险确认、输入与选项单，统一遵守呈现时机并 100% 自动注册 `DebugAlertActionRegistry`。
 2. **`FloatingCardDialogController`**：全仓唯一纯 UIKit 居中卡片弹窗基类（统一覆盖 `ManagementDialog`、音乐账号登录／详情、平台排序与网盘登录等），提供统一遮罩、圆角边框、键盘避让、托管异步任务（`runDialogTask(key:)`／`cancelDialogTask(key:)`，随离场与 `deinit` 自动取消并过滤 `CancellationError`）、`dialogWillClose()` 生命周期钩子与 `DebugDialogControllable` 协议。
 3. **`FixedSheetTransition` / `VerticalPageTransition` / `PageViewController.presentPageSheet`**：业务 Sheet、队列、音源、FM、频道选择、全屏播放器、阅读器与受控 Web 的呈现入口。
 
-错误与操作提示统一由 `PageViewController` 独立的 `PageFeedbackQueue`（支持同内容去重、转场完成延迟呈现与持久错误源对齐 `syncErrorSource`／`clearErrorSource`）与 `MeowfilmCoordinator` 全局错误出口承接，页面异步任务统一通过 keyed／抛出式 `runPageTask(key:)` 取消并路由错误，各业务域不再自建重复错误弹窗状态机或影子去重字段。
+瞬时错误与操作提示统一由 `PageViewController` 的 `PageFeedbackQueue` 排队去重，并投递至 `MeowfilmRootContainerViewController` 常驻覆盖槽位 `PageNoticeBannerView`（顶部居中非阻塞下滑提示条，跟随 `PageTheme` 并自动收起消失，支持同内容去重、可选内联“重试”操作与持久错误源对齐 `syncErrorSource`／`clearErrorSource`），由 `MeowfilmCoordinator` 承接全局错误出口，页面异步任务统一通过 keyed／抛出式 `runPageTask(key:)` 取消并路由错误，各业务域不再自建重复错误状态机或影子去重字段。
 
 ### 图片／取色缓存、虚拟化列表、高频渲染与音频管线解耦边界
 
@@ -135,7 +135,7 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 - 页面跳转由路由显式调用，不通过业务状态标志触发。
 - 上层呈现通过视图层级阻挡下层触摸。
 - 资源活跃、页面可见及浮层呈现时机分别管理；待处理的错误在页面稳定出现或导航／呈现转场完成后处理，不因此重新加载业务。
-- `PageViewController.enqueueError` / `enqueueNotice` / `syncErrorSource` 作为页面反馈唯一队列入口（对当前展示中与队列中的同内容反馈统一去重，转场与浮层结算后自动消费；需要显式恢复的页面通过 `retry:` 在同一错误浮层内提供“重试”；持久状态错误通过 `syncErrorSource` 按源去重并随成功或重试自动复位）。页面根据实际呈现关系和呈现完成回执记录已接受的浮层身份，不只检查同步的 `presentingViewController`；`dismissPageModal` 以实际退出回执结算该次转场后调用业务动作，系统文件选择器等浮层正在自动退出时复用已有转场，不再次发起退出；已有转场被取消时保留浮层及 picker 身份，继续接收选择／取消，不执行业务动作；UIKit 已自动退出才触发的 action 仍可消费一次，已失效页面不再重试；影视设置的成功反馈在暂不可呈现时保留，待页面出现或原浮层退出后显示，不重新提交保存。
+- `PageViewController.enqueueError` / `enqueueNotice` / `syncErrorSource` 作为瞬时错误与状态提示唯一入口，以窗口顶部居中非阻塞下滑提示条呈现并自动收起消失（对当前展示中与队列中的同内容提示统一去重，不阻塞下层触摸或模态呈现；需要显式恢复的页面通过 `retry:` 在提示条右侧提供“重试”；持久状态错误通过 `syncErrorSource` 按源去重并随成功或重试自动复位）。页面根据实际呈现关系和呈现完成回执记录已接受的浮层身份，不只检查同步的 `presentingViewController`；`dismissPageModal` 以实际退出回执结算该次转场后调用业务动作，系统文件选择器等浮层正在自动退出时复用已有转场，不再次发起退出；已有转场被取消时保留浮层及 picker 身份，继续接收选择／取消，不执行业务动作；UIKit 已自动退出才触发的 action 仍可消费一次，已失效页面不再重试。
 
 ## 页面加载与刷新
 

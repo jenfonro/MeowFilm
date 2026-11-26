@@ -35,10 +35,10 @@ public extension SettingsTheme {
         field.tintColor = UIColor(accent)
         if let input = field as? SettingsTextField { input.applyInputTheme(self) }
         else {
-            field.backgroundColor = UIColor(input)
+            field.backgroundColor = UIColor(surface)
             field.layer.cornerRadius = min(field.bounds.width, field.bounds.height) / 2
-            field.layer.borderWidth = 1
-            field.layer.borderColor = UIColor(inputBorder).cgColor
+            field.layer.borderWidth = SettingsVisualMetrics.cardBorderWidth
+            field.layer.borderColor = UIColor(border).cgColor
         }
         if let placeholder = field.placeholder {
             field.attributedPlaceholder = NSAttributedString(string: placeholder,
@@ -49,13 +49,7 @@ public extension SettingsTheme {
     func apply(to field: UITextView) {
         field.textColor = UIColor(ink)
         field.tintColor = UIColor(accent)
-        if let input = field as? SettingsTextView { input.applyInputTheme(self) }
-        else {
-            field.backgroundColor = UIColor(input)
-            field.layer.cornerRadius = 0
-            field.layer.borderWidth = 1
-            field.layer.borderColor = UIColor(inputBorder).cgColor
-        }
+        (field as? SettingsTextView)?.applyInputTheme(self)
     }
 }
 #endif

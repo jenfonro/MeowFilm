@@ -11,10 +11,10 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     private static let protocolName = "runtime.http.v1"
     private static let neteaseTokenTimeout: TimeInterval = 60
     private static let catProbeTimeout: TimeInterval = 180
-    private let baseURL: URL
-    private let timeout: TimeInterval
+    let baseURL: URL
+    let timeout: TimeInterval
     private let state: RuntimeHTTPState
-    private let session: URLSession
+    let session: URLSession
     private let imageSession: URLSession?
     private let eventConfiguration: URLSessionConfiguration
     private let delegateQueue: OperationQueue?
@@ -69,9 +69,6 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
 
     public var isClosed: Bool { state.isClosed }
     public var endpointURL: URL { baseURL }
-    var debugBaseURL: URL { baseURL }
-    var debugSession: URLSession { session }
-    var debugDefaultTimeout: TimeInterval { timeout }
 
     /// Observes irreversible client revocation, not HTTP drain or executor exit.
     /// Cancelling a borrower only removes its wait; it never closes this client.
@@ -166,29 +163,23 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         let body: Data
         do { body = try RuntimeJSON.encode(parameters) }
         catch { throw RuntimeHTTPError.invalidRequest }
-        if module == .source, operation == "rules.process" {
-            let transport = try state.rulesClient { RuntimeHTTPClient(rulesFor: self) }
-            let value = try await transport.request(method: "POST", path: "/v1/source/rules.process",
-                                                    body: body, module: .source, onDispatch: onDispatch)
-            guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
-            guard !isClosed else { throw RuntimeHTTPError.closed }
-            return value
-        }
+        let isRulesProcess = module == .source && operation == "rules.process"
         let defaultTimeout = module == .netease ? max(self.timeout, Self.neteaseTokenTimeout)
             : module == .cat && operation == "probe" ? max(self.timeout, Self.catProbeTimeout)
             : self.timeout
-        let effectiveTimeout = timeout ?? defaultTimeout
+        let effectiveTimeout: TimeInterval? = isRulesProcess ? nil : (timeout ?? defaultTimeout)
         let preserveReceipt = module == .source && operation == "library.image"
-        if effectiveTimeout > self.timeout {
+        let path = "/v1/\(module.rawValue)/\(operation)"
+        if isRulesProcess || (effectiveTimeout ?? 0) > self.timeout {
             let transport = try state.rulesClient { RuntimeHTTPClient(rulesFor: self) }
-            let value = try await transport.request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
+            let value = try await transport.request(method: "POST", path: path,
                                                     body: body, module: module, timeout: effectiveTimeout,
                                                     preservingAcceptedReceipt: preserveReceipt, onDispatch: onDispatch)
             guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
             guard !isClosed else { throw RuntimeHTTPError.closed }
             return value
         }
-        return try await request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
+        return try await request(method: "POST", path: path,
                                  body: body, module: module,
                                  timeout: effectiveTimeout,
                                  preservingAcceptedReceipt: preserveReceipt,

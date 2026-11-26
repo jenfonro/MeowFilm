@@ -5,10 +5,8 @@ import MeowUI
 
 @MainActor
 final class FilmCatEditorController: SettingsListViewController, UIDocumentPickerDelegate {
-    override var usesPageHeader: Bool { !isFloating }
-    override var avoidsKeyboard: Bool { !isFloating }
     enum Mode {
-        case importSource(local: Bool), edit(FilmCatSource), updateLocal(FilmCatSource)
+        case importLocal, edit(FilmCatSource), updateLocal(FilmCatSource)
     }
     let service: FilmSourceService
     let mode: Mode
@@ -18,39 +16,21 @@ final class FilmCatEditorController: SettingsListViewController, UIDocumentPicke
     private var installationId: String?
     private var targets: [FilmCatSource] = []
     private var busy = false
-    var isBusy: Bool { busy }
-    private var saveVisibilityGeneration = UUID()
     var onSaved: (() -> Void)?
-    var onCancel: (() -> Void)?
-    var isFloating = false
 
     init(service: FilmSourceService, mode: Mode, themeProvider: any PageThemeProviding) {
         self.service = service; self.mode = mode
         super.init(themeProvider: themeProvider)
         switch mode {
-        case .importSource: pageTitle = "导入猫源"
+        case .importLocal: pageTitle = "导入猫源"
         case .edit(let cat): pageTitle = "编辑猫源"; name.text = cat.name; sourceURL.text = cat.sourceUrl
         case .updateLocal(let cat): pageTitle = "更新猫源"; name.text = cat.name
-        }
-    }
-
-    override func loadView() {
-        if isFloating {
-            let container = UIView()
-            container.backgroundColor = .clear
-            view = container
-        } else {
-            super.loadView()
         }
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         sourceURL.keyboardType = .URL
-        if isFloating {
-            table.directionalLayoutMargins = .zero
-            table.contentInsetAdjustmentBehavior = .never
-        }
         render()
     }
 
@@ -66,13 +46,12 @@ final class FilmCatEditorController: SettingsListViewController, UIDocumentPicke
 
     private var local: Bool {
         switch mode {
-        case .importSource(let local): return local
+        case .importLocal, .updateLocal: return true
         case .edit(let cat): return cat.sourceType == "local"
-        case .updateLocal: return true
         }
     }
 
-    private var importing: Bool { if case .importSource = mode { return true }; return false }
+    private var importing: Bool { if case .importLocal = mode { return true }; return false }
     private var isUpdatingLocal: Bool { if case .updateLocal = mode { return true }; return false }
 
     func render() {
@@ -164,7 +143,7 @@ final class FilmCatEditorController: SettingsListViewController, UIDocumentPicke
         }
     }
 
-    override func pageDidBecomeHidden() { saveVisibilityGeneration = UUID() }
+    override func pageDidBecomeHidden() { onSaved = nil }
 
     private func chooseTarget() {
         guard canPresentPageAlert else { return }
@@ -183,7 +162,7 @@ final class FilmCatEditorController: SettingsListViewController, UIDocumentPicke
 
     func save() {
         guard !busy else { return }
-        if local, importing || isUpdatingLocal, file == nil {
+        if importing || isUpdatingLocal, file == nil {
             enqueueError(FilmScriptFileSnapshot.FileError.scriptRequired.localizedDescription,
                          retry: { [weak self] in self?.chooseFile() })
             return
@@ -201,31 +180,22 @@ final class FilmCatEditorController: SettingsListViewController, UIDocumentPicke
         guard !busy else { return }
         view.endEditing(true); busy = true; render()
         let name = name.text ?? "", url = sourceURL.text ?? "", source = file?.source, target = installationId
-        let visibility = saveVisibilityGeneration
         Task { [weak self] in
             guard let self else { return }
-            defer {
-                if visibility != saveVisibilityGeneration { onSaved = nil }
-            }
             do {
                 switch mode {
-                case .importSource(let local):
+                case .importLocal:
+                    guard let source else { throw FilmScriptFileSnapshot.FileError.scriptRequired }
                     if let target {
-                        if local, let source {
-                            _ = try await service.editCat(target, name: name, sourceType: "local", source: source)
-                        } else {
-                            _ = try await service.editCat(target, name: name, sourceType: "network", sourceURL: url)
-                        }
-                    } else if local, let source {
-                        _ = try await service.importLocal(name: name, source: source)
+                        _ = try await service.editCat(target, name: name, sourceType: "local", source: source)
                     } else {
-                        _ = try await service.importNetwork(name: name, sourceURL: url)
+                        _ = try await service.importLocal(name: name, source: source)
                     }
                 case .edit(let cat): _ = try await service.editCat(cat.installationId, name: name, sourceURL: local ? nil : url)
                 case .updateLocal(let cat): _ = try await service.updateCat(cat.installationId, source: source)
                 }
                 busy = false; render()
-                if visibility == saveVisibilityGeneration, let onSaved { onSaved() }
+                if isPageActive, isPageVisible, let onSaved { onSaved() }
                 else { enqueueNotice(title: "已保存") }
             } catch {
                 busy = false; render()

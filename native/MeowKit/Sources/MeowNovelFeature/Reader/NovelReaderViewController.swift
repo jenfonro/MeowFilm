@@ -187,7 +187,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
             session.feature.error = nil
             enqueueError(error)
         }
-        guard let content = session.content else { position.text = session.loading ? "加载中" : ""; return }
+        guard let content = session.content else { position.text = ""; return }
         let chapterKey = session.book.installationId + "\n" + (session.anchor?.chapterUrl ?? "")
         let changed = renderedContent != content || renderedChapter != chapterKey
         let relayout = changed || renderedSettings != settings || renderedSize != scroll.bounds.size || override != nil

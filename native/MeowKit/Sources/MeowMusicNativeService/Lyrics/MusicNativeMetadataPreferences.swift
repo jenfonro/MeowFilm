@@ -145,6 +145,9 @@ extension NativeMusicService {
             let preferences = NativeMetadataPreferences(state.playback)
             guard let platform = MusicPublicBrowsePlatform(rawValue: row.platform),
                   preferences.enabled.contains(platform) else { return MusicModel.artworkURL(song.coverURL) }
+            if song.artworkSourceKey == row.sourceKey, song.coverURL == url.absoluteString {
+                return url
+            }
             song.artworkSourceKey = row.sourceKey
             song.coverURL = url.absoluteString
             try saveRepositorySong(song)

@@ -346,7 +346,7 @@ final class MeowfilmDebugNavigator {
                     themeProvider: coordinator.assembly.appearance
                 )
                 catVC.onSelectItem = { [weak coordinator] item in
-                    coordinator?.showFilm(item, kind: catModel.category == .movie ? .movie : .tv, entrySurface: "home")
+                    coordinator?.showFilm(item, kind: catModel.category == .movie ? .movie : .tv)
                 }
                 coordinator.navigation.pushViewController(catVC, animated: false)
             }
@@ -363,11 +363,11 @@ final class MeowfilmDebugNavigator {
             if let filmHome = main.contentViewController(for: .film) as? FilmHomeViewController,
                let found = filmHome.debugFindItem(id: id) {
                 let kind: FilmPlaybackKind = (found.category == .movie || found.item.kind == .movie) ? .movie : .tv
-                coordinator.showFilm(found.item, kind: kind, entrySurface: "home", animated: false)
+                coordinator.showFilm(found.item, kind: kind, animated: false)
             } else if let item = (coordinator.assembly.filmLibrary.favoriteItems + (coordinator.assembly.filmHistory?.items ?? []))
                 .first(where: { $0.id == id || $0.targetID == id || $0.title == id }) {
                 let kind: FilmPlaybackKind = item.kind == .movie ? .movie : .tv
-                coordinator.showFilm(item, kind: kind, entrySurface: "library", animated: false)
+                coordinator.showFilm(item, kind: kind, animated: false)
             } else {
                 throw DebugAPIError.notFound("Film item not found in loaded home or library: \(id)")
             }

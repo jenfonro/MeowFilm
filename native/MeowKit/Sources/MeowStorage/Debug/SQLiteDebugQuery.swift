@@ -34,59 +34,20 @@ extension SQLiteConnection {
         }
 
         let started = DispatchTime.now().uptimeNanoseconds
-        var statement: OpaquePointer?
-        var trailingSQL = ""
-        let rc: Int32 = trimmed.withCString { cSQL in
-            var tail: UnsafePointer<CChar>?
-            let prepRC = sqlite3_prepare_v2(handle, cSQL, -1, &statement, &tail)
-            if let tail {
-                trailingSQL = String(cString: tail).trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            return prepRC
-        }
-        guard rc == SQLITE_OK, let statement else {
-            if let statement { sqlite3_finalize(statement) }
+        let statement: OpaquePointer
+        do {
+            statement = try prepareUncached(trimmed, bindings)
+        } catch {
             let errMsg = String(cString: sqlite3_errmsg(handle))
             throw DebugAPIError.invalidArgument("SQLite prepare failed: \(errMsg)")
         }
         defer { sqlite3_finalize(statement) }
 
-        if !trailingSQL.isEmpty && trailingSQL != ";" {
-            throw DebugAPIError.invalidArgument("Multiple SQL statements are not allowed")
-        }
-
-        guard Int(sqlite3_bind_parameter_count(statement)) == bindings.count else {
-            throw DebugAPIError.invalidArgument("Parameter count mismatch")
-        }
-        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        for (idx, value) in bindings.enumerated() {
-            let pos = Int32(idx + 1)
-            let bindRC: Int32
-            switch value {
-            case .null: bindRC = sqlite3_bind_null(statement, pos)
-            case .integer(let v): bindRC = sqlite3_bind_int64(statement, pos, v)
-            case .real(let v):
-                guard v.isFinite else { throw DebugAPIError.invalidArgument("Non-finite real parameter") }
-                bindRC = sqlite3_bind_double(statement, pos, v)
-            case .text(let s):
-                bindRC = s.withCString { sqlite3_bind_text(statement, pos, $0, Int32(s.utf8.count), transient) }
-            case .blob(let d):
-                bindRC = d.isEmpty
-                    ? sqlite3_bind_zeroblob(statement, pos, 0)
-                    : d.withUnsafeBytes { sqlite3_bind_blob(statement, pos, $0.baseAddress, Int32(d.count), transient) }
-            }
-            guard bindRC == SQLITE_OK else {
-                throw DebugAPIError.invalidArgument("SQLite bind failed at parameter \(pos)")
-            }
-        }
-
         let colCount = Int(sqlite3_column_count(statement))
         let columns: [String] = (0..<colCount).map { i in
-            if let name = sqlite3_column_name(statement, Int32(i)) {
-                return String(cString: name)
-            }
-            return "col_\(i)"
+            sqlite3_column_name(statement, Int32(i)).map { String(cString: $0) } ?? "col_\(i)"
         }
+        let cursor = SQLiteCursor(statement, columnCount: Int32(colCount))
 
         var rows: [[String: DebugJSONValue]] = []
         var truncated = false
@@ -106,37 +67,13 @@ extension SQLiteConnection {
             var row: [String: DebugJSONValue] = [:]
             row.reserveCapacity(colCount)
             for i in 0..<colCount {
-                let c = Int32(i)
                 let colName = columns[i]
-                switch sqlite3_column_type(statement, c) {
-                case SQLITE_NULL:
-                    row[colName] = .null
-                case SQLITE_INTEGER:
-                    row[colName] = .integer(sqlite3_column_int64(statement, c))
-                case SQLITE_FLOAT:
-                    row[colName] = .optional(sqlite3_column_double(statement, c))
-                case SQLITE_TEXT:
-                    let count = Int(sqlite3_column_bytes(statement, c))
-                    if count == 0 {
-                        row[colName] = .string("")
-                    } else if let ptr = sqlite3_column_text(statement, c) {
-                        let data = Data(bytes: ptr, count: count)
-                        row[colName] = .string(String(decoding: data, as: UTF8.self))
-                    } else {
-                        row[colName] = .null
-                    }
-                case SQLITE_BLOB:
-                    let count = Int(sqlite3_column_bytes(statement, c))
-                    if count == 0 {
-                        row[colName] = .string("")
-                    } else if let ptr = sqlite3_column_blob(statement, c) {
-                        let data = Data(bytes: ptr, count: count)
-                        row[colName] = .string(data.base64EncodedString())
-                    } else {
-                        row[colName] = .null
-                    }
-                default:
-                    row[colName] = .null
+                switch (try? cursor.value(Int32(i))) ?? .null {
+                case .null: row[colName] = .null
+                case .integer(let v): row[colName] = .integer(v)
+                case .real(let v): row[colName] = .optional(v)
+                case .text(let s): row[colName] = .string(s)
+                case .blob(let d): row[colName] = .string(d.base64EncodedString())
                 }
             }
             rows.append(row)

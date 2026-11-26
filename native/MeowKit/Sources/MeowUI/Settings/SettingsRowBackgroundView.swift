@@ -20,23 +20,20 @@ import UIKit
 /// upper edge; only the group's outer perimeter is drawn, not another row rule.
 @MainActor
 public final class SettingsRowBackgroundView: UIView, PageThemeable {
-    private let fill = CAShapeLayer()
     private let outline = CAGradientLayer()
     private let outlineMask = CAShapeLayer()
-    private var first, last, showsSeparator: Bool
+    private var first, last: Bool
     private var selected, usesSettingsColors: Bool
-    private let separator = CALayer()
 
     public init(theme: PageTheme = PageTheme(), first: Bool = true, last: Bool = true, selected: Bool = false,
-                settings: Bool = true, showsSeparator: Bool = false) {
+                settings: Bool = true) {
         self.first = first; self.last = last
         self.selected = selected; usesSettingsColors = settings
-        self.showsSeparator = showsSeparator
         super.init(frame: .zero)
         isOpaque = false
         isUserInteractionEnabled = false
         accessibilityElementsHidden = true
-        layer.addSublayer(fill)
+        layer.cornerCurve = .continuous
         outline.locations = [0, 0.55, 1]
         outline.startPoint = CGPoint(x: 0.5, y: 0)
         outline.endPoint = CGPoint(x: 0.5, y: 1)
@@ -45,28 +42,16 @@ public final class SettingsRowBackgroundView: UIView, PageThemeable {
         outlineMask.lineWidth = SettingsVisualMetrics.cardBorderWidth
         outline.mask = outlineMask
         layer.addSublayer(outline)
-        separator.isHidden = !showsSeparator
-        layer.addSublayer(separator)
         applyTheme(theme)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// The settings table uses this to draw the divider inside the card rather
-    /// than relying on a full-width `UITableView` separator.
-    public var drawsSeparator: Bool { showsSeparator }
-
-    public func update(theme: PageTheme, first: Bool, last: Bool, selected: Bool? = nil,
-                       settings: Bool? = nil, showsSeparator: Bool) {
+    public func update(theme: PageTheme, first: Bool, last: Bool, selected: Bool? = nil, settings: Bool? = nil) {
         self.first = first; self.last = last
         if let selected { self.selected = selected }
         if let settings { self.usesSettingsColors = settings }
-        self.showsSeparator = showsSeparator
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        separator.isHidden = !showsSeparator
-        CATransaction.commit()
         applyTheme(theme)
     }
 
@@ -75,21 +60,17 @@ public final class SettingsRowBackgroundView: UIView, PageThemeable {
         let surface = usesSettingsColors
             ? (selected ? settings.selected : settings.surface) : theme.surface
         let border = usesSettingsColors ? settings.border : theme.border
-        // Fade only at the group's upper edge; subsequent segments continue
-        // that fade's terminal opacity instead of restarting it at every row.
-        let opacities: [CGFloat]
-        if usesSettingsColors {
-            opacities = first ? [0.55, 0.72, 1] : [1, 1, 1]
-        } else {
-            opacities = first ? [0.12, 0.24, 0.52] : [0.52, 0.52, 0.52]
-        }
+        let opacities: [CGFloat] = usesSettingsColors
+            ? (first ? [0.55, 0.72, 1] : [1, 1, 1])
+            : (first ? [0.12, 0.24, 0.52] : [0.52, 0.52, 0.52])
+        backgroundColor = UIColor(surface)
+        var masked: CACornerMask = []
+        if first { masked.formUnion([.layerMinXMinYCorner, .layerMaxXMinYCorner]) }
+        if last { masked.formUnion([.layerMinXMaxYCorner, .layerMaxXMaxYCorner]) }
+        layer.maskedCorners = masked
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        fill.fillColor = UIColor(surface).cgColor
-        outline.colors = opacities.map {
-            UIColor(border).withAlphaComponent($0).cgColor
-        }
-        separator.backgroundColor = UIColor(usesSettingsColors ? settings.separator : theme.border).cgColor
+        outline.colors = opacities.map { UIColor(border).withAlphaComponent($0).cgColor }
         CATransaction.commit()
         setNeedsLayout()
     }
@@ -97,48 +78,41 @@ public final class SettingsRowBackgroundView: UIView, PageThemeable {
     public override func layoutSubviews() {
         super.layoutSubviews()
         let radius = min(SettingsVisualMetrics.cardCornerRadius, min(bounds.width / 2, bounds.height / 2))
-        var corners: UIRectCorner = []
-        if first { corners.formUnion([.topLeft, .topRight]) }
-        if last { corners.formUnion([.bottomLeft, .bottomRight]) }
-        let path = UIBezierPath(roundedRect: bounds, byRoundingCorners: corners,
-                                cornerRadii: CGSize(width: radius, height: radius))
+        layer.cornerRadius = (first || last) ? radius : 0
         let halfBorder = SettingsVisualMetrics.cardBorderWidth / 2
         let edge = bounds.insetBy(dx: halfBorder, dy: halfBorder)
-        let strokeRadius = max(0, radius - halfBorder)
-        let stroke = UIBezierPath()
-        stroke.move(to: CGPoint(x: edge.minX, y: first ? edge.minY + strokeRadius : 0))
-        stroke.addLine(to: CGPoint(x: edge.minX, y: last ? edge.maxY - strokeRadius : bounds.height))
-        stroke.move(to: CGPoint(x: edge.maxX, y: first ? edge.minY + strokeRadius : 0))
-        stroke.addLine(to: CGPoint(x: edge.maxX, y: last ? edge.maxY - strokeRadius : bounds.height))
-        if first {
-            stroke.move(to: CGPoint(x: edge.minX, y: edge.minY + strokeRadius))
-            stroke.addArc(withCenter: CGPoint(x: edge.minX + strokeRadius, y: edge.minY + strokeRadius),
-                          radius: strokeRadius, startAngle: .pi, endAngle: .pi * 1.5, clockwise: true)
-            stroke.addLine(to: CGPoint(x: edge.maxX - strokeRadius, y: edge.minY))
-            stroke.addArc(withCenter: CGPoint(x: edge.maxX - strokeRadius, y: edge.minY + strokeRadius),
-                          radius: strokeRadius, startAngle: .pi * 1.5, endAngle: 0, clockwise: true)
-        }
-        if last {
-            stroke.move(to: CGPoint(x: edge.maxX, y: edge.maxY - strokeRadius))
-            stroke.addArc(withCenter: CGPoint(x: edge.maxX - strokeRadius, y: edge.maxY - strokeRadius),
-                          radius: strokeRadius, startAngle: 0, endAngle: .pi / 2, clockwise: true)
-            stroke.addLine(to: CGPoint(x: edge.minX + strokeRadius, y: edge.maxY))
-            stroke.addArc(withCenter: CGPoint(x: edge.minX + strokeRadius, y: edge.maxY - strokeRadius),
-                          radius: strokeRadius, startAngle: .pi / 2, endAngle: .pi, clockwise: true)
+        let r = max(0, radius - halfBorder)
+        let stroke: UIBezierPath
+        if first && last {
+            stroke = UIBezierPath(roundedRect: edge, cornerRadius: r)
+        } else {
+            stroke = UIBezierPath()
+            if first {
+                stroke.move(to: CGPoint(x: edge.minX, y: bounds.height))
+                stroke.addLine(to: CGPoint(x: edge.minX, y: edge.minY + r))
+                stroke.addArc(withCenter: CGPoint(x: edge.minX + r, y: edge.minY + r), radius: r, startAngle: .pi, endAngle: .pi * 1.5, clockwise: true)
+                stroke.addLine(to: CGPoint(x: edge.maxX - r, y: edge.minY))
+                stroke.addArc(withCenter: CGPoint(x: edge.maxX - r, y: edge.minY + r), radius: r, startAngle: .pi * 1.5, endAngle: 0, clockwise: true)
+                stroke.addLine(to: CGPoint(x: edge.maxX, y: bounds.height))
+            } else if last {
+                stroke.move(to: CGPoint(x: edge.maxX, y: 0))
+                stroke.addLine(to: CGPoint(x: edge.maxX, y: edge.maxY - r))
+                stroke.addArc(withCenter: CGPoint(x: edge.maxX - r, y: edge.maxY - r), radius: r, startAngle: 0, endAngle: .pi / 2, clockwise: true)
+                stroke.addLine(to: CGPoint(x: edge.minX + r, y: edge.maxY))
+                stroke.addArc(withCenter: CGPoint(x: edge.minX + r, y: edge.maxY - r), radius: r, startAngle: .pi / 2, endAngle: .pi, clockwise: true)
+                stroke.addLine(to: CGPoint(x: edge.minX, y: 0))
+            } else {
+                stroke.move(to: CGPoint(x: edge.minX, y: 0))
+                stroke.addLine(to: CGPoint(x: edge.minX, y: bounds.height))
+                stroke.move(to: CGPoint(x: edge.maxX, y: 0))
+                stroke.addLine(to: CGPoint(x: edge.maxX, y: bounds.height))
+            }
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        fill.frame = bounds
-        fill.path = path.cgPath
         outline.frame = bounds
         outlineMask.frame = outline.bounds
         outlineMask.path = stroke.cgPath
-        if showsSeparator {
-            let inset = SettingsVisualMetrics.rowHorizontalPadding
-            let height = SettingsVisualMetrics.separatorHeight
-            separator.frame = CGRect(x: inset, y: max(0, bounds.height - height),
-                                     width: max(0, bounds.width - inset * 2), height: height)
-        }
         CATransaction.commit()
     }
 }

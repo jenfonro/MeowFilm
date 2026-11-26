@@ -220,6 +220,11 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             scrubbing = sliderIdentity != nil; showControls()
         }, for: .touchDown)
         seek.addAction(UIAction { [weak self] _ in
+            guard let self, scrubbing else { return }
+            position.text = time(Double(seek.value))
+            showControls()
+        }, for: .valueChanged)
+        seek.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             scrubbing = false
             if sliderIdentity == model.controlIdentity, sliderIdentity != nil { model.seek(to: Double(seek.value)) }
@@ -399,7 +404,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             if seek.value != positionValue { seek.value = positionValue }
         }
         seek.isEnabled = playing && state.duration > 0
-        let positionText = time(panInteraction?.previewPosition ?? state.position)
+        let positionText = time(panInteraction?.previewPosition ?? (scrubbing ? Double(seek.value) : state.position))
         if position.text != positionText { position.text = positionText }
         let durationText = time(state.duration)
         if duration.text != durationText { duration.text = durationText }

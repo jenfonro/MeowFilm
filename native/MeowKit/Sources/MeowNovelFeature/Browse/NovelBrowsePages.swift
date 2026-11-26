@@ -98,7 +98,7 @@ public final class NovelHomeViewController: PosterHomeViewController {
         } else {
             nil
         }
-        let artwork = PosterCatalogArtwork.custom(
+        let artwork = PosterCatalogArtwork(
             id: coverKey.map { AnyHashable($0) },
             placeholderSymbol: "book.closed",
             cached: { [weak feature] in
@@ -131,7 +131,6 @@ public final class NovelHomeViewController: PosterHomeViewController {
             textBadge: textBadge,
             label: label,
             accessibilityIdentifier: "novel.poster.\(book.id)",
-            artworkIdentity: coverKey.map { AnyHashable($0) },
             artwork: artwork
         )
     }
@@ -144,6 +143,7 @@ public final class NovelHomeViewController: PosterHomeViewController {
                 id: section.id,
                 title: section.title,
                 hasMore: !section.options.isEmpty,
+                isLoading: section.state == .pending || section.state == .loading,
                 statusText: section.statusText,
                 items: section.books.map { Self.makePosterCard($0, feature: feature) }
             )
@@ -310,6 +310,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
     private let more = UIButton(type: .system), cancelButton = UIButton(type: .system), sources = UIButton(type: .system)
     private let emptyLabel = UILabel()
+    private let loadingIndicator = UIActivityIndicatorView(style: .medium)
     private var theme: PageTheme
     private var subscription: AnyCancellable?
     private var active = false
@@ -341,6 +342,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         more.addAction(UIAction { [weak self] _ in self?.active = true; self?.session.loadMore() }, for: .touchUpInside)
         cancelButton.addAction(UIAction { [weak self] _ in self?.cancel() }, for: .touchUpInside)
         emptyLabel.textAlignment = .center
+        loadingIndicator.hidesWhenStopped = true
         let footer = UIStackView(arrangedSubviews: [sources, cancelButton, more]); footer.distribution = .fillEqually
         let stack = UIStackView(arrangedSubviews: [table, footer]); stack.axis = .vertical
         view.addSubview(stack); stack.pinEdges(to: view)
@@ -379,6 +381,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         self.theme = theme
         guard isViewLoaded else { return }
         emptyLabel.textColor = UIColor(theme.muted)
+        loadingIndicator.color = UIColor(theme.muted)
         for button in [sources, cancelButton, more] { button.tintColor = UIColor(theme.ink) }
         for cell in table.visibleCells { (cell as? NovelBookCell)?.applyTheme(theme) }
     }
@@ -396,11 +399,20 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
                 return UIAction(title: item.source.name, subtitle: status) { [weak self] _ in self?.active = true; self?.session.loadMore() }
             })
         }
-        emptyLabel.text = session.loading ? "搜索中" :
-            session.states.isEmpty ? "没有可搜索书源" :
-            session.allSourcesFailed ? "搜索失败" :
-            session.allSourcesCancelled ? "搜索已取消" : "未找到书籍"
-        table.backgroundView = rows.isEmpty ? emptyLabel : nil
+        if rows.isEmpty, session.loading {
+            loadingIndicator.color = UIColor(theme.muted)
+            loadingIndicator.startAnimating()
+            table.backgroundView = loadingIndicator
+        } else if rows.isEmpty {
+            loadingIndicator.stopAnimating()
+            emptyLabel.text = session.states.isEmpty ? "没有可搜索书源" :
+                session.allSourcesFailed ? "搜索失败" :
+                session.allSourcesCancelled ? "搜索已取消" : "未找到书籍"
+            table.backgroundView = emptyLabel
+        } else {
+            loadingIndicator.stopAnimating()
+            table.backgroundView = nil
+        }
         if let error = session.error, presentError(error) { session.error = nil }
     }
     private func presentError(_ error: String) -> Bool {

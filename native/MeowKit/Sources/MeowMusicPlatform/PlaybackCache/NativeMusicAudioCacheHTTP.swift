@@ -3,9 +3,8 @@ import Foundation
 struct NativeMusicAudioCacheHTTPRequest: Sendable {
     let url: URL
     let headers: [String: String]
-    let streaming: Bool
-    init(url: URL, headers: [String: String] = [:], streaming: Bool = false) {
-        self.url = url; self.headers = headers; self.streaming = streaming
+    init(url: URL, headers: [String: String] = [:]) {
+        self.url = url; self.headers = headers
     }
 }
 
@@ -70,12 +69,12 @@ enum NativeMusicAudioCacheHTTPPolicy {
     }
 
     static func redirect(_ response: HTTPURLResponse, proposed: URLRequest,
-                         count: Int, headers: [String: String] = [:], streaming: Bool = false) throws -> URLRequest {
+                         count: Int, headers: [String: String] = [:]) throws -> URLRequest {
         guard (1...maxRedirects).contains(count), [301, 302, 303, 307, 308].contains(response.statusCode),
               let destination = proposed.url, permits(destination) else {
             throw NativeMusicAudioCacheFailure.miss
         }
-        return try request(.init(url: destination, headers: headers, streaming: streaming))
+        return try request(.init(url: destination, headers: headers))
     }
 
     static func configuration() -> URLSessionConfiguration {
@@ -88,7 +87,7 @@ enum NativeMusicAudioCacheHTTPPolicy {
         return value
     }
 
-    static func length(_ response: NativeMusicAudioCacheHTTPResponse, streaming: Bool) throws -> Int64? {
+    static func length(_ response: NativeMusicAudioCacheHTTPResponse) throws -> Int64? {
         guard [200, 206].contains(response.status), permits(response.url) else {
             throw NativeMusicAudioCacheFailure.miss
         }
@@ -107,10 +106,7 @@ enum NativeMusicAudioCacheHTTPPolicy {
             throw NativeMusicAudioCacheFailure.miss
         }
         if response.status == 200 {
-            guard let raw = headers["content-length"] else {
-                if streaming { return nil }
-                throw NativeMusicAudioCacheFailure.miss
-            }
+            guard let raw = headers["content-length"] else { return nil }
             guard let count = positiveLength(raw) else { throw NativeMusicAudioCacheFailure.miss }
             return count
         }
@@ -239,8 +235,7 @@ private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataD
         let allowed = !finished && !receivedResponse && count <= NativeMusicAudioCacheHTTPPolicy.maxRedirects
         lock.unlock()
         guard allowed, let redirected = try? NativeMusicAudioCacheHTTPPolicy.redirect(
-            response, proposed: request, count: count,
-            headers: self.request.headers, streaming: self.request.streaming)
+            response, proposed: request, count: count, headers: self.request.headers)
         else { completionHandler(nil); cancel(); return }
         completionHandler(redirected)
     }

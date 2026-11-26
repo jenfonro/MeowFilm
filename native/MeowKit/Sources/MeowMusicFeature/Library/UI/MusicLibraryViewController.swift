@@ -21,6 +21,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     private var projection = IndexedDiffableProjection<Int, Data, MusicCollection>()
     private var dataSource: UICollectionViewDiffableDataSource<Int, Data>!
     private let emptyLabel = UILabel()
+    private let loadingIndicator = UIActivityIndicatorView(style: .medium)
     private var activated = false
     private var request = UUID()
     var loading = false
@@ -75,6 +76,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         emptyLabel.textAlignment = .center
+        loadingIndicator.hidesWhenStopped = true
         observe(model.libraryChanges, whenVisible: true) { [weak self] in self?.render() }
         observe(model.playbackChanges, whenVisible: true) { [weak self] in self?.renderHeartbeat() }
         observeDistinct(appearance.$preferences.map(\.playlistView).dropFirst().eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) {
@@ -110,6 +112,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         super.applyTheme()
         if isViewLoaded {
             emptyLabel.textColor = UIColor(theme.muted)
+            loadingIndicator.color = UIColor(theme.muted)
             collection.refreshControl?.tintColor = UIColor(theme.accent)
             renderHeartbeat()
             for cell in collection.visibleCells { (cell as? MusicLibraryCell)?.applyTheme(theme) }
@@ -321,13 +324,19 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
 
     private func renderState() {
         guard isViewLoaded else { return }
-        let text = projection.items.isEmpty ? loading || model.isLoading ? "加载中" :
-            model.hasLoadedLibrary ? "暂无歌单" : nil : nil
-        if let text {
-            emptyLabel.text = text
+        if projection.items.isEmpty, loading || model.isLoading {
+            loadingIndicator.color = UIColor(theme.muted)
+            loadingIndicator.startAnimating()
+            collection.backgroundView = loadingIndicator
+        } else if projection.items.isEmpty, model.hasLoadedLibrary {
+            loadingIndicator.stopAnimating()
+            emptyLabel.text = "暂无歌单"
             emptyLabel.textColor = UIColor(theme.muted)
             collection.backgroundView = emptyLabel
-        } else { collection.backgroundView = nil }
+        } else {
+            loadingIndicator.stopAnimating()
+            collection.backgroundView = nil
+        }
         let own = request
         syncErrorSource("library", message: loadError, retry: { [weak self] in
             guard let self, self.request == own else { return }

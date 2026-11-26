@@ -25,25 +25,24 @@ public final class PageHeaderButton: UIButton {
 
     public init(image: UIImage, accessibilityLabel: String, action: (@MainActor () -> Void)? = nil) {
         super.init(frame: .zero)
-        setImage(image.withRenderingMode(.alwaysTemplate), for: .normal)
-        self.accessibilityLabel = accessibilityLabel
-        tintAdjustmentMode = .normal
-        adjustsImageWhenHighlighted = false
-        setContentHuggingPriority(.required, for: .horizontal)
-        setContentCompressionResistancePriority(.required, for: .horizontal)
+        configureChrome(image: image, accessibilityLabel: accessibilityLabel)
         if let action { addAction(UIAction { _ in action() }, for: .touchUpInside) }
     }
 
     public init(image: UIImage, accessibilityLabel: String, menu: UIMenu?) {
         super.init(frame: .zero)
+        configureChrome(image: image, accessibilityLabel: accessibilityLabel)
+        self.menu = menu
+        showsMenuAsPrimaryAction = true
+    }
+
+    private func configureChrome(image: UIImage, accessibilityLabel: String) {
         setImage(image.withRenderingMode(.alwaysTemplate), for: .normal)
         self.accessibilityLabel = accessibilityLabel
         tintAdjustmentMode = .normal
         adjustsImageWhenHighlighted = false
         setContentHuggingPriority(.required, for: .horizontal)
         setContentCompressionResistancePriority(.required, for: .horizontal)
-        self.menu = menu
-        showsMenuAsPrimaryAction = true
     }
 
     @available(*, unavailable)
@@ -115,9 +114,7 @@ public final class PageHeaderView: UIView {
         set { titleLabel.font = newValue }
     }
     public var hasExplicitLeading: Bool { leading != nil }
-    public var trailingCount: Int { trailing.count }
-    /// Tests and page chrome use the same row geometry without reaching into
-    /// the internal stacks.
+    /// Page chrome uses the same row geometry without reaching into internal stacks.
     public var contentFrame: CGRect {
         row.convert(row.bounds, to: self)
     }

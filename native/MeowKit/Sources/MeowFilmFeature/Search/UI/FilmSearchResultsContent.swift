@@ -4,64 +4,21 @@ import Combine
 import MeowDebug
 import MeowUI
 
-/// The collection's displayed fields and exact selection references, not another
-/// search snapshot or a native owner of aggregation and metadata.
-struct FilmSearchResultsPresentation {
-    struct Identifier: Hashable, Sendable {
-        let displayKey: Data
-    }
-    struct Content: Equatable {
-        let item: FilmItem
-        let textBadge: String
-        let label: String
-
-        static func == (lhs: Self, rhs: Self) -> Bool {
-            lhs.item.identity == rhs.item.identity && lhs.item.title == rhs.item.title &&
-                lhs.item.posterURL == rhs.item.posterURL && lhs.textBadge == rhs.textBadge && lhs.label == rhs.label
-        }
-    }
-    struct Card {
-        let selection: FilmSearchCard
-        let content: Content
-    }
-    struct Changes {
-        let identifiersChanged: Bool
-        let reconfigure: [Identifier]
-        var isEmpty: Bool { !identifiersChanged && reconfigure.isEmpty }
-    }
-    private(set) var identifiers: [Identifier] = []
-    private(set) var cards: [Identifier: Card] = [:]
-    // Share the current input array so state-only snapshots need no display mapping.
-    private var inputCards: [FilmSearchCard] = []
-
-    mutating func update(_ visible: [FilmSearchCard],
-                         imageURL: (String) -> URL?) -> Changes {
-        if inputCards == visible {
-            return Changes(identifiersChanged: false, reconfigure: [])
-        }
-        var nextIDs: [Identifier] = [], nextCards: [Identifier: Card] = [:], changed: [Identifier] = []
-        nextIDs.reserveCapacity(visible.count); nextCards.reserveCapacity(visible.count)
-        for card in visible {
-            let id = Identifier(displayKey: Data(card.id.utf8))
-            guard nextCards[id] == nil else { continue }
-            let previous = cards[id]
-            let content: Content
-            if let previous, previous.selection == card { content = previous.content }
-            else { content = Content(item: card.filmItem(imageURL: imageURL), textBadge: card.textBadge, label: card.label) }
-            if let previous, previous.content != content { changed.append(id) }
-            nextIDs.append(id)
-            nextCards[id] = Card(selection: card, content: content)
-        }
-        let changes = Changes(identifiersChanged: identifiers != nextIDs, reconfigure: changed)
-        identifiers = nextIDs; cards = nextCards
-        inputCards = visible
-        return changes
-    }
-}
-
-/// Content for the existing search pager. It has no header or navigation shell.
 @MainActor
 public final class FilmSearchResultsContent: UIViewController, SearchResultContent, UICollectionViewDelegate {
+    struct CardEntry {
+        let id: Data
+        let selection: FilmSearchCard
+        let item: FilmItem
+        var textBadge: String { selection.textBadge }
+        var label: String { selection.label }
+
+        func displayChanged(from old: Self) -> Bool {
+            item.identity != old.item.identity || item.title != old.item.title ||
+                item.posterURL != old.item.posterURL || textBadge != old.textBadge || label != old.label
+        }
+    }
+
     public var controller: UIViewController { self }
     public var onSelect: ((FilmSearchContext) -> Void)?
     public private(set) var session: FilmSearchSession?
@@ -75,9 +32,10 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     private let activity = UIActivityIndicatorView(style: .medium)
     private let empty = UILabel()
     private var raw = false
-    var presentation = FilmSearchResultsPresentation()
+    private(set) var projection = IndexedDiffableProjection<Int, Data, CardEntry>()
+    private(set) var lastInputCards: [FilmSearchCard] = []
     private var offsets: [Bool: CGPoint] = [:]
-    private var dataSource: UICollectionViewDiffableDataSource<Int, FilmSearchResultsPresentation.Identifier>!
+    private var dataSource: UICollectionViewDiffableDataSource<Int, Data>!
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())
 
     public init(service: FilmSearchService, images: ArtworkImages, theme: PageTheme) {
@@ -91,8 +49,8 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         super.viewDidLoad()
         view.backgroundColor = .clear
         view.accessibilityIdentifier = "film.search.results"
-        rawSwitch.control.accessibilityIdentifier = "film.search.mode"
-        rawSwitch.control.accessibilityLabel = "原始列表"
+        rawSwitch.accessibilityIdentifier = "film.search.mode"
+        rawSwitch.accessibilityLabel = "原始列表"
         rawSwitch.changed = { [weak self] isOn in
             guard let self else { return }
             self.offsets[self.raw] = self.collection.contentOffset
@@ -111,18 +69,18 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         collection.accessibilityIdentifier = "film.search.grid"
         collection.register(PosterCatalogCell.self, forCellWithReuseIdentifier: PosterCatalogCell.reuseIdentifier)
         dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { [weak self] view, path, key in
-            guard let self, let content = self.presentation.cards[key]?.content else { return nil }
+            guard let self, let entry = self.projection[key] else { return nil }
             let cell = view.dequeueReusableCell(withReuseIdentifier: PosterCatalogCell.reuseIdentifier, for: path)
             let card = FilmHomeViewController.makePosterCard(
-                content.item,
+                entry.item,
                 images: self.images,
-                textBadge: content.textBadge,
-                label: content.label
+                textBadge: entry.textBadge,
+                label: entry.label
             )
             (cell as? PosterCatalogCell)?.configure(card: card, theme: self.theme)
             return cell
         }
-        var initialBuilder = DiffableSnapshotBuilder<Int, FilmSearchResultsPresentation.Identifier>()
+        var initialBuilder = DiffableSnapshotBuilder<Int, Data>()
         initialBuilder.appendSection(0)
         dataSource.apply(initialBuilder.build(), animatingDifferences: false)
         empty.font = .systemFont(ofSize: 15)
@@ -235,17 +193,26 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         guard isViewLoaded, dataSource != nil, let session else { return }
         let state = session.snapshot
         let visible = raw ? state.rawCards : state.cards
-        let changes = presentation.update(visible, imageURL: session.imageURL)
-        if !changes.isEmpty {
-            var builder = DiffableSnapshotBuilder<Int, FilmSearchResultsPresentation.Identifier>()
-            builder.appendSection(0, items: presentation.identifiers)
-            let snapshot = builder.build(reconfiguring: changes.reconfigure)
-            let mode = raw
-            dataSource.apply(snapshot, animatingDifferences: false) { [weak self, weak session] in
-                guard let self, let session, self.session === session, self.raw == mode else { return }
-                self.restoreOffset(restoringOffset)
+        if lastInputCards != visible {
+            lastInputCards = visible
+            let entries = visible.map { card -> CardEntry in
+                let key = Data(card.id.utf8)
+                let item = projection[key].flatMap { $0.selection == card ? $0.item : nil } ?? card.filmItem(imageURL: session.imageURL)
+                return CardEntry(id: key, selection: card, item: item)
             }
-        } else { restoreOffset(restoringOffset) }
+            let update = projection.update(section: 0, items: entries, id: \.id) { $1.displayChanged(from: $0) }
+            if update.structureChanged || !update.changedItemIDs.isEmpty {
+                let mode = raw
+                dataSource.apply(update.snapshot, animatingDifferences: false) { [weak self, weak session] in
+                    guard let self, let session, self.session === session, self.raw == mode else { return }
+                    self.restoreOffset(restoringOffset)
+                }
+            } else {
+                restoreOffset(restoringOffset)
+            }
+        } else {
+            restoreOffset(restoringOffset)
+        }
         renderStatus()
     }
 
@@ -336,7 +303,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     }
 
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        guard let id = dataSource.itemIdentifier(for: indexPath), let card = presentation.cards[id]?.selection,
+        guard let id = dataSource.itemIdentifier(for: indexPath), let card = projection[id]?.selection,
               let session else { return }
         collectionView.deselectItem(at: indexPath, animated: false)
         onSelect?(session.context(for: card))

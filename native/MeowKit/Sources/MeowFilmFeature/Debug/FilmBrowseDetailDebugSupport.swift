@@ -720,13 +720,13 @@ extension FilmSearchResultsContent: DebugPageInspectable, DebugPageActionable {
     }
 
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        let rows = presentation.identifiers.prefix(maxItems).enumerated().compactMap { idx, id -> DebugContentRow? in
-            guard let card = presentation.cards[id] else { return nil }
+        let rows = lastInputCards.prefix(maxItems).enumerated().compactMap { idx, selection -> DebugContentRow? in
+            guard let card = projection[Data(selection.id.utf8)] else { return nil }
             return DebugContentRow(
                 index: idx,
                 id: card.selection.id,
-                title: card.content.item.title,
-                subtitle: card.content.label.isEmpty ? nil : card.content.label,
+                title: card.item.title,
+                subtitle: card.label.isEmpty ? nil : card.label,
                 actions: ["open"]
             )
         }
@@ -745,12 +745,12 @@ extension FilmSearchResultsContent: DebugPageInspectable, DebugPageActionable {
         case "list.item.invoke":
             guard let session else { throw DebugAPIError.invalidState("No active film search session") }
             let idx = request.params["index"]?.intValue ?? 0
-            guard presentation.identifiers.indices.contains(idx),
-                  let card = presentation.cards[presentation.identifiers[idx]] else {
+            guard lastInputCards.indices.contains(idx) else {
                 throw DebugAPIError.invalidArgument("Film search index \(idx) out of range")
             }
-            onSelect?(session.context(for: card.selection))
-            return .object(["openedFilmId": .string(card.selection.id)])
+            let selection = lastInputCards[idx]
+            onSelect?(session.context(for: selection))
+            return .object(["openedFilmId": .string(selection.id)])
         case "list.load_more":
             session?.loadMore()
             return .object(["triggered": .bool(true)])

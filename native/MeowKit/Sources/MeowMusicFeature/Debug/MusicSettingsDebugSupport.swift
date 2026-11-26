@@ -205,6 +205,7 @@ extension MusicSourceManagementViewController: DebugPageInspectable {
             kind: "settings",
             loading: state.savingOfficial || state.importing,
             error: state.error,
+            rows: debugManagementRows(maxItems: maxItems),
             settings: .object([
                 "domain": .string("music"),
                 "section": .string("sources"),

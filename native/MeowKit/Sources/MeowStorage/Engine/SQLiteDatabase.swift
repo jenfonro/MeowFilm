@@ -201,33 +201,43 @@ public final class SQLiteConnection {
         head = node
     }
 
+    func prepareUncached(_ sql: String, _ bindings: [SQLiteValue]) throws -> OpaquePointer {
+        guard !sql.utf8.contains(0), bindings.allSatisfy({ $0.byteCount <= Int(Int32.max) }) else {
+            throw SQLiteStorageError.invalidValue
+        }
+        var prepared: OpaquePointer?
+        var trailing = ""
+        let rc: Int32 = sql.withCString { cSQL in
+            var remainder: UnsafePointer<CChar>?
+            let code = sqlite3_prepare_v2(handle, cSQL, -1, &prepared, &remainder)
+            if let remainder { trailing = String(cString: remainder).trimmingCharacters(in: .whitespacesAndNewlines) }
+            return code
+        }
+        guard rc == SQLITE_OK, let prepared else {
+            if let prepared { sqlite3_finalize(prepared) }
+            throw Self.failure(sqlite3_extended_errcode(handle))
+        }
+        guard trailing.isEmpty || trailing == ";" else {
+            sqlite3_finalize(prepared)
+            throw SQLiteStorageError.invalidValue
+        }
+        try bind(prepared, bindings)
+        return prepared
+    }
+
     private func prepare(_ sql: String, _ bindings: [SQLiteValue]) throws -> OpaquePointer {
         guard !sql.utf8.contains(0), bindings.allSatisfy({ $0.byteCount <= Int(Int32.max) }) else {
             throw SQLiteStorageError.invalidValue
         }
-        let statement: OpaquePointer
-        if let node = statementMap.removeValue(forKey: sql) {
-            unlink(node)
-            statement = node.stmt
-        } else {
-            var prepared: OpaquePointer?
-            var trailing = ""
-            let rc: Int32 = sql.withCString { cSQL in
-                var remainder: UnsafePointer<CChar>?
-                let code = sqlite3_prepare_v2(handle, cSQL, -1, &prepared, &remainder)
-                if let remainder { trailing = String(cString: remainder).trimmingCharacters(in: .whitespacesAndNewlines) }
-                return code
-            }
-            guard rc == SQLITE_OK, let prepared else {
-                if let prepared { sqlite3_finalize(prepared) }
-                throw Self.failure(sqlite3_extended_errcode(handle))
-            }
-            guard trailing.isEmpty || trailing == ";" else {
-                sqlite3_finalize(prepared)
-                throw SQLiteStorageError.invalidValue
-            }
-            statement = prepared
+        guard let node = statementMap.removeValue(forKey: sql) else {
+            return try prepareUncached(sql, bindings)
         }
+        unlink(node)
+        try bind(node.stmt, bindings)
+        return node.stmt
+    }
+
+    private func bind(_ statement: OpaquePointer, _ bindings: [SQLiteValue]) throws {
         guard Int(sqlite3_bind_parameter_count(statement)) == bindings.count else {
             sqlite3_finalize(statement); throw SQLiteStorageError.invalidValue
         }
@@ -251,7 +261,6 @@ public final class SQLiteConnection {
                 sqlite3_finalize(statement); throw Self.failure(result)
             }
         }
-        return statement
     }
 
     private static func shouldRetainStatement(after error: Error?) -> Bool {
@@ -677,7 +686,13 @@ public final class SQLiteDatabase: @unchecked Sendable {
     }
 
     public func read<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
-        try await performRead(action)
+        try Task.checkCancellation()
+        try requireOpen()
+        return try await withCheckedThrowingContinuation { continuation in
+            readQueue.async {
+                continuation.resume(with: Result { try self.borrowRead(action) })
+            }
+        }
     }
 
     public func snapshot<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
@@ -698,20 +713,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
     }
 
     public func write<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
-        try await performWrite(action)
-    }
-
-    private func performRead<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
-        try Task.checkCancellation()
-        try requireOpen()
-        return try await withCheckedThrowingContinuation { continuation in
-            readQueue.async {
-                continuation.resume(with: Result { try self.borrowRead(action) })
-            }
-        }
-    }
-
-    private func performWrite<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try Task.checkCancellation()
         try requireOpen()
         return try await withCheckedThrowingContinuation { continuation in

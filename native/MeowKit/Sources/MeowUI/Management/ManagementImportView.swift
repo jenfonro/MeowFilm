@@ -47,7 +47,7 @@ public final class ManagementImportView: UIView, UITableViewDelegate, PageThemea
         header.addArrangedSubview(allButton)
         header.addArrangedSubview(countLabel)
 
-        table.register(ManagementImportCell.self, forCellReuseIdentifier: ManagementImportCell.reuseIdentifier)
+        table.register(UITableViewCell.self, forCellReuseIdentifier: Self.cellReuseIdentifier)
         table.delegate = self
         table.backgroundColor = .clear
         table.separatorInset = .zero
@@ -56,19 +56,8 @@ public final class ManagementImportView: UIView, UITableViewDelegate, PageThemea
         table.heightAnchor.constraint(equalToConstant: min(320, max(120, CGFloat(items.count) * 58))).isActive = true
 
         dataSource = UITableViewDiffableDataSource<Int, Int>(tableView: table) { [weak self] tableView, indexPath, index in
-            guard let self,
-                  let cell = tableView.dequeueReusableCell(
-                      withIdentifier: ManagementImportCell.reuseIdentifier, for: indexPath
-                  ) as? ManagementImportCell else {
-                return UITableViewCell()
-            }
-            cell.configure(
-                item: self.items[index],
-                isSelected: self.selected.contains(index),
-                theme: self.currentTheme
-            ) { [weak self] in
-                self?.toggle(index)
-            }
+            let cell = tableView.dequeueReusableCell(withIdentifier: Self.cellReuseIdentifier, for: indexPath)
+            self?.configureCell(cell, at: index)
             return cell
         }
         dataSource.defaultRowAnimation = .none
@@ -136,19 +125,45 @@ public final class ManagementImportView: UIView, UITableViewDelegate, PageThemea
         reconfigureVisibleRows()
     }
 
+    private static let cellReuseIdentifier = "meow.management.importCell"
+
     private func reconfigureVisibleRows() {
         for indexPath in table.indexPathsForVisibleRows ?? [] {
             guard indexPath.row < items.count,
-                  let cell = table.cellForRow(at: indexPath) as? ManagementImportCell else { continue }
-            let index = indexPath.row
-            cell.configure(
-                item: items[index],
-                isSelected: selected.contains(index),
-                theme: currentTheme
-            ) { [weak self] in
-                self?.toggle(index)
-            }
+                  let cell = table.cellForRow(at: indexPath) else { continue }
+            configureCell(cell, at: indexPath.row)
         }
+    }
+
+    private func configureCell(_ cell: UITableViewCell, at index: Int) {
+        let item = items[index]
+        let isSelected = selected.contains(index)
+        let settings = currentTheme.settings
+        cell.backgroundColor = .clear
+        cell.selectionStyle = .none
+        var content = UIListContentConfiguration.subtitleCell()
+        content.text = item.title
+        content.textProperties.font = UIFontMetrics(forTextStyle: .subheadline)
+            .scaledFont(for: .systemFont(ofSize: 14, weight: .regular), compatibleWith: traitCollection)
+        content.textProperties.color = UIColor(settings.ink)
+        content.secondaryText = item.detail.isEmpty ? nil : item.detail
+        content.secondaryTextProperties.font = .preferredFont(forTextStyle: .caption1, compatibleWith: traitCollection)
+        content.secondaryTextProperties.color = UIColor(settings.muted)
+        content.secondaryTextProperties.numberOfLines = 0
+        content.image = UIImage(
+            systemName: isSelected ? "checkmark.circle.fill" : "circle",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .regular)
+        )?.withTintColor(UIColor(isSelected ? settings.accent : settings.muted), renderingMode: .alwaysOriginal)
+        content.imageToTextPadding = 10
+        content.directionalLayoutMargins = .init(top: 7, leading: 0, bottom: 7, trailing: 8)
+        cell.contentConfiguration = content
+        cell.accessibilityValue = isSelected ? "已选择" : "未选择"
+        let status: SettingsStatusBadge.Status = (item.status == "已存在" || item.status == "已有") ? .warning : .success
+        let badge = (cell.accessoryView as? SettingsStatusBadge)
+            ?? SettingsStatusBadge(status: status, text: item.status, theme: currentTheme)
+        badge.update(status: status, text: item.status, theme: currentTheme)
+        badge.sizeToFit()
+        cell.accessoryView = badge
     }
 
     private func toggle(_ index: Int) {
@@ -162,102 +177,6 @@ public final class ManagementImportView: UIView, UITableViewDelegate, PageThemea
         tableView.deselectRow(at: indexPath, animated: false)
         guard let index = dataSource.itemIdentifier(for: indexPath) else { return }
         toggle(index)
-    }
-}
-
-@MainActor
-private final class ManagementImportCell: UITableViewCell {
-    static let reuseIdentifier = "meow.management.importCell"
-
-    private let checkButton = UIButton(type: .custom)
-    private let titleLabel = UILabel()
-    private let detailLabel = UILabel()
-    private let badge = SettingsStatusBadge(status: .success, text: "", theme: PageTheme())
-    private let textStack = UIStackView()
-    private var onToggle: (() -> Void)?
-
-    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
-        super.init(style: style, reuseIdentifier: reuseIdentifier)
-        backgroundColor = .clear
-        selectionStyle = .none
-
-        checkButton.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            checkButton.widthAnchor.constraint(equalToConstant: 44),
-            checkButton.heightAnchor.constraint(equalToConstant: 44),
-        ])
-        checkButton.addAction(UIAction { [weak self] _ in self?.onToggle?() }, for: .touchUpInside)
-
-        for label in [titleLabel, detailLabel] {
-            label.adjustsFontForContentSizeCategory = true
-            label.numberOfLines = 0
-            label.lineBreakMode = .byWordWrapping
-            label.setContentCompressionResistancePriority(.required, for: .vertical)
-        }
-        let labels = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
-        labels.axis = .vertical
-        labels.spacing = 4
-        labels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        badge.setContentHuggingPriority(.required, for: .horizontal)
-        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        textStack.spacing = 10
-        textStack.alignment = .center
-        textStack.addArrangedSubview(labels)
-        textStack.addArrangedSubview(badge)
-
-        let row = UIStackView(arrangedSubviews: [checkButton, textStack])
-        row.alignment = .center
-        row.spacing = 10
-        row.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(row)
-        NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 7),
-            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -7),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        onToggle = nil
-    }
-
-    func configure(item: ManagementImportView.Item, isSelected: Bool, theme: PageTheme,
-                   onToggle: @escaping () -> Void) {
-        self.onToggle = onToggle
-        let settings = theme.settings
-        let symbol = isSelected ? "checkmark.circle.fill" : "circle"
-        let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .regular)
-        checkButton.setImage(
-            UIImage(systemName: symbol, withConfiguration: config)?
-                .withTintColor(UIColor(isSelected ? settings.accent : settings.muted), renderingMode: .alwaysOriginal),
-            for: .normal
-        )
-        checkButton.accessibilityLabel = "选择 " + item.title
-        checkButton.accessibilityValue = isSelected ? "已选择" : "未选择"
-
-        titleLabel.text = item.title
-        titleLabel.font = UIFontMetrics(forTextStyle: .subheadline)
-            .scaledFont(for: .systemFont(ofSize: 14, weight: .regular), compatibleWith: traitCollection)
-        titleLabel.textColor = UIColor(settings.ink)
-
-        detailLabel.text = item.detail
-        detailLabel.font = .preferredFont(forTextStyle: .caption1, compatibleWith: traitCollection)
-        detailLabel.textColor = UIColor(settings.muted)
-        detailLabel.isHidden = item.detail.isEmpty
-
-        let status: SettingsStatusBadge.Status = (item.status == "已存在" || item.status == "已有") ? .warning : .success
-        badge.update(status: status, text: item.status, theme: theme)
-
-        let vertical = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
-        textStack.axis = vertical ? .vertical : .horizontal
-        textStack.alignment = vertical ? .fill : .center
     }
 }
 #endif

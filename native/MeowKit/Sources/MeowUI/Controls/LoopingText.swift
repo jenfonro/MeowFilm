@@ -75,9 +75,7 @@ public final class LoopingTextView: UIView {
         first.frame = CGRect(x: 0, y: 0, width: width, height: bounds.height)
         second.frame = CGRect(x: period, y: 0, width: width, height: bounds.height)
         second.isHidden = !allowsMotion || width <= bounds.width
-        guard allowsMotion,
-              LoopingTextGeometry.period(textWidth: Double(width), viewport: Double(bounds.width),
-                                         gap: Double(gap)) != nil else {
+        guard allowsMotion, width > bounds.width else {
             activePeriod = 0
             return
         }
@@ -105,13 +103,13 @@ public final class LoopingTextView: UIView {
         running = false
     }
     private func restoreAnimationIfNeeded() {
-        guard allowsMotion, window != nil, activePeriod > 0,
+        guard allowsMotion, window != nil, !isHidden, activePeriod > 0,
               strip.layer.animation(forKey: "title.loop") == nil else { return }
         installAnimation(period: activePeriod)
     }
     private func reconcileMotion() {
         restoreAnimationIfNeeded()
-        let value = requestedRunning && allowsMotion && window != nil &&
+        let value = requestedRunning && allowsMotion && window != nil && !isHidden &&
             strip.layer.animation(forKey: "title.loop") != nil
         guard value != running else { return }
         let layer = strip.layer

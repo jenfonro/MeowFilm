@@ -3,17 +3,13 @@ import UIKit
 import MeowUI
 
 @MainActor
-final class FilmVideoSourcesViewController: FilmSourcePageController {
-    override var usesSettingsTable: Bool { false }
-    let manager = ManagementListView()
+final class FilmVideoSourcesViewController: FilmSourceManagementController {
     private var query = ""
     private(set) var detecting = false
     private var detectingKeys = Set<FilmSourceKey>()
-    private var detectionGeneration = UUID()
 
     override func viewDidLoad() {
         pageTitle = "视频源"
-        super.viewDidLoad()
         view.accessibilityIdentifier = "film.videos"
         manager.accessibilityIdentifier = "film.videos.managementList"
         manager.search.placeholder = "搜索视频源"
@@ -22,15 +18,7 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
         manager.onDelete = { [weak self] in self?.removeSelected() }
         manager.footerMoreNeedsSelection = false
         manager.configureToolbar(showsSearch: true, buttons: [])
-        view.addSubview(manager); manager.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            manager.topAnchor.constraint(equalTo: contentTopAnchor),
-            manager.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-            manager.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            manager.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
-        manager.applyTheme(theme)
-        render()
+        super.viewDidLoad()
     }
 
     override func render() {
@@ -73,12 +61,6 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
         updateFooterMenu()
     }
 
-    override func applyTheme() {
-        super.applyTheme()
-        guard isViewLoaded else { return }
-        manager.applyTheme(theme)
-    }
-
     private func rowID(_ key: FilmSourceKey) -> String {
         "film.video.\(key.installationId).\(key.siteKey)"
     }
@@ -117,18 +99,16 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
 
     private func detect(_ keys: [FilmSourceKey]) {
         guard isPageActive, isPageVisible, !detecting else { return }
-        let pageGeneration = sourcePageGeneration
-        let generation = UUID(); detectionGeneration = generation; detecting = true; detectingKeys = Set(keys); render()
+        detecting = true; detectingKeys = Set(keys); render()
         var completedCount = 0
         runPageTask(
             key: "detect",
             retry: { [weak self] in
-                guard let self, canContinueSourceBatch(pageGeneration) else { return }
-                let remaining = Array(keys.dropFirst(completedCount))
-                self.detect(remaining)
+                guard let self, self.isPageActive, self.isPageVisible else { return }
+                self.detect(Array(keys.dropFirst(completedCount)))
             },
             onFinally: { [weak self] in
-                guard let self, self.detectionGeneration == generation else { return }
+                guard let self, !Task.isCancelled else { return }
                 self.detecting = false
                 self.detectingKeys = []
                 self.render()
@@ -138,7 +118,7 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
                 try Task.checkCancellation()
                 _ = try await service.detect(key)
                 completedCount += 1
-                guard let self, !Task.isCancelled, self.detectionGeneration == generation else { return }
+                guard let self, !Task.isCancelled else { return }
                 self.detectingKeys.remove(key)
                 self.render()
             }
@@ -147,7 +127,6 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
 
     private func cancelDetection() {
         let wasDetecting = detecting || !detectingKeys.isEmpty
-        detectionGeneration = UUID()
         cancelPageTask(key: "detect")
         detecting = false
         detectingKeys = []
@@ -161,7 +140,6 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
 final class FilmVideoDetailController: FilmSourcePageController {
     let key: FilmSourceKey
     private(set) var detecting = false
-    private var detectionGeneration = UUID()
 
     init(service: FilmSourceService, key: FilmSourceKey, themeProvider: any PageThemeProviding) {
         self.key = key; super.init(service: service, themeProvider: themeProvider); pageTitle = "视频源"
@@ -239,12 +217,12 @@ final class FilmVideoDetailController: FilmSourcePageController {
 
     func detect() {
         if detecting { cancelDetection(); render(); return }
-        let generation = UUID(); detectionGeneration = generation; detecting = true; render()
+        detecting = true; render()
         runPageTask(
             key: "detect",
             retry: { [weak self] in self?.detect() },
             onFinally: { [weak self] in
-                guard let self, self.detectionGeneration == generation else { return }
+                guard let self, !Task.isCancelled else { return }
                 self.detecting = false
                 self.render()
             }
@@ -255,7 +233,6 @@ final class FilmVideoDetailController: FilmSourcePageController {
 
     func cancelDetection() {
         let wasDetecting = detecting
-        detectionGeneration = UUID()
         cancelPageTask(key: "detect")
         detecting = false
         if wasDetecting, isViewLoaded { render() }

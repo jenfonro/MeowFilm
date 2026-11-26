@@ -156,7 +156,6 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
     public let table = SettingsTableView()
     public private(set) var currentSections: [SettingsListSection] = []
     open var usesSettingsColors: Bool { true }
-    open var usesSettingsTable: Bool { true }
     open var avoidsKeyboard: Bool { true }
     open var allowsRowReordering: Bool { false }
 
@@ -195,13 +194,10 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
 
     open override func viewDidLoad() {
         super.viewDidLoad()
-        guard usesSettingsTable else { return }
         table.delegate = self
         table.keyboardDismissMode = .interactive
         table.sectionFooterHeight = 0
-        if !usesSettingsColors {
-            table.separatorStyle = .singleLine
-        }
+        table.separatorColor = UIColor(usesSettingsColors ? theme.settings.separator : theme.border)
         view.addSubview(table)
         table.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -233,10 +229,6 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
         if !currentSections.isEmpty {
             applySections(currentSections, animated: false)
         }
-    }
-
-    public func row(forID id: String) -> SettingsListRow? {
-        projection[id]?.row
     }
 
     @discardableResult
@@ -329,7 +321,8 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
 
     open override func applyTheme() {
         super.applyTheme()
-        guard isViewLoaded, usesSettingsTable else { return }
+        guard isViewLoaded else { return }
+        table.separatorColor = UIColor(usesSettingsColors ? theme.settings.separator : theme.border)
         reconfigureVisibleRows()
         refreshVisibleHeaders()
     }
@@ -375,12 +368,7 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
 
     public func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
         guard section < currentSections.count else { return nil }
-        let title = currentSections[section].title
-        if usesSettingsColors {
-            return table.viewForHeader(in: section, title: title, theme: theme)
-        }
-        guard let title, !title.isEmpty else { return UIView() }
-        return table.viewForHeader(in: section, title: title, theme: theme)
+        return table.viewForHeader(in: section, title: currentSections[section].title, theme: theme)
     }
 
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {

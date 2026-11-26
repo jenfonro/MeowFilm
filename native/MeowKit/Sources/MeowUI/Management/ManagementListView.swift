@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import MeowDebug
 
 /// Reader's management glyphs, drawn natively rather than substituted with unrelated symbols.
 @MainActor
@@ -28,19 +29,93 @@ public enum ManagementIcon {
     }
 }
 
-/// Management actions use the application's public page header.
+/// Shared base controller owning `ManagementListView` layout, theme propagation, and `--debug` row projection.
 @MainActor
 open class ManagementPageViewController: PageViewController {
+    public let manager = ManagementListView()
+
+    open override func viewDidLoad() {
+        super.viewDidLoad()
+        view.addSubview(manager)
+        manager.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            manager.topAnchor.constraint(equalTo: contentTopAnchor),
+            manager.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            manager.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            manager.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        manager.applyTheme(theme)
+    }
+
+    open override func applyTheme() {
+        super.applyTheme()
+        if isViewLoaded { manager.applyTheme(theme) }
+    }
+
     public func setManagementActions(_ buttons: [UIButton]) {
         pageHeader.setTrailing(buttons)
-        pageHeader.applyTheme(theme)
+    }
+
+    public func debugManagementRows(maxItems: Int) -> [DebugContentRow] {
+        manager.projectedRows.prefix(maxItems).enumerated().map { idx, row in
+            var actions: [String] = []
+            if row.showsToggle, row.controlsEnabled, row.toggleEnabled { actions.append("toggle") }
+            if row.open != nil, row.controlsEnabled { actions.append("open") }
+            else if row.edit != nil, row.controlsEnabled { actions.append("edit") }
+            return DebugContentRow(
+                index: idx,
+                id: row.id,
+                title: row.title,
+                subtitle: row.detail.isEmpty ? nil : row.detail,
+                state: row.showsToggle ? (row.enabled ? "on" : "off") : nil,
+                actions: actions
+            )
+        }
+    }
+
+    public func debugInvokeManagementRow(params: [String: DebugJSONValue]) throws -> DebugJSONValue {
+        let rows = manager.projectedRows
+        let row: ManagementListView.Row
+        if let id = params["id"]?.stringValue {
+            guard let found = rows.first(where: { $0.id == id }) else {
+                throw DebugAPIError.notFound("Management row not found: \(id)")
+            }
+            row = found
+        } else if let idx = params["index"]?.intValue {
+            guard rows.indices.contains(idx) else {
+                throw DebugAPIError.invalidArgument("Row index \(idx) out of range (0..<\(rows.count))")
+            }
+            row = rows[idx]
+        } else if let first = rows.first {
+            row = first
+        } else {
+            throw DebugAPIError.invalidState("Management page has no rows")
+        }
+        guard row.controlsEnabled else {
+            throw DebugAPIError.invalidState("Row '\(row.id)' is disabled")
+        }
+        let mode = params["action"]?.stringValue
+        if mode == "toggle" || (mode == nil && row.open == nil && row.showsToggle && row.toggleEnabled) {
+            let next = !row.enabled
+            row.toggle(next)
+            return .object(["id": .string(row.id), "toggled": .bool(next)])
+        }
+        if let open = row.open {
+            open()
+            return .object(["id": .string(row.id), "invoked": .bool(true)])
+        }
+        if let edit = row.edit {
+            edit()
+            return .object(["id": .string(row.id), "edited": .bool(true)])
+        }
+        throw DebugAPIError.invalidState("Row '\(row.id)' is not actionable")
     }
 }
 
-/// The list chrome shared by native settings managers, backed by `UITableViewDiffableDataSource`
-/// and unified `SettingsSwitch` (zero `table.reloadData()`).
+/// The list chrome shared by native settings managers, backed by `UITableViewDiffableDataSource`,
+/// native `UISearchTextField`, and unified `SettingsSwitch`.
 @MainActor
-public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarDelegate, PageThemeable {
+public final class ManagementListView: UIView, UITableViewDelegate, PageThemeable {
     public struct Row {
         public let id: String, title: String, detail: String
         public let enabled: Bool, failed: Bool, controlsEnabled: Bool, toggleEnabled: Bool
@@ -96,8 +171,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         }
     }
 
-    public let search = UISearchBar()
-    private lazy var searchContainer = ManagementSearchContainer(search: search)
+    public let search = UISearchTextField()
     public let tools = UIStackView()
     private var toolButtons: [UIButton] = []
     public let footerMore = UIButton(type: .system)
@@ -113,24 +187,34 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
     private let toolbar = UIStackView()
     private let toolbarSpacer = UIView()
-    private lazy var toolbarHeight = toolbar.heightAnchor.constraint(equalToConstant: 50)
     private lazy var listTop = table.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10)
     private let footer = UIStackView(), count = UIButton(type: .custom), inverse = UIButton(type: .system)
     private let batchActions = UIStackView()
     private lazy var footerHeight = footer.heightAnchor.constraint(equalToConstant: 52)
     private let empty = UILabel(), emptyContainer = UIView()
     private var projection = IndexedDiffableProjection<Int, String, Row>()
+    fileprivate var projectedRows: [Row] { projection.items }
     private var total = 0
     private var currentTheme = PageTheme()
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
-        for child in [searchContainer, toolbarSpacer, tools] { toolbar.addArrangedSubview(child) }
+        for child in [search, toolbarSpacer, tools] { toolbar.addArrangedSubview(child) }
         toolbarSpacer.isHidden = true
-        toolbar.alignment = .top; toolbar.spacing = 8
-        search.searchBarStyle = .minimal; search.delegate = self; search.placeholder = "搜索"
-        search.searchTextField.font = .systemFont(ofSize: 14); search.searchTextField.clipsToBounds = true
-        searchContainer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        toolbar.alignment = .center; toolbar.spacing = 8
+        search.placeholder = "搜索"
+        search.borderStyle = .none
+        search.clearButtonMode = .whileEditing
+        search.returnKeyType = .search
+        search.autocorrectionType = .no
+        search.autocapitalizationType = .none
+        search.clipsToBounds = true
+        search.layer.cornerCurve = .continuous
+        search.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        search.heightAnchor.constraint(greaterThanOrEqualToConstant: 38).isActive = true
+        search.addAction(UIAction { [weak self] _ in
+            self?.onSearch?(self?.search.text ?? "")
+        }, for: .editingChanged)
         tools.axis = .horizontal; tools.spacing = 8; tools.isHidden = true
 
         table.register(ManagementRowCell.self, forCellReuseIdentifier: ManagementRowCell.reuseIdentifier)
@@ -205,10 +289,9 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         let listBottom = table.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -8)
         listBottom.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            toolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            toolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             toolbar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
             toolbar.topAnchor.constraint(equalTo: topAnchor, constant: SettingsVisualMetrics.contentTopSpacing),
-            toolbarHeight,
             listTop,
             table.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             table.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
@@ -236,36 +319,18 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
 
     public override func layoutSubviews() {
         super.layoutSubviews()
-        toolbar.layoutIfNeeded(); searchContainer.layoutIfNeeded()
-        let searchHeight = searchContainer.isHidden ? 0 : searchContainer.intrinsicContentSize.height
-        let toolsHeight = tools.isHidden ? 0 : tools.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).height
-        let requiredToolbarHeight = toolbar.isHidden ? 0 :
-            max(UIFontMetrics.default.scaledValue(for: 50, compatibleWith: traitCollection), max(searchHeight, toolsHeight))
-        var needsSecondPass = !searchContainer.isHidden && searchContainer.bounds.height + 0.01 < searchHeight
-        if abs(toolbarHeight.constant - requiredToolbarHeight) > 0.01 {
-            toolbarHeight.constant = requiredToolbarHeight
-            toolbar.setNeedsLayout()
-            needsSecondPass = true
+        if !search.isHidden {
+            search.layer.cornerRadius = min(search.bounds.width, search.bounds.height) / 2
         }
         if footer.isHidden {
             if abs(table.contentInset.bottom) > 0.5 {
                 table.contentInset.bottom = 0
                 table.verticalScrollIndicatorInsets.bottom = 0
             }
-            if needsSecondPass {
-                super.layoutSubviews()
-                toolbar.layoutIfNeeded(); searchContainer.layoutIfNeeded()
-            }
             return
         }
         let width = footer.bounds.width - footer.layoutMargins.left - footer.layoutMargins.right
-        guard width > 0 else {
-            if needsSecondPass {
-                super.layoutSubviews()
-                toolbar.layoutIfNeeded(); searchContainer.layoutIfNeeded()
-            }
-            return
-        }
+        guard width > 0 else { return }
         let actions = batchActions.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
         let vertical = count.intrinsicContentSize.width + actions.width + 10 > width
         footer.axis = vertical ? .vertical : .horizontal
@@ -279,40 +344,29 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
             : max(52, countHeight + 8)
         if abs(footerHeight.constant - requiredFooterHeight) > 0.01 {
             footerHeight.constant = requiredFooterHeight
-            needsSecondPass = true
         }
         let bottomInset = requiredFooterHeight + 24
         if abs(table.contentInset.bottom - bottomInset) > 0.5 {
             table.contentInset.bottom = bottomInset
             table.verticalScrollIndicatorInsets.bottom = bottomInset
         }
-        if needsSecondPass {
-            super.layoutSubviews()
-            toolbar.layoutIfNeeded(); searchContainer.layoutIfNeeded()
-        }
     }
 
     private func applyFonts() {
-        search.searchTextField.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
-        search.searchTextField.adjustsFontForContentSizeCategory = true
-        search.searchTextField.invalidateIntrinsicContentSize()
-        search.invalidateIntrinsicContentSize()
-        search.setNeedsLayout()
-        searchContainer.invalidateIntrinsicContentSize(); searchContainer.setNeedsLayout()
+        search.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
+        search.adjustsFontForContentSizeCategory = true
         empty.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
         empty.adjustsFontForContentSizeCategory = true
         for button in [count, inverse, deleteButton] {
             button.titleLabel?.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 13), compatibleWith: traitCollection)
             button.titleLabel?.adjustsFontForContentSizeCategory = true
         }
-        toolbarHeight.constant = toolbar.isHidden ? 0 : UIFontMetrics.default.scaledValue(for: 50, compatibleWith: traitCollection)
         reconfigureVisibleRows()
         setNeedsLayout()
     }
 
     public func configureToolbar(showsSearch: Bool, buttons: [UIButton], accessories: [UIView] = []) {
         search.isHidden = !showsSearch
-        searchContainer.isHidden = !showsSearch
         for subview in tools.arrangedSubviews {
             tools.removeArrangedSubview(subview)
             subview.removeFromSuperview()
@@ -327,7 +381,6 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         tools.isHidden = !hasTools
         toolbarSpacer.isHidden = showsSearch || !hasTools
         toolbar.isHidden = !showsSearch && !hasTools
-        toolbarHeight.constant = toolbar.isHidden ? 0 : UIFontMetrics.default.scaledValue(for: 50, compatibleWith: traitCollection)
         listTop.constant = toolbar.isHidden ? 0 : 10
     }
 
@@ -347,7 +400,6 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         empty.text = emptyMessage
         table.backgroundView = projection.items.isEmpty ? emptyContainer : nil
         dataSource.applyIfNeeded(update, animatingDifferences: false)
-        // Refresh closures on unchanged visible cells without triggering a reconfigure pass.
         let changedSet = Set(update.changedItemIDs)
         for indexPath in table.indexPathsForVisibleRows ?? [] {
             guard let rowID = dataSource.itemIdentifier(for: indexPath),
@@ -367,7 +419,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         table.layer.borderColor = UIColor(settings.border).cgColor
         table.separatorColor = UIColor(settings.separator)
         empty.textColor = UIColor(settings.muted)
-        settings.apply(to: search.searchTextField)
+        settings.apply(to: search)
         tintColor = UIColor(settings.ink)
         count.setTitleColor(UIColor(settings.ink), for: .normal)
         for button in [inverse, deleteButton, footerMore] {
@@ -428,8 +480,6 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         setNeedsLayout()
     }
 
-    public func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) { onSearch?(searchText) }
-
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard let rowID = dataSource.itemIdentifier(for: indexPath),
@@ -452,34 +502,6 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         button.backgroundColor = UIColor(PageTheme().settings.surface)
         if let action { button.addAction(UIAction { _ in action() }, for: .touchUpInside) }
         return button
-    }
-}
-
-@MainActor
-private final class ManagementSearchContainer: UIView {
-    private let search: UISearchBar
-    init(search: UISearchBar) {
-        self.search = search
-        super.init(frame: .zero)
-        addSubview(search)
-    }
-    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
-    override var intrinsicContentSize: CGSize {
-        let size = search.intrinsicContentSize
-        return CGSize(width: size.width, height: ceil(max(36, search.searchTextField.bounds.height)))
-    }
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let previousHeight = intrinsicContentSize.height
-        search.frame = CGRect(
-            x: bounds.minX, y: bounds.minY, width: bounds.width,
-            height: max(bounds.height, search.sizeThatFits(CGSize(width: bounds.width, height: 0)).height)
-        )
-        search.layoutIfNeeded()
-        let field = search.searchTextField
-        search.frame.origin.y = bounds.minY - field.convert(field.bounds, to: search).minY
-        field.layer.cornerRadius = min(field.bounds.width, field.bounds.height) / 2
-        if intrinsicContentSize.height != previousHeight { invalidateIntrinsicContentSize() }
     }
 }
 
@@ -563,10 +585,10 @@ private final class ManagementRowCell: UITableViewCell {
         title.numberOfLines = traitCollection.preferredContentSizeCategory.isAccessibilityCategory ? 0 : 2
         detail.numberOfLines = title.numberOfLines
         toggleSwitch.isHidden = !row.showsToggle
-        toggleSwitch.control.isOn = row.enabled
-        toggleSwitch.control.isEnabled = row.controlsEnabled && row.toggleEnabled
-        toggleSwitch.control.accessibilityLabel = "启用 \(row.title)"
-        toggleSwitch.control.accessibilityIdentifier = "management.enabled.\(row.id)"
+        toggleSwitch.isOn = row.enabled
+        toggleSwitch.isEnabled = row.controlsEnabled && row.toggleEnabled
+        toggleSwitch.accessibilityLabel = "启用 \(row.title)"
+        toggleSwitch.accessibilityIdentifier = "management.enabled.\(row.id)"
         edit.accessibilityLabel = "编辑 \(row.title)"; edit.accessibilityIdentifier = "management.edit.\(row.id)"
         edit.tintColor = UIColor(settings.accent); edit.isEnabled = row.controlsEnabled
         edit.isHidden = row.edit == nil
