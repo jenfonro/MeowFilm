@@ -43,14 +43,14 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 
 | operation | 输入与结果 |
 | --- | --- |
-| `session.open` | `{platform,entrySurface?,target,sources,query?,results?,resultHints?,search?,metadata?,cacheEntries?,searchReference?,resumeTarget?,restoreOnly?,browsing?}` → 当前 snapshot；规则由 Node 捕获 |
+| `session.open` | `{platform,entrySurface?,entry,searchReference?,restoreOnly?,browsing?}` → 当前纯展示 snapshot；启用站点、顺序与规则均由 Node 内部解析捕获 |
 | `session.command` | `{sessionId,action,...}` → 受理后的 snapshot，后续由事件推进；只读 `media.chapters` 返回下述区间结果 |
 | `session.snapshot` | `{sessionId}` → 当前 snapshot |
 | `session.attempt` | `{sessionId,attemptId}` → 私有媒体 receipt |
 | `session.media.release` | `{sessionId,attemptId,resourceId}` → `{released:true}`，重复释放幂等 |
-| `session.release` | `{sessionId,keepMedia?}` → `{released:true}` 或 `{retained:true}` |
+| `session.release` | `{sessionId,keepMedia?}` → `{released:true}` 或 `{retained:true}`（会话保留热态缓存并解绑媒体租约） |
 | `settings.get/set` | 读取／原子保存完整偏好 |
-| `library.get` | 读取 v2 资料库：历史、人工匹配、屏蔽、偏好、点映选择及聚合身份注册；健康历史投影 `businessId` 并保留已记录的 `playbackTarget`，坏历史项标记 `errorCode:'CORRUPT_STORAGE'` |
+| `library.get` | 读取资料库：以统一 `targetId = "work:<sessionKey>"` 归属的历史、人工匹配、错误片源屏蔽、偏好与点映选择 |
 | `library.remove` | `{kind:'history'\|'blocks',id?,block?}`，省略或 null 清空对应集合，否则准确删除 |
 | `manual.update` | `{action:'save',item}` 或 `{action:'remove',id}` |
 | `rules.get` | `{}` → `{rules,revision}` |
@@ -58,22 +58,19 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 | `rules.group.set` | `{group,rules}` → 只归一化指定组，在 owner 写队列中原子合并最新已保存配置，返回 `{rules,revision}` |
 | `rules.group.defaults` | `{group}` → 该组默认行数组；不初始化或写入文档 |
 | `rules.group.preview` | `{group,rules,request}` → 此组草稿＋关联组最新已保存配置执行预览；不写入 |
-| `rules.restore` | `{section:'episode'\|'movie'\|'search',rules?}` → 恢复所选段默认值并保存 |
+| `rules.restore` | `{section:'episode'\|'season'\|'movie'\|'search',rules?}` → 恢复所选段默认值并保存 |
 | `rules.preview` | `{request,rules?}` → 规则预览；可用草稿，不写入 |
 | `rules.normalize` | `{kind:'match'\|'clean',pattern,replace?}` → 新规则输入标准化结果 |
-| `rules.clear` | `{}` → 清除新规则文档并返回默认快照，不扫描旧客户端数据 |
-| `search.open` | `{query,sources}` → 搜索 snapshot，并按每源完整一页启动首轮 |
+| `rules.clear` | `{}` → 清除规则行并返回默认快照 |
+| `search.open` | `{query}` → 搜索 snapshot，运行器内部读取 `film.video-sources` 启动首轮 |
 | `search.snapshot` | `{sessionId}` → 最新完整搜索 snapshot |
 | `search.command` | `{sessionId,action:'more'\|'stop'\|'resume'}` → 受理后的 snapshot |
 | `search.release` | `{sessionId}` → 释放搜索消费者与会话 |
-| `search.handoff` | `{sessionId,selectionId,sources}` → Node 生成的准确目标、来源、已取得事实、游标及 `searchReference`；显式调用仍要求选择存在 |
-| `data.target` | `{target,sources?}` → Node 确认／补全的 typed target；不搜索、读取详情或取址，可更新当前聚合身份注册 |
-| `data.catalog` | `{source,action:'home'\|'category',payload?,refresh?}` → 来源目录，附可定位条目的 `businessId/playbackTarget` |
-| `data.search` | `{source,query,page?,refresh?}` → 完整单页、页号和 `hasMore`，条目附身份投影 |
-| `data.detail` | `{source,detailId,refresh?}` → 所选来源的真实详情／线路／文件，附身份投影 |
-| `data.metadata` | `{provider,path,query?,imageSize?,refresh?}` → provider 数据及可定位业务行的身份投影；失败不以旧值冒充成功 |
+| `data.catalog` | `{source,action:'home'\|'category',payload?,refresh?}` → 来源目录，条目附轻量 `entry` |
+| `data.search` | `{source,query,page?,refresh?}` → 完整单页、页号和 `hasMore` |
+| `data.detail` | `{source,detailId,refresh?}` → 所选来源的真实详情／线路／文件 |
+| `data.metadata` | `{provider,path,query?,imageSize?,refresh?}` → provider 数据及轻量 `entry` 投影；失败不以旧值冒充成功 |
 | `data.metadata.entry` | 同 metadata 输入 → 投影后的 `value`、请求身份、成功时间、完整度及 `cache` 状态；刷新失败可返回同身份旧成功值 |
-| `data.cache.entry` | 缓存请求身份 → 带原始时间、完整度的有效记录，未命中为 null |
 | `data.invalidate` | `{domain}` → 撤指定来源、账号或 metadata 域并等待排空 |
 
 ### 真实媒体章节识别
@@ -108,8 +105,8 @@ iOS `FilmPlaybackChapterModel` 借用现有 transport 请求此动作，不在 S
 均通过同一 owner。注入时此服务只消费当前原生快照；`rules.get`、默认值及预览仍可读取，
 `rules.set/group.set/restore/clear` 拒绝写入。iOS 的普通读取、分组保存、默认值与纯文本
 规范化在原生完成，不经这些 HTTP 写入方法；正则编译／执行仍只在 Node。
-分组接口的 `group` 为 `episodeClean`／`episode`／`movie`／`search`，分别对应
-`episodeCleanRegexRules`／`episodeRules`／`movieRules`／`aggregateRegexRules`。
+分组接口的 `group` 为 `episodeClean`／`episode`／`season`／`movie`／`search`，分别对应
+`episodeCleanRegexRules`／`episodeRules`／`seasonRules`／`movieRules`／`aggregateRegexRules`。
 净化组 `rules` 是字符串数组，匹配组是 `{pattern,replace,flags}` 数组。空数组表示清空该组。
 组预览的 `request.section` 须与组一致（`episodeClean` 对应 `episode`）；关联的另一剧集组
 只取 Node 已保存配置，客户端其他组草稿不参与。分组保存仅归一化本组，其他组原样保留；
@@ -148,35 +145,14 @@ Node 执行快照的 `revision` 包含共享 QuickJS-NG 0.18.0／Unicode 身份�
 只补成员或可靠资料，不替换已准备／正在播放文件。没有搜索 reference 的首页、历史及明确站源
 入口仍使用原有 open 契约，由 Node 规则 owner 捕获快照。
 
-### 身份与缓存交接
+### 关键字固定会话、智能列表与四阶段智能播放
 
-target 包含 `id,kind:'movie'|'tv'|'source'|'group',title`，可有 `year,metadataProvider,
-metadataId,season,episode,globalEpisode`。原始单源公开目标携带
-`source:{key,engine?,installationId?,siteId?,detailId,lineId?,candidateId?}`，不按同名扩搜。
-已选文件的 `candidateId` 是稳定 opaque 身份，可随快照保留；重开时必须与新详情
-重新生成的候选准确匹配，不按名称或数组位置猜文件，也不把私有 playId 放进快照。content id
-与当前显示的 metadata provider 身份分离；切换可靠资料关联不改内容 id。
-没有可靠元数据身份的聚合使用 `group`，携带
-`members:[{sourceKey,detailId}]`，保留全部准确成员及原查询来源范围；
-其 `id` 来自 `catalog` 的持久注册，不再使用共享搜索 `displayKey`。
-不伪造 movie／tv，也不降成代表单源。未关联时使用真实源目录与上下集，
-iOS 不自动准备，Windows 正常新进入仍沿正式自动播放入口；读取恢复见下节。
-
-`packages/film-playback/src/catalog.js` 在公共 film 装配中与搜索／播放共享同一资料库：
-
-- 元数据内容 ID 为 `tmdb|douban:movie|tv:<真实ID>`；季度和逐集行的 `businessId`
-  分别追加 `:season:<季>`、`:episode:<集>`，`playbackTarget.id` 保持内容 ID。
-- 站点 ID 为 `source:<身份散列>`，散列使用 engine／installation／site 与 typed detail；
-  聚合为 `group:<身份散列>`。注册记录 `groups:[{id,keys,members}]` 保存已确认规则键与成员身份，
-  首次以排序后的真实成员锚定，后续按规则键、原注册 ID 或成员交集复用记录并补成员。
-- 搜索卡片、metadata 内容／列表／推荐／季集、站点详情／线路／文件及会话候选各自投影
-  `businessId/playbackTarget`。线路使用 `line:<身份散列>`；文件复用 recognition 的 opaque
-  candidate 身份。文件的目标保留所属内容 ID、真实来源／详情／线路／candidate 与可证明坐标，
-  不暴露私有播放材料。无有效类型／ID／标题的原始 metadata 行不会被补造身份。
-- `data.target` 只按提供的真实 provider／ID 或来源／详情及准确成员确认 typed target，
-  返回 target 本身，不返回另一套地址对象；它不是上游存在性或缓存新鲜度检查。
-  该调用可写当前聚合身份注册，但不执行网络搜索、详情加载或媒体解析。
-- 播放收藏、历史、人工匹配、屏蔽与身份分组分别保存在 SQLite typed relations；不会创建 `library.json`，也不把整个业务文档 JSON 塞入数据库。当前播放 writer 保存实际文件目标。历史投影中的坏对象按单项错误处理；具体业务校验由实际消费入口执行。
+- **自包含视频源与映射读取**：运行器通过 `nativeSettings` 的 `film.video-sources` 与 `cat.sources` 块实时读取启用视频源、搜索开关、排序、聚合封面站点与网盘别名映射（`mappings`），客户端不再在 `search.open`／`session.open` 上传 `sources`、`installationId`、`generation`、`cacheEntries` 或爬虫 `raw` 行。
+- **统一作品身份与固定关键字会话**：作品持久身份统一为 `targetId = "work:<sessionKey>"`（以净化后标准作品词 `keyword` 锚定），历史、人工匹配、错误片源屏蔽与点映偏好全部绑定该主键。会话在运行器内存中按 `sessionKey` 保持热态（`IDLE_SESSION_TTL_MS = 15 分钟`、`MAX_IDLE_SESSIONS = 24`），离开播放页仅解绑媒体租约；TMDB 与豆瓣作为会话元数据槽位挂载。搜索页与播放会话共用 `data.search(source, query, page)` 缓存与 in-flight 合并；从搜索词 `Q1` 进入关键词为 `Q2` 的卡片时，`Q1` 已缓存结果以 `attachedDisplayOnly` 挂入 `sourceMenu` 供展示切换，而 `search.more` 按 `Q2` 扩搜。
+- **未配置免请求与豆瓣游客态边界**：未配置 TMDB 时跳过官方 TMDB 请求；未配置豆瓣 Cookie（游客态）时仅允许对携带豆瓣 ID 的入口卡片调用 `/rexxar/api/v2/{movie|tv}/{id}` 读取简介与 `episodes_count`（生成 `1..N` 剧集列表，不复制主剧简介到单集，单季剧默认归第 1 季，单独第 2 季初始化至首个可用季集），绝不调用 `searchDouban`。当可用视频源与人工匹配源均为 0 时，发布 `noSources: true` 与 `error: "NO_VIDEO_SOURCES"`（双端统一显示 `暂无可用视频源`）。
+- **单次识别复用与网盘凭据边界**：每个站点结果按签名经 `ensureRecognized` 执行一次识别并缓存不可变快照，浏览、`智能列表`、切集与智能播放共用同一结果，切集不清空 `session.candidates`。`pan-list` 保持 5 分钟鉴权凭据 TTL 与站点作用域；客户端快照绝不暴露 `fileId`/`stoken`/`fileToken` 等网盘凭据，真正取流时若凭据过期由 `data.js:resolveValue` 经 `shareOrigin` + `stableFileIdentity` 内部透明重拉刷新。
+- **无元数据「智能列表」与六级季度优先级**：当会话无 TMDB 且无豆瓣数据，且有效剧集站点结果 `>= 2` 时，`sourceMenu` 首位生成 `智能列表`（`id: "smart"`），按 **1) 文件名季集 > 2) 展示名季集 > 3) 网盘目录唯一季号（`folderStats` 含纯画质子目录向父目录穿透） > 4) 站点原始标题 `seasonRules` 提取季号 > 5) 手动匹配季提示 > 6) 无季标默认第 1 季低优兜底** 聚合分季与集数；选集区提供 `episodes.more`（「加载更多」）增量展开未读站点／分页。
+- **四阶段智能播放与语义快照**：智能选源严格按 **Stage 0 已缓存上下文候选（邻集预取 -> 当前同源同线亲和 -> 会话／智能列表已解析候选） -> Stage 1 历史记录（先网盘分享直展 `history_list`，再站点详情 `history_detail`） -> Stage 2 人工匹配源（连续 3 次失败自动停用） -> Stage 3 智能搜索（按已缓存可用、显式季标、`vod_remarks` 更新集数 `>=` 目标集、精确键、相关度与站点顺序预排，并在请求 `detail`/`expand` 前前置过滤 `searchable === false`、`smartSkip`、`siteCleanKeywords` 与 `film_blocked_sources`）** 执行。会话对外统一输出规范化 `work`、`sourceMenu`、`lineMenu`、`directory`、`player`、`noSources` 快照，客户端仅发送 `select.item`、`browse.source`、`browse.line`、`browse.season`、`browse.metadata`、`episodes.more`、`search.more` 等语义命令。
 
 资料库启动不预检全部控制记录的业务语义；普通更新只校验实际新增或修改的记录，未改的坏兄弟保留原存储行，实际选用坏记录仍明确失败。history、manual、block、group 与偏好输入只投影已有 typed 字段，普通扩展不拒绝操作，也不进入永久存储；人工匹配保存省略的分享口令、季提示和来源字段按本次选择清空。
 

@@ -17,9 +17,9 @@ internal sealed partial class FilmPlaybackSession
             RequirePage(targetPage);
             if (targetPage.ConnectionFailed) throw new FilmPlaybackException("DISCONNECTED");
             var changed = browseChanged.Task;
-            if (snapshot is { } state && !FilmJson.Bool(state.Browsing, "loading"))
+            if (snapshot is { } state && !state.DirectoryLoading)
             {
-                if (FilmJson.Text(state.Browsing, "error") is { Length: > 0 } failure)
+                if (state.DirectoryError is { Length: > 0 } failure)
                     throw new FilmPlaybackException(failure);
                 if (matches(state)) return;
             }
@@ -121,7 +121,7 @@ internal sealed partial class FilmPlaybackSession
     }
 
     private static bool ChangesPlayback(string action) => action is "play" or "prepare" or "stop" or
-        "select.target" or "next" or "previous" or "pan" or "quality" or "switch" or "block" or "media.retry";
+        "select.item" or "next" or "previous" or "pan" or "quality" or "switch" or "block" or "media.retry";
 
     internal Task PauseAsync() => SetPausedAsync(!MediaPaused);
 

@@ -8,49 +8,39 @@ public sealed record FilmSearchSource(FilmCatSource Cat, FilmVideoSource Site)
 {
     // A tuple encoding keeps installation/site boundaries unambiguous without a URL identity.
     public string Key => JsonSerializer.Serialize(new[] { Cat.InstallationId, Site.Key.SiteKey });
-    internal JsonElement Wire => FilmJson.Encode(new
-    {
-        key = Key, engine = "cat", installationId = Cat.InstallationId, siteId = Site.Key.SiteKey,
-        generation = Cat.Generation, name = Site.Name, enabled = Site.Options.Enabled,
-        searchable = Site.Options.SearchEnabled, aggregateImages = Site.Options.AggregateImages,
-        order = Site.Order
-    });
 }
 
 public sealed class FilmSearchContext
 {
-    internal FilmSearchContext(FilmSearchSession session, JsonElement item)
-        : this(session, FilmSearchJson.Text(item, "displayKey"), item) { }
-    internal FilmSearchContext(FilmSearchSession session, string displayKey, JsonElement item)
+    internal FilmSearchContext(FilmSearchSession session, string cardId, FilmEntry entry)
     {
         Session = session;
-        Item = item;
-        DisplayKey = displayKey;
+        CardId = cardId;
+        Entry = entry;
     }
 
     public FilmSearchSession Session { get; }
     public string Query => Session.Query;
     public string SessionId => Session.Id;
-    public long Revision => Session.ReferenceRevision;
-    public string MetadataQuery => Session.MetadataQuery;
-    public JsonElement? MetadataSearchPayload => Session.MetadataSearchPayload;
-    public string DisplayKey { get; private set; }
-    public JsonElement Item { get; private set; }
-    internal void UpdateItem(JsonElement item)
+    public string CardId { get; private set; }
+    public FilmEntry Entry { get; private set; }
+
+    internal void Update(string cardId, FilmEntry entry)
     {
-        Item = item;
-        if (FilmSearchJson.Text(item, "displayKey") is { Length: > 0 } key) DisplayKey = key;
+        if (cardId.Length > 0) CardId = cardId;
+        Entry = entry;
     }
-    internal FilmPlaybackRequest PlaybackRequest => new(FilmJson.Target(Item.GetProperty("playbackTarget")),
-        Sources: Session.SourceSnapshot, Query: Query, EntrySurface: "search");
-    internal object Reference => new { sessionId = SessionId, selectionId = DisplayKey };
-    internal Task<FilmPlaybackRequest> HandoffAsync(CancellationToken token) => Session.Service.HandoffAsync(this, token);
+
+    internal object? Reference => Session.Retired || SessionId.Length == 0
+        ? null
+        : new { sessionId = SessionId, cardId = CardId };
 }
 
 internal static class FilmSearchJson
 {
     internal static string Text(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object &&
         value.TryGetProperty(key, out var field) ? DisplayText(field) : "";
+
     internal static string DisplayText(JsonElement field)
     {
         if (field.ValueKind == JsonValueKind.String) return field.GetString()!;

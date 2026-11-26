@@ -208,6 +208,6 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 | `music.home.display.v1`、`music.source-checks.v1` | 首页展示快照和来源发现观察（缓存库） |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
-| `meowfilm.film.library.v1` | 影视收藏身份，保留原来源／影片字段及可选 Node `businessID/playbackTarget`，见[影视收藏](film.md#详情和收藏) |
+| `meowfilm.film.library.v1` | 影视收藏身份，以统一 `target_id`（`work:<sessionKey>`）保存 `keyword`、展示字段及可选 `tmdb`／`douban`／`siteEntry` 引用，见[影视收藏](film.md#详情和收藏) |
 
 歌曲／录音、来源、队列 occurrence、播放 attempt、账号访问代次和文件版本是相互独立的身份，不能用标题、短期 URL 或队列位置替代。

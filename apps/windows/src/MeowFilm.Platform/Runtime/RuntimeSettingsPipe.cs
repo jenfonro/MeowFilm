@@ -65,7 +65,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
             id is < 1 or > BridgeCodec.MaximumSafeInteger ||
             BridgeCodec.RequiredProperty(request, "block").GetString() is not { } block ||
             BridgeCodec.RequiredProperty(request, "kind").GetString() is not { } kind ||
-            block is not ("cat.sources" or "pan.accounts" or "tmdb" or "douban" or "film.rules" or "film.preferences"))
+            block is not ("cat.sources" or "pan.accounts" or "tmdb" or "douban" or "film.rules" or "film.preferences" or "film.video-sources"))
             throw new BridgeException("INVALID_RESPONSE");
         if (kind is not ("settings.read" or "settings.pan.update") ||
             kind == "settings.pan.update" && block != "pan.accounts")

@@ -4,7 +4,7 @@ import { upsert } from '@meowfilm/storage/statements';
 
 const columns = ['group_name', 'position', 'pattern', 'replacement', 'flags'];
 const snapshot = [
-  { sql: 'SELECT group_name,row_revision,overridden FROM film_rule_groups', rows: true, maxRows: 4 },
+  { sql: 'SELECT group_name,row_revision,overridden FROM film_rule_groups', rows: true, maxRows: 5 },
   { sql: `SELECT ${columns.join(',')} FROM film_rules ORDER BY group_name,position`, rows: true },
 ];
 const failure = code => Object.assign(new Error(code), { code });
@@ -25,7 +25,7 @@ function decode([groups, entries], defaults) {
   for (const row of entries) {
     const key = row.group_name;
     if (!overridden.has(key) || row.position !== rules[key].length) throw failure('CORRUPT_STORAGE');
-    const match = key === 'episodeRules' || key === 'movieRules';
+    const match = key === 'episodeRules' || key === 'movieRules' || key === 'seasonRules';
     rules[key].push(match ? {
       pattern: row.pattern,
       ...(row.replacement === null ? {} : { replace: row.replacement }),

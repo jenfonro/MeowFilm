@@ -73,65 +73,25 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime)
         foreach (var item in items.EnumerateArray())
         {
             if (item.ValueKind != JsonValueKind.Object) continue;
-            string title = Text(item, "title");
-            if (title.Length == 0) continue;
+            var cardObj = FilmJson.Member(item, "card");
+            if (cardObj.ValueKind != JsonValueKind.Object) continue;
             try
             {
-                string id = FilmJson.RequiredText(item, "businessId");
-                var target = FilmJson.Target(FilmJson.Member(item, "playbackTarget"));
-                target.Validate();
-                result.Add(new(id, title, Poster(item), Score(item))
+                string id = FilmJson.RequiredText(cardObj, "id");
+                var entry = FilmEntry.Read(cardObj);
+                result.Add(new(id, entry.Title, entry.Poster, entry.Score)
                 {
-                    PlaybackContext = new(target, Metadata: item.Clone(), EntrySurface: "home")
+                    TextBadge = entry.TextBadge,
+                    Subtitle = entry.Subtitle,
+                    Entry = entry
                 });
             }
             catch (FilmPlaybackException error) when (error.Code is "INVALID_RESPONSE" or "INVALID_REQUEST")
             {
-                DebugLog.Warn(DebugCategories.FilmCatalog, "douban", "row.skipped", new { title, code = error.Code }, error: error);
+                DebugLog.Warn(DebugCategories.FilmCatalog, "douban", "row.skipped", new { code = error.Code }, error: error);
             }
         }
         if (items.GetArrayLength() > 0 && result.Count == 0) throw new FilmHomeException("INVALID_RESPONSE");
         return result;
     }
-
-    private static string Poster(JsonElement item)
-    {
-        // Per docs/runtime/metadata-data.md, cover.url is a web page link; only use image fields.
-        var coverImage = NestedObject(NestedObject(item, "cover"), "image");
-        string[] candidates =
-        [
-            NestedText(item, "pic", "normal"),
-            NestedText(item, "pic", "large"),
-            NestedText(coverImage, "normal", "url"),
-            NestedText(coverImage, "large", "url")
-        ];
-        return candidates.FirstOrDefault(value => value.Length > 0) ?? "";
-    }
-
-    private static string Score(JsonElement item)
-    {
-        if (!item.TryGetProperty("rating", out var rating) ||
-            rating.ValueKind != JsonValueKind.Object ||
-            !rating.TryGetProperty("value", out var value))
-            return "";
-        return FilmJson.Score(value);
-    }
-
-    private static JsonElement NestedObject(JsonElement item, string property) =>
-        item.ValueKind == JsonValueKind.Object && item.TryGetProperty(property, out var nested) &&
-        nested.ValueKind == JsonValueKind.Object
-            ? nested
-            : default;
-
-    private static string NestedText(JsonElement item, string owner, string property) =>
-        item.ValueKind == JsonValueKind.Object && item.TryGetProperty(owner, out var nested) &&
-        nested.ValueKind == JsonValueKind.Object
-            ? Text(nested, property)
-            : "";
-
-    private static string Text(JsonElement item, string property) =>
-        item.ValueKind == JsonValueKind.Object && item.TryGetProperty(property, out var value) &&
-        value.ValueKind == JsonValueKind.String
-            ? value.GetString()?.Trim() ?? ""
-            : "";
 }

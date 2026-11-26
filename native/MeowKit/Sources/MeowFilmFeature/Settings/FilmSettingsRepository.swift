@@ -3,7 +3,7 @@ import MeowStorage
 
 public enum FilmSettingsBlock: String, CaseIterable, Sendable {
     case catSources = "cat.sources", panAccounts = "pan.accounts", tmdb, douban
-    case rules = "film.rules", preferences = "film.preferences"
+    case rules = "film.rules", preferences = "film.preferences", videoSources = "film.video-sources"
 }
 
 public enum FilmSettingsStorageError: Error, Equatable, Sendable {
@@ -185,15 +185,42 @@ public struct FilmRulesRecord: Equatable, Sendable {
     public var episodeRules: [FilmRuleEntryRecord]
     public var movieRules: [FilmRuleEntryRecord]
     public var aggregateRegexRules: [String]
+    public var seasonRules: [FilmRuleEntryRecord]
 
     public init(episodeCleanRegexRules: [String] = [],
                 episodeRules: [FilmRuleEntryRecord] = [],
                 movieRules: [FilmRuleEntryRecord] = [],
-                aggregateRegexRules: [String] = []) {
+                aggregateRegexRules: [String] = [],
+                seasonRules: [FilmRuleEntryRecord] = []) {
         self.episodeCleanRegexRules = episodeCleanRegexRules
         self.episodeRules = episodeRules
         self.movieRules = movieRules
         self.aggregateRegexRules = aggregateRegexRules
+        self.seasonRules = seasonRules
+    }
+}
+
+public struct FilmVideoSourceSettingRecord: Equatable, Sendable {
+    public var installationId: String
+    public var siteKey: String
+    public var name: String
+    public var enabled: Bool
+    public var homeVisible: Bool
+    public var searchEnabled: Bool
+    public var aggregateImages: Bool
+    public var sortOrder: Int
+
+    public init(installationId: String, siteKey: String, name: String,
+                enabled: Bool, homeVisible: Bool, searchEnabled: Bool,
+                aggregateImages: Bool, sortOrder: Int) {
+        self.installationId = installationId
+        self.siteKey = siteKey
+        self.name = name
+        self.enabled = enabled
+        self.homeVisible = homeVisible
+        self.searchEnabled = searchEnabled
+        self.aggregateImages = aggregateImages
+        self.sortOrder = sortOrder
     }
 }
 
@@ -548,6 +575,38 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         return result
     }
 
+    // MARK: - Video Sources (Runtime Bridge Read-Only)
+
+    public func readVideoSourcesSync() throws -> (sources: [FilmVideoSourceSettingRecord], revision: Int64) {
+        try database.readSync { db in
+            try SQLiteDatabase.readSnapshot(db) { conn in
+                let rev = try conn.ownerRevision("film.sources")
+                guard rev >= 0 else { throw FilmSettingsStorageError.invalidData }
+                guard rev > 0 else { return ([], 0) }
+                let rows: [FilmVideoSourceSettingRecord] = try conn.query(
+                    "SELECT installation_id,site_key,name,enabled,home_visible,search_enabled,aggregate_images,sort_order " +
+                    "FROM film_video_sources ORDER BY sort_order,position,installation_id,site_key"
+                ) { c in
+                    FilmVideoSourceSettingRecord(
+                        installationId: try c.text(0),
+                        siteKey: try c.text(1),
+                        name: try c.text(2),
+                        enabled: try c.bool(3),
+                        homeVisible: try c.bool(4),
+                        searchEnabled: try c.bool(5),
+                        aggregateImages: try c.bool(6),
+                        sortOrder: try c.integer(7)
+                    )
+                }
+                return (rows, rev)
+            }
+        }
+    }
+
+    public func notifyVideoSourcesChanged() {
+        changed(FilmSettingsBlock.videoSources.rawValue)
+    }
+
     // MARK: - Private SQL Helpers
 
     private static func revision(_ db: SQLiteConnection, block: FilmSettingsBlock) throws -> Int64 {
@@ -745,6 +804,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         var episode: [FilmRuleEntryRecord] = []
         var movie: [FilmRuleEntryRecord] = []
         var aggregate: [String] = []
+        var season: [FilmRuleEntryRecord] = []
         try db.scan("SELECT group_name,pattern,replacement,flags FROM film_rules ORDER BY group_name,position") { c in
             let group = try c.text(0)
             let pattern = try c.text(1)
@@ -765,6 +825,12 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                     replace: try c.optionalText(2) ?? "",
                     flags: try c.optionalText(3) ?? ""
                 ))
+            case "seasonRules":
+                season.append(FilmRuleEntryRecord(
+                    pattern: pattern,
+                    replace: try c.optionalText(2) ?? "",
+                    flags: try c.optionalText(3) ?? ""
+                ))
             default:
                 throw FilmSettingsStorageError.invalidData
             }
@@ -773,7 +839,8 @@ public final class FilmSettingsRepository: @unchecked Sendable {
             episodeCleanRegexRules: clean,
             episodeRules: episode,
             movieRules: movie,
-            aggregateRegexRules: aggregate
+            aggregateRegexRules: aggregate,
+            seasonRules: season
         ), rev)
     }
 
@@ -820,6 +887,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         try syncEntryGroup("episodeRules", prev: previous?.episodeRules, next: value.episodeRules)
         try syncEntryGroup("movieRules", prev: previous?.movieRules, next: value.movieRules)
         try syncPatternGroup("aggregateRegexRules", prev: previous?.aggregateRegexRules, next: value.aggregateRegexRules)
+        try syncEntryGroup("seasonRules", prev: previous?.seasonRules, next: value.seasonRules)
     }
 
     private static func loadPreferences(_ db: SQLiteConnection) throws -> (value: FilmPreferencesRecord?, revision: Int64) {

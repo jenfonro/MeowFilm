@@ -1,6 +1,6 @@
-# Film playback rules owner
+# Film playback rules & recognition owner
 
-`createFilmRulesService({dataRoot})` is the sole owner of `<dataRoot>/film-rules/rules.json`. It uses the existing trusted runtime data directory, validates its owned path, writes an exclusive private temporary file, flushes it and atomically renames it before publishing. A failed write retains the previous immutable snapshot. External document changes fail with `STORAGE_CHANGED`; malformed current documents fail with `CORRUPT_STORAGE`. Only the current `{rules}` document is read.
+`createFilmRulesService({dataRoot, settings})` reads and writes the five rule groups (`episodeCleanRegexRules`, `episodeRules`, `seasonRules`, `movieRules`, `aggregateRegexRules`) in `meowfilm-data.sqlite3` (`film_rule_groups` / `film_rules`), or consumes the injected `film.rules` native settings block when running inside the Windows / iOS clients.
 
 The returned methods implement the runtime's `film.rules.*` operations:
 

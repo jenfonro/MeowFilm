@@ -10,7 +10,7 @@ namespace MeowFilm.Capabilities;
 public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChanged
 {
     private readonly FilmPlaybackSettings service;
-    private readonly Func<FilmPlaybackTarget?> target;
+    private readonly Func<string?> targetId;
     private FilmPreferences? preferences;
     private CancellationTokenSource? read;
     private Task? reading;
@@ -23,9 +23,9 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     private readonly ObservableCollection<FilmOrderOption> ruleItems = [], panItems = [];
     private IReadOnlyList<FilmSettingRow> rows = [];
 
-    internal FilmPlaybackSettingsView(FilmPlaybackSettings service, Func<FilmPlaybackTarget?> target, string section = "preferences")
+    internal FilmPlaybackSettingsView(FilmPlaybackSettings service, Func<string?> targetId, string section = "preferences")
     {
-        this.service = service; this.target = target; this.section = section;
+        this.service = service; this.targetId = targetId; this.section = section;
         InitializeComponent();
         RuleOrder.ItemsSource = ruleItems; PanOrder.ItemsSource = panItems;
         PresentSection();
@@ -309,7 +309,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     {
         if (!CanEditLibrary || section != "preferences" || editorLifetime is not null) return;
         long ticket = generation;
-        var editor = new FilmManualMatchDialogView(stored, target()?.Id ?? "");
+        var editor = new FilmManualMatchDialogView(stored, targetId() ?? "");
         var cts = new CancellationTokenSource();
         editorLifetime = cts;
         bool savedOk = false;

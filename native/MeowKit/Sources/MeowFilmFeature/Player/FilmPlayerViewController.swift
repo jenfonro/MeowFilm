@@ -343,10 +343,10 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
 
     private func confirmBlock() {
         guard let snapshot = model.snapshot,
-              let attemptID = snapshot.current?.attemptID ?? snapshot.attempt?.id else { return }
+              let attemptID = snapshot.current?.id ?? snapshot.attempt?.id else { return }
         presentPageConfirmation(
             title: "片源错误",
-            message: snapshot.target.title,
+            message: snapshot.work.title,
             confirmTitle: "屏蔽并换源",
             destructive: true,
             onConfirm: { [weak self, weak model] in
@@ -373,11 +373,15 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             model.setVideoScale(scaleMode)
         }
         let state = model.mediaState, snapshot = model.snapshot
-        let kind = snapshot.map { $0.workInfo?.kind ?? $0.target.kind }
-        let nextTitle = model.presentation?.target.title
+        let kind = snapshot?.work.kind
+        let nextTitle = model.presentation?.work.title ?? snapshot?.work.title
         if titleLabel.text != nextTitle { titleLabel.text = nextTitle }
-        let candidate = model.executionStage == nil ? nil : snapshot?.current?.candidate ?? snapshot?.attempt?.candidate
-        let nextSource = candidate.map { [$0.source.name, $0.lineLabel, $0.name].filter { !$0.isEmpty }.joined(separator: " · ") }
+        let activeAttempt = model.executionStage == nil ? nil : (snapshot?.current ?? snapshot?.attempt)
+        let nextSource: String? = if let snap = snapshot, model.executionStage != nil {
+            [snap.activeSourceLabel, snap.activeEpisodeLabel].filter { !$0.isEmpty }.joined(separator: " · ")
+        } else {
+            nil
+        }
         if sourceLabel.text != nextSource { sourceLabel.text = nextSource }
         let playing = model.canControlPlayback
         play.isEnabled = playing || model.canStartPlayback
@@ -414,8 +418,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         pip.isEnabled = state.pictureInPicture || playing && state.pictureInPictureAvailable
         pip.isSelected = state.pictureInPicture
         pip.accessibilityLabel = state.pictureInPicture ? "退出画中画" : "画中画"
-        previous.isEnabled = kind != .movie && playing
-        nextButton.isEnabled = kind != .movie && playing
+        previous.isEnabled = (snapshot?.canPrevious == true) && playing
+        nextButton.isEnabled = (snapshot?.canNext == true) && playing
         shortVideo.isSelected = snapshot?.shortVideo == true
         setTitle(shortVideo.isSelected ? "短视频：开" : "短视频", on: shortVideo)
         shortVideo.isEnabled = model.executionStage != nil && kind != .movie && model.playbackStatus != .unavailable
@@ -425,33 +429,39 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             skipChapter.accessibilityLabel = skipTitle
             skipChapter.isHidden = false
         } else { skipChapter.isHidden = true }
-        let selected = model.executionStage != nil && candidate != nil
+        let selected = model.executionStage != nil && activeAttempt != nil && snapshot?.noSources != true
         pan.isEnabled = selected; quality.isEnabled = selected
-        change.isEnabled = selected; block.isEnabled = selected
+        change.isEnabled = snapshot?.canSwitchSource == true
+        block.isEnabled = snapshot?.canBlockSource == true
         retryMedia.isEnabled = model.canRetryMedia
-        let panTitle = candidate?.provider.flatMap(FilmPanProvider.init(rawValue:))?.title ?? candidate?.lineLabel ?? "网盘"
-        let qualityTitle = candidate?.quality.flatMap(FilmResourceQuality.init(rawValue:))?.title ?? candidate?.quality ?? "画质"
+        let panTitle = (snapshot?.activePan).flatMap(FilmPanProvider.init(rawValue:))?.title ??
+            activeAttempt?.provider.flatMap(FilmPanProvider.init(rawValue:))?.title ?? "网盘"
+        let qualityTitle = (snapshot?.activeQuality).flatMap(FilmResourceQuality.init(rawValue:))?.title ??
+            (activeAttempt?.quality.isEmpty == false ? activeAttempt!.quality : "画质")
         setTitle(panTitle, on: pan)
         setTitle(qualityTitle, on: quality)
         pan.accessibilityValue = panTitle; quality.accessibilityValue = qualityTitle
         scale.accessibilityValue = scaleMode.title
-        selectMenu(pan, value: candidate?.provider); selectMenu(quality, value: candidate?.quality)
+        selectMenu(pan, value: snapshot?.activePan.isEmpty == false ? snapshot?.activePan : activeAttempt?.provider)
+        selectMenu(quality, value: snapshot?.activeQuality)
         let busy = model.playbackStatus.busy
         if busy { activity.startAnimating() } else { activity.stopAnimating() }
         let nextStateText = model.playbackStatus == .playing ? nil : model.playbackStatus.title
         if stateLabel.text != nextStateText { stateLabel.text = nextStateText }
-        let reported = snapshot?.reportError.map { FilmPlaybackError(code: $0) }
-        let metadata = snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
-        let session = snapshot?.error.map { FilmPlaybackError(code: $0) }
-        if let error = model.actionError ?? model.observationError ?? reported ?? metadata ?? session {
+        let suppress = { (err: FilmPlaybackError?) -> FilmPlaybackError? in
+            guard let err else { return nil }
+            if err.code == "NO_VIDEO_SOURCES" { return nil }
+            if err.code == "NOT_CONFIGURED", snapshot?.noSources == true { return nil }
+            return err
+        }
+        let reported = suppress(snapshot?.reportError.map { FilmPlaybackError(code: $0) })
+        let session = suppress(snapshot?.error.map { FilmPlaybackError(code: $0) })
+        let actionErr = suppress(model.actionError)
+        if let error = actionErr ?? model.observationError ?? reported ?? session {
             let token = AnyHashable(String(describing: error))
-            if model.actionError == nil, model.observationError != nil {
+            if actionErr == nil, model.observationError != nil {
                 syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                     model?.reconnect()
-                })
-            } else if model.actionError == nil, model.observationError == nil, reported == nil, metadata != nil {
-                syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
-                    model?.refreshBrowsing()
                 })
             } else {
                 syncErrorSource("playback", message: error.localizedDescription, token: token, acknowledged: { [weak self, weak model] in

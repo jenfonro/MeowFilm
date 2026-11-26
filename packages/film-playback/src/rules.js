@@ -48,10 +48,25 @@ export function bindRuleSnapshot(snapshot, invoke) {
   return snapshot;
 }
 
+function sanitizeJsonInput(value) {
+  if (Array.isArray(value)) return value.map(item => item === undefined ? null : sanitizeJsonInput(item));
+  if (value !== null && typeof value === 'object') {
+    const proto = Object.getPrototypeOf(value);
+    if (proto === Object.prototype || proto === null) {
+      return Object.fromEntries(
+        Object.entries(value)
+          .filter(([, item]) => item !== undefined)
+          .map(([key, item]) => [key, sanitizeJsonInput(item)]),
+      );
+    }
+  }
+  return value;
+}
+
 async function invokeFilmRules(rules, request, { signal } = {}) {
   const invoke = rules && executors.get(rules);
   if (!invoke) throw fail('INVALID_RULES');
-  return invoke({ ...request, rules: rules.rules }, { signal });
+  return invoke({ ...sanitizeJsonInput(request), rules: rules.rules }, { signal });
 }
 
 export async function invokeRecognition(rules, request, options) {
@@ -67,17 +82,32 @@ export function createRecognitionRules(rules) {
   const one = async (request, options) => (await batch([request], options))[0];
   return {
     batch,
-    metadata: (record, contentKind, options) => one({ kind: 'metadata', record, contentKind }, options),
+    metadata: (record, contentKind, options) => one({
+      kind: 'metadata',
+      record,
+      ...(contentKind === undefined ? {} : { contentKind }),
+    }, options),
+    canonical: (title, contentKind, query, options) =>
+      invokeRecognition(rules, {
+        operation: 'recognition.canonical',
+        title,
+        ...(contentKind === undefined ? {} : { contentKind }),
+        ...(query === undefined ? {} : { query }),
+      }, options),
+    season: (record, options) => one({ kind: 'season', record }, options),
   };
 }
 
 export function providerFamily(provider) {
-  switch (provider) {
-    case 'yidong':
-    case 'tianyi':
-    case 'quark':
-    case 'uc':
-    case 'baidu': return provider;
+  if (typeof provider !== 'string') return undefined;
+  switch (provider.trim().toLowerCase()) {
+    case '139':
+    case 'yidong': return 'yidong';
+    case '189':
+    case 'tianyi': return 'tianyi';
+    case 'quark': return 'quark';
+    case 'uc': return 'uc';
+    case 'baidu': return 'baidu';
     default: return undefined;
   }
 }

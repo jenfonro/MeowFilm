@@ -32,6 +32,12 @@ struct FilmRuleCardResult: Equatable {
                 return .init(text: error.text.displayString, failed: true)
             }
             guard result.matchedRuleIndex == position else { return .init(text: "未命中") }
+            if group == .season {
+                if let s = result.season, s > 0 {
+                    return .init(text: "提取季度：第\(s)季")
+                }
+                return .init(text: "季度解析失败", failed: true)
+            }
             if let rewritten = result.rewrittenText {
                 return rewritten.isEmpty ? .init(text: "空结果（改写失败）", failed: true)
                     : .init(text: rewritten.displayString)

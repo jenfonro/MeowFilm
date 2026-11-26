@@ -198,16 +198,18 @@
       <ScrollViewer x:Name="MetadataScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
        <Grid x:Name="MetadataOverlay">
         <StackPanel x:Name="MetadataContent" Margin="20,22,20,22" VerticalAlignment="Top">
-         <TextBlock x:Name="FilmTitle" Text="{x:Bind Page.Title, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Heading}" TextWrapping="Wrap" TextAlignment="Center" AutomationProperties.HeadingLevel="Level1" />
-         <TextBlock x:Name="FilmMetadata" Text="{x:Bind Page.Metadata, Mode=OneWay}" Margin="0,6,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" TextAlignment="Center" />
-         <desktop:WrapPanel x:Name="FilmFacts" HorizontalAlignment="Center" Margin="0,6,0,0">
-          <StackPanel Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center" Visibility="{x:Bind Page.HasScore, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
-           <TextBlock Text="★" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" VerticalAlignment="Center" Margin="0,0,4,0" />
-           <TextBlock Text="{x:Bind Page.Score, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" VerticalAlignment="Center" />
-           <TextBlock Text="{x:Bind Page.ScoreProvider, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="4,0,0,0" VerticalAlignment="Center" />
-          </StackPanel>
-          <TextBlock Text="{x:Bind Page.Genres, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" TextAlignment="Center" />
-         </desktop:WrapPanel>
+         <TextBlock x:Name="FilmTitle" Text="{x:Bind Page.Title, Mode=OneWay}" MinHeight="32" FontSize="{StaticResource MeowFilm.Font.Size.Heading}" TextWrapping="Wrap" TextAlignment="Center" AutomationProperties.HeadingLevel="Level1" />
+         <TextBlock x:Name="FilmMetadata" Text="{x:Bind Page.Metadata, Mode=OneWay}" MinHeight="21" Margin="0,6,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" TextAlignment="Center" />
+         <Grid MinHeight="21" Margin="0,6,0,0">
+          <desktop:WrapPanel x:Name="FilmFacts" HorizontalAlignment="Center" VerticalAlignment="Center">
+           <StackPanel Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center" Visibility="{x:Bind Page.HasScore, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+            <TextBlock Text="★" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" VerticalAlignment="Center" Margin="0,0,4,0" />
+            <TextBlock Text="{x:Bind Page.Score, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" VerticalAlignment="Center" />
+            <TextBlock Text="{x:Bind Page.ScoreProvider, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="4,0,0,0" VerticalAlignment="Center" />
+           </StackPanel>
+           <TextBlock Text="{x:Bind Page.Genres, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" TextAlignment="Center" />
+          </desktop:WrapPanel>
+         </Grid>
          <desktop:WrapPanel x:Name="HeroActions" HorizontalAlignment="Center" Margin="0,14,0,16">
           <Button x:Name="HeroPlayButton" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" Click="Play_Click" Style="{StaticResource Film.HeroPlay}" AutomationProperties.Name="播放当前选择" Margin="0,0,12,0">
            <StackPanel Orientation="Horizontal">
@@ -218,7 +220,9 @@
           <CheckBox x:Name="ShortVideoButton" Content="短视频" Style="{StaticResource Film.ShortVideo}" MinWidth="0" IsChecked="{x:Bind Page.ShortVideo, Mode=OneWay, FallbackValue=False}" Click="ShortVideo_Click" Margin="0,0,12,0" VerticalAlignment="Center" AutomationProperties.Name="短视频模式" />
           <desktop:FavoriteButton x:Name="FavoriteButton" IsFavorited="{x:Bind Page.IsFavorite, Mode=OneWay, FallbackValue=False}" IsEnabled="{x:Bind Page.CanFavorite, Mode=OneWay, FallbackValue=False}" Width="44" Height="44" CornerRadius="22" IconSize="20" VerticalAlignment="Center" Click="Favorite_Changed" />
          </desktop:WrapPanel>
-         <Button x:Name="OverviewToggle" HorizontalAlignment="Center" Click="Overview_Click" Style="{StaticResource Film.OverviewToggle}" />
+         <Grid MinHeight="32">
+          <Button x:Name="OverviewToggle" HorizontalAlignment="Center" VerticalAlignment="Center" Click="Overview_Click" Style="{StaticResource Film.OverviewToggle}" />
+         </Grid>
          <TextBlock x:Name="OverviewText" Text="{x:Bind Page.Overview, Mode=OneWay}" TextWrapping="Wrap" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="22" Margin="0,10,0,0" Visibility="{x:Bind Page.OverviewExpanded, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
          <Grid Margin="0,16,0,0">
           <Grid.ColumnDefinitions>
@@ -226,13 +230,13 @@
            <ColumnDefinition />
           </Grid.ColumnDefinitions>
           <Grid.RowDefinitions>
-           <RowDefinition Height="Auto" />
-           <RowDefinition Height="Auto" />
+           <RowDefinition MinHeight="21" Height="Auto" />
+           <RowDefinition MinHeight="27" Height="Auto" />
           </Grid.RowDefinitions>
-          <TextBlock Text="导演" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Visibility="{x:Bind Page.Directors, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
-          <TextBlock x:Name="DirectorNames" Visibility="{x:Bind Page.Directors, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Grid.Column="1" Text="{x:Bind Page.Directors, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" />
-          <TextBlock Grid.Row="1" Text="演员" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Margin="0,6,0,0" Visibility="{x:Bind Page.Cast, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
-          <TextBlock x:Name="CastNames" Visibility="{x:Bind Page.Cast, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Grid.Row="1" Grid.Column="1" Text="{x:Bind Page.Cast, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Margin="0,6,0,0" TextWrapping="Wrap" />
+          <TextBlock x:Name="DirectorLabel" Text="导演" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" />
+          <TextBlock x:Name="DirectorNames" Grid.Column="1" Text="{x:Bind Page.Directors, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" />
+          <TextBlock x:Name="CastLabel" Grid.Row="1" Text="演员" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Margin="0,6,0,0" />
+          <TextBlock x:Name="CastNames" Grid.Row="1" Grid.Column="1" Text="{x:Bind Page.Cast, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Margin="0,6,0,0" TextWrapping="Wrap" />
          </Grid>
         </StackPanel>
        </Grid>
@@ -285,7 +289,7 @@
           </DataTemplate>
          </ComboBox.ItemTemplate>
         </desktop:EqualWidthComboBox>
-        <CheckBox Grid.Column="2" Content="点映" IsChecked="{x:Bind Page.PreviewEpisodes, Mode=OneWay, FallbackValue=False}" Click="Preview_Click" Margin="10,0,16,0" VerticalAlignment="Center" AutomationProperties.Name="显示点映剧集" />
+        <CheckBox Grid.Column="2" Content="点映" IsChecked="{x:Bind Page.PreviewEpisodes, Mode=OneWay, FallbackValue=False}" Visibility="{x:Bind Page.CanTogglePreview, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Click="Preview_Click" Margin="10,0,16,0" VerticalAlignment="Center" AutomationProperties.Name="显示点映剧集" />
         <Button x:Name="RawDirectory" Grid.Column="3" Content="查看原始列表" Click="Directory_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,8,0" Visibility="{x:Bind Page.CanBrowseRaw, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
        </Grid>
       </Grid>
@@ -325,9 +329,6 @@
     </StackPanel>
     <Grid MinHeight="120" Visibility="{x:Bind Page.ShowListMessage, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
      <TextBlock Text="{x:Bind Page.ListMessage, Mode=OneWay}" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" AutomationProperties.LiveSetting="Polite" />
-    </Grid>
-    <Grid MinHeight="120" Visibility="{x:Bind Page.RequiresSourceSearch, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
-     <Button x:Name="SearchSourcesButton" Content="搜索剧集" Click="SearchSources_Click" Style="{StaticResource Film.PlaybackAction}" HorizontalAlignment="Center" VerticalAlignment="Center" IsEnabled="{x:Bind Page.CanStartSourceSearch, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="搜索剧集" />
     </Grid>
     <ContentControl IsEnabled="{x:Bind Page.CanSelectDirectory, Mode=OneWay, FallbackValue=False}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
      <Grid x:Name="DirectoryHost" />
@@ -372,7 +373,6 @@
    </StackPanel>
   </ScrollViewer>
   <desktop:NoticeOutlet Message="{x:Bind Page.ReportErrorMessage, Mode=OneWay}" />
-  <desktop:NoticeOutlet Message="{x:Bind Page.MetadataAssociationErrorMessage, Mode=OneWay}" />
   <desktop:NoticeOutlet x:Name="Notices" />
  </Grid>
 </UserControl>

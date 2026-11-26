@@ -31,6 +31,7 @@ public final class FilmRulesDraft: ObservableObject {
         case .episode: value.episodeRules[index] = rule
         case .movie: value.movieRules[index] = rule
         case .search: value.aggregateRegexRules[index] = rule.pattern
+        case .season: value.seasonRules[index] = rule
         }
         draft = value
     }

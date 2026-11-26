@@ -29,7 +29,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private bool popupOpen;
 
     internal FilmSettingsView(FilmRuleService rules, FilmSourceService sources, IStorageDatabase store,
-        FilmPlaybackSettings? business, Func<FilmPlaybackTarget?> target,
+        FilmPlaybackSettings? business, Func<string?> targetId,
         FilmMetadataService? metadata = null)
     {
         this.rules = rules ?? throw new ArgumentNullException(nameof(rules));
@@ -41,9 +41,9 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         PanPage.DataContext = panAccounts;
         if (business is not null)
         {
-            siteCleanSettings = new(business, target, "clean");
+            siteCleanSettings = new(business, targetId, "clean");
             SiteCleanHost.Content = siteCleanSettings;
-            playbackSettings = new(business, target, "preferences");
+            playbackSettings = new(business, targetId, "preferences");
             BusinessPage.Children.Add(playbackSettings);
             BusinessNavigation.Visibility = Visibility.Visible;
         }

@@ -4,7 +4,7 @@ import Combine
 import MeowDebug
 import MeowRuntime
 
-/// A display snapshot and consumer lifetime. Node owns reads, cursors, rules,
+/// A display snapshot and consumer lifetime. Node owns live sources, cursors, rules,
 /// cards and search-to-playback facts.
 @MainActor
 public final class FilmSearchSession: ObservableObject {
@@ -13,10 +13,9 @@ public final class FilmSearchSession: ObservableObject {
     @Published public private(set) var snapshot: FilmSearchSnapshot
     @Published public private(set) var error: FilmPlaybackError?
     private nonisolated(unsafe) var transport: FilmSearchTransport
-    private let readSites: FilmSearchService.Sites
     private let metadataRevision: UUID
+    private let sourceSignature: String?
     private weak var service: FilmSearchService?
-    private var sources: [FilmPlaybackSource]?
     private nonisolated(unsafe) var allocatedID: UUID?
     private var started = false, stopped = false
     private nonisolated(unsafe) var released = false
@@ -24,7 +23,6 @@ public final class FilmSearchSession: ObservableObject {
     private var presentationVisible = false
     private(set) var invalidated = false
     private var work: Task<Void, Never>?
-    private nonisolated(unsafe) var admission: Task<[FilmPlaybackSource], Error>?
     private nonisolated(unsafe) var observation: Task<Void, Never>?
     private nonisolated(unsafe) var runtimeAvailabilityTask: Task<Void, Never>?
     private var observationID = UUID()
@@ -35,8 +33,9 @@ public final class FilmSearchSession: ObservableObject {
     init(query: String, service: FilmSearchService, presentation: FilmSearchSnapshot? = nil) {
         let initial = FilmSearchSnapshot(sessionID: UUID(), query: query)
         snapshot = presentation.map { initial.retainingDisplay($0) } ?? initial
-        transport = service.transport.renewed(); readSites = service.sites
+        transport = service.transport.renewed()
         metadataRevision = service.metadataRevision
+        sourceSignature = service.currentSourceSignature
         self.service = service
     }
 
@@ -44,8 +43,9 @@ public final class FilmSearchSession: ObservableObject {
         service === owner && metadataRevision == owner.metadataRevision
     }
 
-    func hasDifferentSources(_ scope: [Data: RuntimeValue]) -> Bool {
-        sources.map { FilmSearchService.authorizationScope($0) != scope } ?? false
+    func hasDifferentSources(_ signature: String) -> Bool {
+        guard let sourceSignature else { return false }
+        return sourceSignature != signature
     }
 
     func startIfNeeded() {
@@ -143,14 +143,12 @@ public final class FilmSearchSession: ObservableObject {
         }
     }
 
-    /// Retains the Node session and its successful pages. Accepted finite
-    /// producers belong to Node and can still settle after consumer stop.
+    /// Retains the Node session and its successful pages.
     public func cancel() {
         guard !released, !stopped else { return }
         stopped = true
         publicationID = UUID()
         let token = publicationID
-        admission?.cancel()
         let observer = observation
         observationID = UUID(); observation = nil
         observer?.cancel()
@@ -171,7 +169,6 @@ public final class FilmSearchSession: ObservableObject {
         cancel()
     }
 
-    /// A persistent SSE connection is not pending content work.
     public func drain() async {
         await work?.value
         guard snapshot.loading else { return }
@@ -209,21 +206,17 @@ public final class FilmSearchSession: ObservableObject {
         FilmSearchContext(session: self, card: card)
     }
 
-    /// Node owns `session.selections` and resolves late-TMDB-carrier folding for
-    /// a live `selectionId`; do not reject a selection just because `snapshot.cards` folded it.
-    func reference(for selectionID: String) -> RuntimeValue? {
+    func reference(for cardID: String) -> RuntimeValue? {
         guard let id = allocatedID, !runtimeClosed, !released, !invalidated,
-              snapshot.sessionID == id, !selectionID.isEmpty else { return nil }
-        return .object(["sessionId": .string(id.uuidString.lowercased()), "selectionId": .string(selectionID)])
+              snapshot.sessionID == id, !cardID.isEmpty else { return nil }
+        return .object(["sessionId": .string(id.uuidString.lowercased()), "cardId": .string(cardID)])
     }
 
-    /// Establishes the terminal state before another queued operation can run.
     func release() -> Task<Void, Never> {
         if let releaseTask { return releaseTask }
         released = true; invalidated = true; stopped = true
         publicationID = UUID()
         runtimeAvailabilityTask?.cancel(); runtimeAvailabilityTask = nil
-        admission?.cancel()
         observationID = UUID(); observation?.cancel()
         let accepted = work, observer = observation
         observation = nil
@@ -250,29 +243,19 @@ public final class FilmSearchSession: ObservableObject {
     private func open(publication token: UUID) async {
         do {
             guard publicationID == token, !stopped, !released else { return }
-            let admission = Task { try await readSites().map(\.playbackSource) }
-            self.admission = admission
-            let sources = try await admission.value
-            self.admission = nil
-            guard publicationID == token, !stopped, !released, !invalidated else { throw CancellationError() }
-            self.sources = sources
-            if let service, !service.accepts(sources) { invalidateSources(); throw CancellationError() }
-            // Once admitted, drain the RPC: its identity is needed for release.
             let response = try await transport.call("search.open", [
-                "query": .string(snapshot.query), "sources": .array(sources.map { .object($0.value) }),
+                "query": .string(snapshot.query),
             ])
             if let text = response.filmObject?["sessionId"]?.filmText { allocatedID = UUID(uuidString: text) }
             let value = try FilmSearchSnapshot(value: response)
             allocatedID = value.sessionID
             DebugRuntime.log(.search, sub: "session", event: "open.ok", level: .debug, data: .object([
                 "sessionId": .string(value.sessionID.uuidString.lowercased()),
-                "sourceCount": .int(sources.count),
             ]))
             guard publicationID == token, !stopped, !released, !invalidated else { return }
             try accept(value)
             observe()
         } catch {
-            admission = nil
             guard publicationID == token, !released, !invalidated else { return }
             snapshot.loading = false
             if !Self.cancelled(error) {
@@ -393,13 +376,15 @@ public final class FilmSearchSession: ObservableObject {
             guard value.sequence > snapshot.sequence else { return }
             guard value.revision >= snapshot.revision else { throw FilmSearchError.invalidResponse }
         }
+        if value.invalidated {
+            invalidated = true
+        }
         if stopping {
-            // A late open may have allocated an identity without ever publishing.
-            // Stop acknowledges only control state, never its newly settled data.
             var state = value.retainingDisplay(snapshot)
             state.sequence = value.sequence; state.revision = value.revision
             state.siteState = value.siteState; state.metadataState = value.metadataState
             state.loading = value.loading; state.hasMore = value.hasMore; state.noSources = value.noSources
+            state.invalidated = value.invalidated
             snapshot = state
         } else {
             snapshot = value.retainingLoadingDisplay(snapshot)
@@ -455,7 +440,7 @@ public final class FilmSearchSession: ObservableObject {
 
     nonisolated deinit {
         runtimeAvailabilityTask?.cancel()
-        admission?.cancel(); observation?.cancel()
+        observation?.cancel()
         if !released, let id = allocatedID {
             let transport = transport
             Task {

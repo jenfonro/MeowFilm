@@ -12,8 +12,9 @@ App 原生 owner 使用同一 `NativeDatabase`，将以下配置写入规范化�
 | `pan.accounts` | `pan_accounts`、`owner_revisions` | provider 单行凭据与 account/row revision；原生 owner（`Pan/Storage/PanCredentialRepository.cs`） |
 | `tmdb` | `tmdb_settings` | typed 设置字段；原生 owner（`Film/Storage/FilmMetadataSettingsStore.cs`） |
 | `douban` | `douban_settings` | typed 设置字段；原生 owner（`Film/Storage/FilmMetadataSettingsStore.cs`） |
-| `film.rules` | `film_rule_groups`、`film_rules` | 分组规则与顺序行；原生 owner（`Film/Storage/FilmRulesStore.cs`） |
+| `film.rules` | `film_rule_groups`、`film_rules` | 分组规则（含 `seasonRules` 第五组）与顺序行；原生 owner（`Film/Storage/FilmRulesStore.cs`） |
 | `film.preferences` | `film_preferences`、`film_preference_items` | typed 偏好与有序项；原生 owner（`Film/Storage/FilmPreferencesStore.cs`） |
+| `film.video-sources` | `film_source_probes`、`film_source_sites`、`film_video_sources`、`film_video_options`、`film_video_aggregate`、`film_source_deletions` | 视频源启停、搜索开关、排序、聚合封面站点与删除标记；原生 owner（`Film/Storage/FilmSourceCatalogStore.cs`） |
 
 凭据在所属业务表中纯明文保存；不使用 DPAPI、Keychain、应用层加密或独立凭据存储。密码、Cookie、Token 不进入通知、日志或第二份运行器设置副本。没有运行器消费者的纯原生设置不发送通知。
 

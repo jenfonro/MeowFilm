@@ -264,7 +264,13 @@ public partial class FilmPlaybackView
         OverviewToggle.Content = page.OverviewExpanded ? "收起简介" : "简介";
         AutomationProperties.SetName(OverviewToggle, page.OverviewExpanded ? "收起简介" : "展开简介");
         AutomationProperties.SetItemStatus(OverviewToggle, page.OverviewExpanded ? "已展开" : "已收起");
-        OverviewToggle.Visibility = page.Overview.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        OverviewToggle.Opacity = page.HasOverview ? 1 : 0;
+        OverviewToggle.IsHitTestVisible = page.HasOverview;
+        OverviewToggle.IsTabStop = page.HasOverview;
+        DirectorLabel.Opacity = page.HasDirectors ? 1 : 0;
+        DirectorNames.Opacity = page.HasDirectors ? 1 : 0;
+        CastLabel.Opacity = page.HasCast ? 1 : 0;
+        CastNames.Opacity = page.HasCast ? 1 : 0;
         AutomationProperties.SetName(FavoriteButton, (page.IsFavorite ? "取消收藏 " : "收藏 ") + page.Title);
         UpdateControlLayout();
     }

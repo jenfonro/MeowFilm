@@ -9,6 +9,7 @@ public actor FilmSourceService {
     private static let convergenceTimeoutNanoseconds: UInt64 = 30_000_000_000
     private static let convergenceIntervalNanoseconds: UInt64 = 250_000_000
     let transport: CatScriptTransport
+    private let settingsRepository: FilmSettingsRepository
     private let settings: CatSourceSettings
     private let localInput: CatLocalSourceInput
     private let repository: FilmSourceRepository
@@ -33,6 +34,7 @@ public actor FilmSourceService {
                 settingsRepository: FilmSettingsRepository, runtimeSourceRoot: URL,
                 observeConnection: @escaping @Sendable () async -> RuntimeHTTPClient? = { nil }) {
         self.transport = transport; self.repository = FilmSourceRepository(database: database)
+        self.settingsRepository = settingsRepository
         self.settings = CatSourceSettings(repository: settingsRepository)
         self.localInput = CatLocalSourceInput(runtimeRoot: runtimeSourceRoot)
         self.observeConnection = observeConnection
@@ -97,6 +99,7 @@ public actor FilmSourceService {
         try Task.checkCancellation()
         let candidate = FilmSourceState(cats: cats.map(StoredFilmCat.init), videos: videos,
             deleted: deleted.sorted(by: FilmSourceKey.ordered))
+        let videosChanged = candidate.videos != document.videos
         if candidate != document {
             do { revision = try await repository.save(candidate, previous: document, expected: revision) }
             catch {
@@ -111,6 +114,7 @@ public actor FilmSourceService {
                 }
                 throw error
             }
+            if videosChanged { settingsRepository.notifyVideoSourcesChanged() }
         }
         document = candidate; initialized = true
         publish(.init(cats: cats, videos: videos, runtimeError: snapshot.runtimeError))

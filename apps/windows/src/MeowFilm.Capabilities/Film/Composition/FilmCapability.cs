@@ -71,8 +71,7 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         search = new FilmSearchService(capture, sources);
         nativeFilmPlayback = playback;
         filmPlayback = new FilmPlaybackSession(playback,
-            (page, parameters, reconnect, token) =>
-                PreparePlaybackOpenAsync(sources, capture, page, parameters, reconnect, token));
+            (reconnect, token) => ConnectPlaybackRuntimeAsync(sources, capture, reconnect, token));
         library = new FilmLibrary(storage);
         business = new FilmPlaybackSettings(runtime, storage);
 
@@ -81,7 +80,6 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         filmPlayback.OperationFailed += PlaybackFailed;
         filmPlayback.MediaStateChanged += PlaybackMediaChanged;
         library.Changed += FavoritesChanged;
-        sources.Changed += PlaybackSourcesChanged;
         (runtime as IRuntimeRecovery)?.RegisterRecoveryScope(this);
 
         Sections = FilmSectionDefinition.Home.Select(definition => new FilmHomeSection(definition)).ToArray();
@@ -94,7 +92,7 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
             new(PlaybackRoute, "播放页", "\uE8B2", ShowInSidebar: false)
         ];
         view = new(this);
-        settings = new FilmSettingsView(rules, sources, storage, business, () => Playback?.ActiveTarget, metadata);
+        settings = new FilmSettingsView(rules, sources, storage, business, () => Playback?.TargetId, metadata);
         debugAdapter = new(this);
     }
 
@@ -246,7 +244,6 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         if (disposed) return;
         foreach (var page in playbackPages.Values) page.Release();
         playbackPages.Clear();
-        sources.Changed -= PlaybackSourcesChanged;
         filmPlayback.OperationFailed -= PlaybackFailed;
         filmPlayback.MediaStateChanged -= PlaybackMediaChanged;
         library.Changed -= FavoritesChanged;

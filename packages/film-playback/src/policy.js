@@ -3,7 +3,7 @@ import { providerFamily, qualityKey } from './rules.js';
 const ruleOrder = ['quality', 'pan', 'keyword'];
 const panOrder = ['yidong', 'tianyi', 'quark', 'uc', 'baidu'];
 const siteCleanKeywords = ['直播', '体育', '短剧', '听书', '舞曲', '哔哩'];
-const qualityRanks = { '4k_hdr': 6, '4k_fps': 5, '4k': 4, '1080p': 2, '720p': 1 };
+const qualityRanks = { '8k': 7, '4k_hdr': 6, '4k_fps': 5, '4k': 4, '1080p': 2, '720p': 1 };
 
 export function defaultPreferences() {
   return { ruleOrder: [...ruleOrder], panOrder: [...panOrder], keywords: [],
@@ -49,55 +49,85 @@ export function normalizePreferences(value = {}) {
 }
 
 export function isSmartSiteAllowed(source, preferences = defaultPreferences()) {
-  if (!source || source.enabled === false || source.searchable === false) return false;
+  if (!source || source.enabled === false || source.searchable === false || source.smartSkip === true) return false;
   const name = typeof source.name === 'string' ? source.name.toLowerCase() : '';
   return !preferences.siteCleanKeywords.some(keyword => name.includes(keyword.toLowerCase()));
 }
 
+function candidatePanFamily(candidate) {
+  return providerFamily(candidate?.panProvider ?? candidate?.provider);
+}
+
+function normalizedQualityKey(value) {
+  if (typeof value === 'string' && value.trim().toLowerCase() === '8k') return '8k';
+  return qualityKey(value);
+}
+
 function matchesConstraint(candidate, constraint) {
+  if (!constraint || constraint.action === 'default' || constraint.action === 'switch') return true;
   if (constraint.action === 'pan') {
     const family = providerFamily(constraint.provider);
-    return family !== undefined && providerFamily(candidate.provider) === family;
+    return family !== undefined && candidatePanFamily(candidate) === family;
   }
   if (constraint.action === 'quality') {
-    const quality = qualityKey(constraint.quality);
-    return quality !== '' && qualityKey(candidate.quality) === quality;
+    const quality = normalizedQualityKey(constraint.quality);
+    return quality !== '' && normalizedQualityKey(candidate.quality) === quality;
   }
-  return constraint.action === 'default' || constraint.action === 'switch';
+  return true;
 }
 
 function keywordRank(candidate, keywords) {
-  const text = [candidate.name, candidate.path, candidate.fileName, candidate.displayName]
+  const text = [candidate.name, candidate.path, candidate.fileName, candidate.lineLabel]
     .filter(value => typeof value === 'string').join(' ').toLowerCase();
   const rank = keywords.findIndex(keyword => text.includes(keyword.toLowerCase()));
   return rank < 0 ? keywords.length : rank;
 }
 
 function panRank(candidate, preferences) {
-  const rank = preferences.panOrder.indexOf(providerFamily(candidate.provider));
+  const family = candidatePanFamily(candidate);
+  const rank = family ? preferences.panOrder.indexOf(family) : -1;
   return rank < 0 ? preferences.panOrder.length : rank;
 }
 
-export function compareCandidates(a, b, { preferences = defaultPreferences(), constraint = { action: 'default' },
-  current } = {}) {
+export function compareCandidates(a, b, {
+  preferences = defaultPreferences(),
+  constraint = { action: 'default' },
+  current,
+  multiSeason = false,
+  preferSeason = 0,
+} = {}) {
   const allowed = Number(matchesConstraint(b, constraint)) - Number(matchesConstraint(a, constraint));
   if (allowed) return allowed;
+
+  // Aligned with match_core.go:smartCompareSeasonRank — explicit file/folder season (4)
+  // > title/manual season (3) > implicit Season 1 fallback (0) when multi-season is active.
+  if (multiSeason && preferSeason > 0) {
+    const rankA = a.seasonRank ?? 0;
+    const rankB = b.seasonRank ?? 0;
+    if (rankA !== rankB) return rankB - rankA;
+  }
+
   const compare = dimension => {
-    if (dimension === 'quality') return (qualityRanks[qualityKey(b.quality)] ?? 0) - (qualityRanks[qualityKey(a.quality)] ?? 0);
+    if (dimension === 'quality') {
+      return (qualityRanks[normalizedQualityKey(b.quality)] ?? 0) - (qualityRanks[normalizedQualityKey(a.quality)] ?? 0);
+    }
     if (dimension === 'pan') return panRank(a, preferences) - panRank(b, preferences);
     if (dimension === 'keyword') return keywordRank(a, preferences.keywords) - keywordRank(b, preferences.keywords);
     return 0;
   };
+
   if (constraint.action === 'pan' || constraint.action === 'quality') {
     const dimension = constraint.action === 'pan' ? 'quality' : 'pan';
-    const currentValue = dimension === 'quality' ? qualityKey(current?.quality) : providerFamily(current?.provider);
+    const currentValue = dimension === 'quality'
+      ? normalizedQualityKey(current?.quality)
+      : candidatePanFamily(current);
     if (currentValue) {
-      const value = candidate => dimension === 'quality' ? qualityKey(candidate.quality) : providerFamily(candidate.provider);
+      const value = candidate => dimension === 'quality'
+        ? normalizedQualityKey(candidate.quality)
+        : candidatePanFamily(candidate);
       const preferred = Number(value(b) === currentValue) - Number(value(a) === currentValue);
       if (preferred) return preferred;
     } else if (constraint.action === 'quality' && current?.source && current.lineId !== undefined) {
-      // An ordinary/unknown line can retain its exact current source identity
-      // without being classified as a built-in pan family.
       const sameLine = candidate => candidate.source?.key === current.source.key &&
         (candidate.detailId ?? candidate.source?.detailId) === (current.detailId ?? current.source.detailId) &&
         candidate.lineId === current.lineId;
@@ -107,19 +137,39 @@ export function compareCandidates(a, b, { preferences = defaultPreferences(), co
     const secondary = compare(dimension);
     if (secondary) return secondary;
   }
-  // This compares only available candidates. Scheduling/early-stop gates while
-  // searchComplete is false belong to the session, not to a sort comparator.
+
   for (const dimension of preferences.ruleOrder) {
     const result = compare(dimension);
     if (result) return result;
   }
-  return 0;
+
+  // Degraded single-baseline mapping ranks after strict season/episode matches.
+  if (Boolean(a.degraded) !== Boolean(b.degraded)) {
+    return a.degraded ? 1 : -1;
+  }
+
+  const orderA = Number.isFinite(a.source?.order) ? a.source.order : 999999;
+  const orderB = Number.isFinite(b.source?.order) ? b.source.order : 999999;
+  if (orderA !== orderB) return orderA - orderB;
+  return (a.index ?? 0) - (b.index ?? 0);
 }
 
-function sourceMatches(actual, expected) {
-  if (!actual || !expected) return false;
-  return ['key', 'engine', 'installationId', 'siteId', 'revision', 'generation'].every(field =>
-    expected[field] === undefined || actual[field] === expected[field]);
+export function isItemBlocked(blocks, targetId, sourceKey, detailId) {
+  if (!Array.isArray(blocks) || !targetId) return false;
+  return blocks.some(block => !block?.errorCode &&
+    block?.targetId === targetId &&
+    block.sourceKey === sourceKey &&
+    block.detailId === detailId &&
+    (block.lineId === undefined || block.lineId === null));
+}
+
+export function isLineBlocked(blocks, targetId, sourceKey, detailId, lineId) {
+  if (!Array.isArray(blocks) || !targetId) return false;
+  return blocks.some(block => !block?.errorCode &&
+    block?.targetId === targetId &&
+    block.sourceKey === sourceKey &&
+    block.detailId === detailId &&
+    (block.lineId === undefined || block.lineId === null || block.lineId === lineId));
 }
 
 function isExcluded(candidate, excluded) {
@@ -135,41 +185,36 @@ function isExcluded(candidate, excluded) {
   return false;
 }
 
-export function isCandidateAllowed(candidate, { target, constraint = { action: 'default' }, excluded, blocks = [],
-  actualEpisode } = {}) {
+export function isCandidateAllowed(candidate, {
+  targetId,
+  kind,
+  season,
+  episode,
+  globalEpisode,
+  constraint = { action: 'default' },
+  excluded,
+  blocks = [],
+  sourceFilter = null,
+} = {}) {
   if (!candidate || !matchesConstraint(candidate, constraint) || isExcluded(candidate, excluded)) return false;
   if (candidate.share && !candidate.file) return false;
-  if (target) {
-    if (candidate.targetId !== undefined && candidate.targetId !== target.id) return false;
-    if (candidate.kind !== undefined && target.kind !== 'source' && candidate.kind !== target.kind) return false;
-    if (target.kind === 'group' && (!target.source || actualEpisode) &&
-        !target.members?.some(member => member.sourceKey === candidate.source?.key &&
-      member.detailId === (candidate.detailId ?? candidate.source?.detailId))) return false;
-    if (actualEpisode && ['source', 'group'].includes(target.kind)) {
-      if (target.kind === 'source' && (candidate.source?.key !== actualEpisode.source?.key ||
-          candidate.detailId !== actualEpisode.detailId)) return false;
-      if (actualEpisode.episode === undefined && actualEpisode.globalEpisode === undefined) return false;
-      if (actualEpisode.episode !== undefined && (candidate.episode !== actualEpisode.episode ||
-          candidate.season !== actualEpisode.season)) return false;
-      if (actualEpisode.globalEpisode !== undefined && candidate.globalEpisode !== actualEpisode.globalEpisode) return false;
-    }
-    if (target.kind === 'source' || target.kind === 'group' && target.source && !actualEpisode) {
-      if (!sourceMatches(candidate.source, target.source)) return false;
-      if (target.source.detailId !== undefined && candidate.detailId !== target.source.detailId) return false;
-      if (!actualEpisode) {
-        if (target.source.lineId !== undefined && candidate.lineId !== target.source.lineId) return false;
-        if (target.source.candidateId !== undefined && candidate.id !== target.source.candidateId) return false;
-      }
-    }
-    if (target.kind !== 'movie') {
-      const coordinates = target.kind === 'source' && target.episode !== undefined ? ['season', 'episode']
-        : ['season', 'episode', 'globalEpisode'];
-      for (const field of coordinates) {
-        if (target[field] !== undefined && candidate[field] !== target[field]) return false;
-      }
+  if (kind === 'movie' && candidate.eligible === false) return false;
+  if (sourceFilter) {
+    if (sourceFilter.sourceKey && candidate.source?.key !== sourceFilter.sourceKey) return false;
+    if (sourceFilter.detailId !== undefined && (candidate.detailId ?? candidate.source?.detailId) !== sourceFilter.detailId) return false;
+    if (sourceFilter.lineId !== undefined && candidate.lineId !== sourceFilter.lineId) return false;
+    if (sourceFilter.candidateId !== undefined && candidate.id !== sourceFilter.candidateId) return false;
+  }
+  if (kind === 'tv') {
+    if (globalEpisode !== undefined && candidate.globalEpisode !== undefined) {
+      if (candidate.globalEpisode !== globalEpisode) return false;
+    } else if (episode !== undefined) {
+      if (candidate.episode !== episode) return false;
+      if (season !== undefined && candidate.season !== season) return false;
+    } else {
+      return false;
     }
   }
-  return !blocks.some(block => target?.id !== undefined && block?.targetId === target.id &&
-    block.sourceKey === candidate.source?.key && block.detailId === (candidate.detailId ?? candidate.source?.detailId) &&
-    block.lineId === candidate.lineId);
+  const detailId = candidate.detailId ?? candidate.source?.detailId;
+  return !isLineBlocked(blocks, targetId, candidate.source?.key, detailId, candidate.lineId);
 }

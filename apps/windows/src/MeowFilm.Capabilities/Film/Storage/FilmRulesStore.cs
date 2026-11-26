@@ -31,6 +31,7 @@ internal static class FilmRulesStore
         var episodeRules = new List<FilmMatchRule>();
         var movieRules = new List<FilmMatchRule>();
         var aggregate = new List<string>();
+        var seasonRules = new List<FilmMatchRule>();
 
         foreach (var (group, pattern, replacement, flags) in rows)
         {
@@ -48,6 +49,9 @@ internal static class FilmRulesStore
                 case "aggregateRegexRules":
                     aggregate.Add(pattern);
                     break;
+                case "seasonRules":
+                    seasonRules.Add(new FilmMatchRule(pattern, replacement ?? "", flags ?? ""));
+                    break;
                 default:
                     throw new StorageException(StorageError.Corrupt);
             }
@@ -58,7 +62,8 @@ internal static class FilmRulesStore
             EpisodeCleanRegexRules = episodeClean,
             EpisodeRules = episodeRules,
             MovieRules = movieRules,
-            AggregateRegexRules = aggregate
+            AggregateRegexRules = aggregate,
+            SeasonRules = seasonRules
         }, revision);
     }
 
@@ -117,7 +122,14 @@ internal static class FilmRulesStore
                 UpsertRule(db, "aggregateRegexRules", i, rules.AggregateRegexRules[i], null, null);
             TrimGroup(db, "aggregateRegexRules", rules.AggregateRegexRules.Count);
 
-            foreach (string group in new[] { "episodeCleanRegexRules", "episodeRules", "movieRules", "aggregateRegexRules" })
+            for (int i = 0; i < rules.SeasonRules.Count; i++)
+            {
+                var r = rules.SeasonRules[i];
+                UpsertRule(db, "seasonRules", i, r.Pattern, r.Replace ?? "", r.Flags ?? "");
+            }
+            TrimGroup(db, "seasonRules", rules.SeasonRules.Count);
+
+            foreach (string group in new[] { "episodeCleanRegexRules", "episodeRules", "movieRules", "aggregateRegexRules", "seasonRules" })
             {
                 db.Execute("""
                     INSERT INTO film_rule_groups(group_name,overridden,row_revision)

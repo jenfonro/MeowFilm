@@ -24,7 +24,7 @@ internal sealed partial class FilmPlaybackSession
     {
         string id = next.AttemptId;
         if (ExecutionError.Length > 0 || releaseFailure is not null ||
-            playbackCommands != 0 || id.Length == 0 || FilmJson.Bool(next.Attempt, "prepareOnly") ||
+            playbackCommands != 0 || id.Length == 0 || next.Attempt?.PrepareOnly == true ||
             id == revokedPublicationId || id == blockedAttemptId || id == processingId || id == current?.Receipt.AttemptId) return;
         processingId = id;
         pendingPublication = CancellationTokenSource.CreateLinkedTokenSource(connection!.Revoked);
@@ -66,10 +66,8 @@ internal sealed partial class FilmPlaybackSession
             var receipt = FilmMediaReceipt.Read(await client.CallAsync("session.attempt",
                 new { sessionId = candidateSnapshot.SessionId.ToString(), attemptId = id }, publication.Token));
             if (receipt.AttemptId != id) throw new FilmPlaybackException("INVALID_RESPONSE");
-            var candidate = FilmCandidateItem.Read(FilmJson.Member(candidateSnapshot.Attempt, "candidate"));
-            // publication is already linked to activeConnection.Revoked and is detached from pendingPublication at commit.
-            input = new(receipt, candidate, candidateSnapshot.Target, candidateSnapshot.WorkInfo?.Kind ?? candidateSnapshot.Target.Kind,
-                FilmJson.Member(FilmJson.Member(candidateSnapshot.Attempt, "candidate"), "source").Clone(),
+            var attemptInfo = candidateSnapshot.Attempt ?? throw new FilmPlaybackException("INVALID_RESPONSE");
+            input = new(receipt, attemptInfo, candidateSnapshot.TargetId, candidateSnapshot.Work.Kind,
                 publication, activeConnection.Revoked)
             {
                 ReleaseClient = client,
@@ -80,7 +78,6 @@ internal sealed partial class FilmPlaybackSession
             publication.Token.ThrowIfCancellationRequested();
             if (receipt.MediaOrigin is not null)
             {
-                // Keep the receipt tied to this session's RuntimeMediaAuthority.
                 var sessionAuthority = authority ?? throw new FilmPlaybackException("STALE_SESSION");
                 input.Lease = sessionAuthority.CreateLease(receipt.ResourceId, receipt.Address, publication.Token,
                     resourceId => ReleaseResourceAsync(input, client, candidateSnapshot.SessionId, resourceId));
@@ -93,14 +90,12 @@ internal sealed partial class FilmPlaybackSession
             prepared = true;
             while (!committed)
             {
-                // Wait for a visible surface strictly OUTSIDE control so minimized/hidden
-                // windows never block next/previous/switch/pause/seek commands.
                 await media.WaitForTargetAsync(publication.Token);
                 await EnterMediaCommitAsync(publication.Token);
                 try
                 {
                     if (generation != ownerGeneration || ticket != intentGeneration || snapshot?.AttemptId != id ||
-                        FilmJson.Bool(snapshot.Attempt, "prepareOnly")) throw new OperationCanceledException(publication.Token);
+                        snapshot.Attempt?.PrepareOnly == true) throw new OperationCanceledException(publication.Token);
                     donor = current;
                     bool admitted = await media.TryCommitAsync(intent, () => playbackCommands == 0, () =>
                     {
@@ -251,25 +246,15 @@ internal sealed partial class FilmPlaybackSession
 
     private bool SameEpisode(Input input, Input replacement)
     {
-        var previous = input.Target;
-        var next = replacement.Target;
-        if (previous.Id != next.Id) return false;
+        if (input.TargetId != replacement.TargetId) return false;
         if (input.ContentKind == "movie" && replacement.ContentKind == "movie") return true;
-        int? previousGlobal = input.Candidate.GlobalEpisode ?? previous.GlobalEpisode;
-        int? nextGlobal = replacement.Candidate.GlobalEpisode ?? next.GlobalEpisode;
-        if (previousGlobal is { } beforeGlobal && nextGlobal is { } afterGlobal)
+        if (input.AttemptInfo.GlobalEpisode is { } beforeGlobal && replacement.AttemptInfo.GlobalEpisode is { } afterGlobal)
             return beforeGlobal == afterGlobal;
-        int? previousSeason = input.Candidate.Season ?? previous.Season;
-        int? previousEpisode = input.Candidate.Episode ?? previous.Episode;
-        int? nextSeason = replacement.Candidate.Season ?? next.Season;
-        int? nextEpisode = replacement.Candidate.Episode ?? next.Episode;
-        if (previousSeason is not null && previousEpisode is not null &&
-            nextSeason is not null && nextEpisode is not null)
-            return previousSeason == nextSeason && previousEpisode == nextEpisode;
-        // Raw play references are intentionally absent from public snapshots.
-        // Exact candidate equality or an explicit same-target replacement action
-        // supplies continuation; missing coordinates never compare equal by accident.
-        return input.Candidate.Id == replacement.Candidate.Id || continuingFrom == input.Receipt.AttemptId;
+        if (input.AttemptInfo.Season is { } ps && input.AttemptInfo.Episode is { } pe &&
+            replacement.AttemptInfo.Season is { } ns && replacement.AttemptInfo.Episode is { } ne)
+            return ps == ns && pe == ne;
+        return (input.AttemptInfo.CandidateId.Length > 0 && input.AttemptInfo.CandidateId == replacement.AttemptInfo.CandidateId)
+            || continuingFrom == input.Receipt.AttemptId;
     }
 
     private void MediaChanged(object? sender, PropertyChangedEventArgs args)
