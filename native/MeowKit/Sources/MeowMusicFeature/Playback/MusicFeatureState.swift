@@ -7,11 +7,6 @@ import MeowPlayback
 /// The feature coordinator applies service receipts; these owners retain the
 /// state for their own consumers without publishing unrelated feature changes.
 @MainActor
-public final class MusicAccessState: ObservableObject {
-    @Published public internal(set) var isClosed = false
-}
-
-@MainActor
 public final class MusicLibraryState: ObservableObject {
     @Published public internal(set) var collections: [MusicCollection] = []
     @Published public internal(set) var platforms: [MusicPlatform] = []
@@ -114,12 +109,8 @@ private func merged(_ publishers: AnyPublisher<Void, Never>...) -> AnyPublisher<
 }
 
 public extension MusicViewModel {
-    var accessChanges: AnyPublisher<Void, Never> {
-        distinctChanges(accessState.$isClosed)
-    }
-
     var searchAccessChanges: AnyPublisher<Void, Never> {
-        merged(accessChanges, accountChanges.map { _ in () }.eraseToAnyPublisher())
+        accountChanges.map { _ in () }.eraseToAnyPublisher()
     }
 
     var libraryChanges: AnyPublisher<Void, Never> {
@@ -194,8 +185,7 @@ public extension MusicViewModel {
     }
 
     var noticeChanges: AnyPublisher<Void, Never> {
-        merged(distinctChanges(notices.$error), distinctChanges(notices.$queueNotice),
-               distinctChanges(settingsReceipts.$unknown))
+        merged(distinctChanges(notices.$error), distinctChanges(notices.$queueNotice))
     }
 }
 #endif

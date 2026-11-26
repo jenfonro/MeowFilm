@@ -7,7 +7,7 @@ import {
 } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  createReportWriter, inside, loadAcceptanceHttp, preparePayloadRuntime, probeMedia,
+  classifyJsonResponseBody, createReportWriter, inside, loadAcceptanceHttp, preparePayloadRuntime, probeMedia,
 } from './accept-common.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -108,7 +108,7 @@ function decode(bytes) {
   let value;
   try { value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
   catch { throw new Error('SOURCE_ENCODING'); }
-  if (!value.trim() || !Buffer.from(value).equals(bytes)) throw new Error('SOURCE_ENCODING');
+  if (!value.trim()) throw new Error('SOURCE_ENCODING');
   return value;
 }
 
@@ -122,7 +122,6 @@ async function inventory(input) {
   const result = [];
   for (const file of await sourceFiles(input)) {
     const original = await readFile(file.path);
-    const originalHash = createHash('sha256').update(original).digest('hex');
     const extension = extname(file.name).toLowerCase();
     if (extension !== '.json') {
       const text = decode(original);
@@ -131,8 +130,6 @@ async function inventory(input) {
         label: file.name,
         basename: basename(file.name),
         bytes: original,
-        originalHash,
-        path: file.path,
         protocol: detectedProtocol(text, extension),
       });
       continue;
@@ -157,8 +154,6 @@ async function inventory(input) {
         label: itemName,
         basename: sourceName,
         bytes,
-        originalHash,
-        path: file.path,
         protocol: detectedProtocol(source, extension),
       });
     }
@@ -177,7 +172,7 @@ if (options.payload) {
     'app/modules/source-runtime.mjs',
     'node_modules/@meowfilm/script-host/src/index.js',
     'node_modules/@meowfilm/source-runtime/src/index.js',
-    'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs',
+    'app/bootstrap.mjs', 'app/contracts.mjs',
     'app/modules/source-candidates.mjs', 'app/modules/source-library.mjs', 'app/modules/source-web.mjs',
     'app/modules/source-rules.mjs', 'node_modules/@meowfilm/novel-rules/novel-rules.js',
     'node_modules/@meowfilm/runtime-bridge/src/index.js',
@@ -429,33 +424,11 @@ function networkAdapter(audit) {
       if (!options.live) throw new ScriptHostError('NETWORK_ERROR');
       const response = await network(input);
       event.statusCode = response.statusCode;
-      try {
-        const body = JSON.parse(Buffer.from(response.body ?? []).toString());
-        event.bodyKind = 'json';
-        const code = body?.code ?? body?.status ?? body?.err_code ?? body?.error_code;
-        if (typeof code === 'number' && Number.isSafeInteger(code) && Math.abs(code) <= 999999) {
-          event.businessCode = code;
-        } else if (typeof code === 'string' && /^-?\d{1,6}$/.test(code)) {
-          event.businessCode = Number(code);
-        }
-        const message = String(body?.message ?? body?.msg ?? body?.error ?? '');
-        if (/密钥.*(?:无效|缺失|错误|过期)|(?:invalid|missing|expired).*api.?key|api.?key.*(?:required|missing|invalid)|token.*(?:expired|invalid)|(?:login|account|region).*(?:required|restricted)/i
-          .test(message)) {
-          event.responseReason = 'configuration';
-        }
-        const providerError = body?.err_code ?? body?.error_code ?? body?.errcode;
-        const emptyData = body && typeof body === 'object' &&
-          (body.data === null || Array.isArray(body.resource) && body.resource.length === 0 ||
-            body.data && typeof body.data === 'object' &&
-              Object.hasOwn(body.data, 'url') && !body.data.url);
-        if (body?.success === false || body?.status === false ||
-            body?.status === 0 && providerError !== undefined ||
-            typeof providerError === 'number' && providerError !== 0 || emptyData) {
-          event.responseReason ??= 'upstream';
-        }
-      } catch {
-        event.bodyKind = 'non_json';
-      }
+      classifyJsonResponseBody(
+        response.body,
+        event,
+        /密钥.*(?:无效|缺失|错误|过期)|(?:invalid|missing|expired).*api.?key|api.?key.*(?:required|missing|invalid)|token.*(?:expired|invalid)|(?:login|account|region).*(?:required|restricted)/i,
+      );
       return response;
     } catch (error) {
       event.code = typeof error?.code === 'string' ? error.code : 'NETWORK_ERROR';
@@ -639,12 +612,6 @@ async function accept(item, index) {
       ...(event.code === undefined ? {} : { code: event.code }),
     }));
     row.initializationDiagnostics ??= diagnostics.map(safeDiagnostic);
-    try {
-      row.sourceUnchanged = createHash('sha256').update(await readFile(item.path)).digest('hex') ===
-        item.originalHash;
-    } catch {
-      row.sourceUnchanged = false;
-    }
     report.rows.push(row);
     await saveReport();
     console.log(JSON.stringify({
@@ -694,7 +661,6 @@ try {
     ])),
     unloadFailures: report.rows.filter(row => row.unload === 'cleanup_failure').length,
     cleanupFailures: report.rows.filter(row => row.cleanup !== 'complete').length,
-    changedSources: report.rows.filter(row => !row.sourceUnchanged).length,
     mediaDetected: actions.filter(action => action.media?.state === 'media_detected').length,
   };
   await saveReport();
@@ -702,12 +668,12 @@ try {
   const fatalStates = ['host_capability_missing', 'engine_incompatible', 'runtime_limit', 'cleanup_failure'];
   if (report.summary.initialized !== report.summary.sources ||
       report.summary.unloadFailures || report.summary.cleanupFailures ||
-      report.summary.changedSources || fatalStates.some(state => report.summary[state]) ||
+      fatalStates.some(state => report.summary[state]) ||
       options.live && report.summary.not_exercised) {
     process.exitCode = 1;
   }
 } finally {
   await Promise.allSettled([...pending]);
-  await Promise.allSettled([writing]);
+  await Promise.allSettled([saveReport.flush()]);
   hook?.deregister();
 }

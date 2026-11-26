@@ -9,7 +9,6 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/file.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -34,32 +33,11 @@ napi_value Release(napi_env env, napi_callback_info info) {
   lock->Close();
   napi_value value; napi_get_undefined(env, &value); return value;
 }
-#ifdef _WIN32
-bool IsAbsoluteWindowsPath(const std::u16string& path) {
-  if (path.find(u'\0') != std::u16string::npos) return false;
-  auto isSep = [](char16_t ch) { return ch == u'\\' || ch == u'/'; };
-  auto isDrive = [&](size_t pos) {
-    return path.size() >= pos + 4 &&
-      ((path[pos] >= u'A' && path[pos] <= u'Z') || (path[pos] >= u'a' && path[pos] <= u'z')) &&
-      path[pos + 1] == u':' && isSep(path[pos + 2]);
-  };
-  auto isUncTail = [&](size_t pos) {
-    if (pos >= path.size() || isSep(path[pos])) return false;
-    size_t sep = path.find_first_of(u"\\/", pos);
-    return sep != std::u16string::npos && sep + 1 < path.size() && !isSep(path[sep + 1]);
-  };
-  if (isDrive(0)) return true;
-  if (path.size() > 4 && path[0] == u'\\' && path[1] == u'\\' && path[2] == u'?' && path[3] == u'\\' && !isSep(path[4])) {
-    return true;
-  }
-  return path.size() >= 5 && isSep(path[0]) && isSep(path[1]) && isUncTail(2);
-}
-#endif
 napi_value Acquire(napi_env env, napi_callback_info info) {
   napi_value args[3]; size_t count = 3, length = 0; bool exclusive; int32_t timeout;
   if (napi_get_cb_info(env, info, &count, args, nullptr, nullptr) != napi_ok || count != 3 ||
       napi_get_value_bool(env, args[1], &exclusive) != napi_ok ||
-      napi_get_value_int32(env, args[2], &timeout) != napi_ok || timeout < 0 || timeout > 5000) {
+      napi_get_value_int32(env, args[2], &timeout) != napi_ok || timeout < 0) {
     napi_throw_error(env, "INVALID_REQUEST", "INVALID_REQUEST"); return nullptr;
   }
 #ifdef _WIN32
@@ -71,7 +49,7 @@ napi_value Acquire(napi_env env, napi_callback_info info) {
     napi_throw_error(env, "INVALID_REQUEST", "INVALID_REQUEST"); return nullptr;
   }
   path.resize(length);
-  if (!IsAbsoluteWindowsPath(path)) {
+  if (path.empty() || path.find(u'\0') != std::u16string::npos) {
     napi_throw_error(env, "UNSAFE_PATH", "UNSAFE_PATH"); return nullptr;
   }
 #else
@@ -95,24 +73,15 @@ napi_value Acquire(napi_env env, napi_callback_info info) {
     lock->handle = CreateFileW(reinterpret_cast<const wchar_t*>(path.c_str()),
       exclusive ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ, exclusive ? 0 : FILE_SHARE_READ,
       nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (lock->handle != INVALID_HANDLE_VALUE) {
-      BY_HANDLE_FILE_INFORMATION information{};
-      if (!GetFileInformationByHandle(lock->handle, &information) ||
-          (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
-        failure = "UNSAFE_PATH";
-      else break;
-      lock->Close();
-    } else if (GetLastError() != ERROR_SHARING_VIOLATION && GetLastError() != ERROR_LOCK_VIOLATION)
+    if (lock->handle != INVALID_HANDLE_VALUE) break;
+    if (GetLastError() != ERROR_SHARING_VIOLATION && GetLastError() != ERROR_LOCK_VIOLATION)
       failure = "STORAGE_IO";
 #else
     lock->handle = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (lock->handle < 0) failure = "STORAGE_IO";
     else {
-      struct stat information{};
-      if (fstat(lock->handle, &information) != 0 || !S_ISREG(information.st_mode))
-        failure = "UNSAFE_PATH";
-      else if (flock(lock->handle, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) == 0) break;
-      else if (errno != EWOULDBLOCK && errno != EAGAIN) failure = "STORAGE_IO";
+      if (flock(lock->handle, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) == 0) break;
+      if (errno != EWOULDBLOCK && errno != EAGAIN) failure = "STORAGE_IO";
       lock->Close();
     }
 #endif

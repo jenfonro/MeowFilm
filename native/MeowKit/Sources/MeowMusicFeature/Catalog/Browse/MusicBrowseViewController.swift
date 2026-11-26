@@ -65,17 +65,11 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         let selectedFilter: String
     }
 
-    public init(title: String, model: MusicViewModel, browser: (any MusicPublicBrowsing)?,
+    public init(title: String, model: MusicViewModel,
                 request: MusicPublicBrowseRequest, appearance: MusicAppearancePreferencesStore,
                 router: any MusicUIRouting, embedded: Bool = false) {
         self.model = model; self.router = router; self.embedded = embedded
-        page = browser.map {
-            MusicPublicBrowseViewModel(service: $0, request: request,
-                queuePage: { [weak model] source, cursor in
-                    guard let model else { throw MusicServiceError.closed }
-                    return try await model.remoteQueuePage(source, cursor: cursor)
-                }, releaseSource: { [weak model] in model?.releaseRemoteQueueSource($0) })
-        }
+        page = model.service.map { MusicPublicBrowseViewModel(service: $0, request: request, owner: model) }
         super.init(appearance: appearance)
         pageTitle = title
     }
@@ -151,7 +145,6 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             ])
             observe(stateChanges.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.renderState() }
         }
-        observe(model.accessChanges) { [weak self] in self?.activatePage() }
         observe(model.accountChanges) { [weak self] platform in self?.accountChanged(platform) }
         observe(model.fmArtworkChanges, whenVisible: true) { [weak self] in self?.updateFMArtwork() }
         render()
@@ -520,7 +513,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
               item.artwork == nil, model.currentFMArtwork(action) == nil,
               !previewRequests.contains(item.id), previewTasks[item.id] == nil,
               isCurrentDisplayPreview(item),
-              let provider = model.publicBrowser as? any MusicFMPreviewServing else { return }
+              let provider = model.service else { return }
         previewTasks[item.id] = Task { [weak self] in
             defer {
                 if let self {

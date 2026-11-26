@@ -1,37 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
-
-/// Search rounds request one platform page at its configured page size.
-/// The limit describes that single page; progress never splits or combines pages.
-public enum MusicSearchPagination {
-    public struct Request: Hashable, Sendable {
-        public let page: Int
-        public let limit: Int
-        public var nextPage: Int? {
-            let (next, overflow) = page.addingReportingOverflow(1)
-            return overflow ? nil : next
-        }
-        public init(page: Int, limit: Int) {
-            self.page = page; self.limit = limit
-        }
-    }
-    public static func pageSize(_ platform: MusicPublicBrowsePlatform) -> Int { 30 }
-}
-
-public struct MusicPlaylistSearchPage: Sendable {
-    public let platform: MusicPublicBrowsePlatform
-    public let query: String
-    public let page: Int
-    public let limit: Int
-    public let total: Int
-    public let nextPage: Int?
-    public let items: [MusicPublicBrowseCollection]
-    public init(platform: MusicPublicBrowsePlatform, query: String, page: Int, limit: Int = 30,
-                total: Int, nextPage: Int?, items: [MusicPublicBrowseCollection]) {
-        self.platform = platform; self.query = query; self.page = page; self.limit = limit
-        self.total = total; self.nextPage = nextPage; self.items = items
-    }
-}
+import MeowMusicPlatform
 
 /// Shared ordered page dispatcher for songs and playlists. Successful prefixes
 /// commit immediately; a failed range stays current, and speculative successes

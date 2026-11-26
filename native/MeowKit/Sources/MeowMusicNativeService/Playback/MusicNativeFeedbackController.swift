@@ -1,19 +1,19 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 
-/// One native timeline for the listening occurrence. Provider leases only own
-/// admission, protocol outcomes and the portion observed under their authority.
+/// One native timeline for the listening occurrence.
 final class MusicNativeFeedbackController: @unchecked Sendable {
     private final class Listen: @unchecked Sendable {
         let id = UUID()
-        let sourceTarget: MusicPlaybackFeedbackTarget
         let target: MusicPlaybackFeedbackTarget
         let setting: MusicPlaybackFeedbackSetting
-        let authorization: MusicPlaybackFeedbackAuthorization
+        let authorization = MusicQueueAuthorization()
+        let authorize: @Sendable () async throws -> Void
         let startedAt: TimeInterval
         var startOccurredAt: TimeInterval
-        var lease: MusicPlaybackFeedbackLease?
+        var session: MusicPlaybackFeedbackSession?
+        var accounts: NativeMusicAccountService?
         var listened = 0.0, media = 0.0
         var admittedAt: TimeInterval?
         var dispatched = false
@@ -25,27 +25,19 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         var pendingEnd: MusicPlaybackFeedbackReport?
         var workers = 1
         init(target: MusicPlaybackFeedbackTarget, setting: MusicPlaybackFeedbackSetting,
-             authorization: MusicPlaybackFeedbackAuthorization, startedAt: TimeInterval) {
-            sourceTarget = target; self.setting = setting; self.authorization = authorization
+             authorize: @escaping @Sendable () async throws -> Void, startedAt: TimeInterval) {
+            self.target = target; self.setting = setting
+            self.authorize = authorize
             self.startedAt = startedAt
             self.startOccurredAt = startedAt
-            // After admission the original account lease owns reporting. A
-            // normal queue retirement may not erase already captured provenance.
-            let proof = target.recommendationProof.map {
-                MusicPlaybackRecommendationProof(occurrenceID: $0.occurrenceID, nativeID: $0.nativeID,
-                    source: $0.source, sourceID: $0.sourceID, algorithm: $0.algorithm,
-                    authorization: MusicQueueAuthorization())
-            }
-            self.target = .init(platform: target.platform, nativeID: target.nativeID, mixsongID: target.mixsongID,
-                source: target.source, sourceID: target.sourceID, algorithm: target.algorithm,
-                automatic: target.automatic, recommendationProof: proof, origin: target.origin)
         }
-        func revoke() {
-            sourceTarget.recommendationProof?.authorization.remove(id)
-            authorization.revoke(); target.recommendationProof?.authorization.revoke(); lease?.revoke()
+        func checkAuthorization() async throws {
+            try authorization.check()
+            try await authorize()
+            try authorization.check()
         }
-        deinit { sourceTarget.recommendationProof?.authorization.remove(id) }
     }
+
     private let lock = NSLock()
     private var current: String?, occurrence: String?, nativeID: UUID?, sequence: UInt64 = 0
     private var last: MusicPlaybackFeedbackSample?
@@ -54,15 +46,15 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
     private var active: [MusicAccountPlatform: Listen] = [:]
     private var work: [UUID: Listen] = [:]
     private var cleanupTasks: [UUID: Task<Void, Never>] = [:]
-    // Unknown submission is spent for this listening occurrence/generation,
-    // including successful URL, script and quality handoffs.
     private var spent: [MusicAccountPlatform: Int] = [:]
     private var terminal = false
     private var retiringReason: MusicPlaybackFeedbackReport.Reason?
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var registrationWaiters: [CheckedContinuation<Void, Never>] = []
     init() {}
+
     private func locked<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
+
     func flush() async {
         await withCheckedContinuation { continuation in
             let ready = locked {
@@ -77,19 +69,24 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             for task in pending { await task.value }
         }
     }
-    private func retireLease(_ lease: MusicPlaybackFeedbackLease) {
+
+    private func retireSession(_ session: MusicPlaybackFeedbackSession, accounts: NativeMusicAccountService?) {
+        guard let accounts else { return }
         locked {
-            guard cleanupTasks[lease.id] == nil else { return }
-            cleanupTasks[lease.id] = Task { [self] in
-                await lease.drain()
-                _ = locked { cleanupTasks.removeValue(forKey: lease.id) }
+            guard cleanupTasks[session.id] == nil else { return }
+            cleanupTasks[session.id] = Task { [self] in
+                await accounts.endPlaybackFeedback(session)
+                _ = locked { cleanupTasks.removeValue(forKey: session.id) }
             }
         }
     }
+
     private func revoke(_ item: Listen) {
-        item.revoke()
-        if let lease = locked({ item.lease }) { retireLease(lease) }
+        item.authorization.revoke()
+        let (session, accounts) = locked { (item.session, item.accounts) }
+        if let session { retireSession(session, accounts: accounts) }
     }
+
     private func notifyIdle() {
         let waiters: [CheckedContinuation<Void, Never>] = locked {
             var ready: [CheckedContinuation<Void, Never>] = []
@@ -103,10 +100,11 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         }
         for waiter in waiters { waiter.resume() }
     }
+
     private var registrationsIdle: Bool {
-        work.values.allSatisfy { $0.workers == 0 || $0.lease?.registersLocally == false }
+        work.values.allSatisfy { $0.workers == 0 || $0.session?.registersLocally == false }
     }
-    /// Only bounded local account/storage admission, never a remote receipt.
+
     func flushRegistrations() async {
         await withCheckedContinuation { continuation in
             let ready = locked {
@@ -130,6 +128,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         }
         for item in old { revoke(item) }
     }
+
     func breakContinuity(_ sample: MusicPlaybackFeedbackSample) {
         locked {
             guard current == sample.attemptID, nativeID == sample.nativeAttemptID,
@@ -137,9 +136,9 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             continuous = false; sequence = sample.sequence
         }
     }
+
     func ownsAttempt(_ attemptID: String) -> Bool { locked { current == attemptID } }
-    /// Only the native owner calls this after a committed media handoff and a
-    /// trusted recording check. A preparation never changes listening identity.
+
     @discardableResult
     func replaceAttempt(attemptID: String, occurrenceID: String, preserving: Bool) -> Bool {
         let kept = locked {
@@ -164,6 +163,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         ]))
         return false
     }
+
     func retireCurrent(reason: MusicPlaybackFeedbackReport.Reason) -> [MusicPlaybackFeedbackTarget] {
         let (revoked, targets): ([Listen], [MusicPlaybackFeedbackTarget]) = locked {
             if retiringReason == nil { retiringReason = reason }
@@ -172,13 +172,12 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                 item.cancelled = true; active.removeValue(forKey: item.target.platform)
                 if item.workers == 0 { work.removeValue(forKey: item.id) }
             }
-            return (pending, active.values.filter { !$0.cancelled }.map(\.sourceTarget))
+            return (pending, active.values.filter { !$0.cancelled }.map(\.target))
         }
         for item in revoked { revoke(item) }
         return targets
     }
-    /// Settle the final native observation, not elapsed UI/navigation time.
-    /// A qualified local or already dispatched start retains its frozen end.
+
     func finishCurrent(attemptID: String? = nil, reason: MusicPlaybackFeedbackReport.Reason) {
         var ends: [(Listen, MusicPlaybackFeedbackReport)] = [], revoked: [Listen] = []
         locked {
@@ -197,13 +196,12 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         for item in revoked { revoke(item) }
         for (item, value) in ends { end(item, value: value) }
     }
+
     private func freeze(_ sample: MusicPlaybackFeedbackSample, reason: MusicPlaybackFeedbackReport.Reason,
                         ends: inout [(Listen, MusicPlaybackFeedbackReport)], revoked: inout [Listen]) {
         for item in active.values {
             item.finished = true
-            // A qualified local lease must drain its start/end even if close
-            // wins the final asynchronous authorization check before register.
-            guard !item.cancelled, item.dispatched || item.lease?.registersLocally == true else {
+            guard !item.cancelled, item.dispatched || item.session?.registersLocally == true else {
                 item.cancelled = true; revoked.append(item)
                 if item.workers == 0 { work.removeValue(forKey: item.id) }
                 continue
@@ -215,6 +213,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         }
         active.removeAll()
     }
+
     func revoke(platform: MusicAccountPlatform) {
         let old: [Listen] = locked {
             active.removeValue(forKey: platform)
@@ -227,35 +226,23 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         }
         for item in old { revoke(item) }
     }
-    private func sourceRevoked(_ item: Listen) {
-        let revoke = locked {
-            // Queue provenance is an admission capability, not ownership of
-            // an already qualified listen. Its exact-account feedback lease
-            // independently fences logout, account switch and settings.
-            guard item.admittedAt == nil, !item.finished else { return false }
-            item.cancelled = true
-            if active[item.target.platform] === item { active.removeValue(forKey: item.target.platform) }
-            if item.workers == 0 { work.removeValue(forKey: item.id) }
-            return true
-        }
-        if revoke { self.revoke(item) }
-    }
+
     static func valid(_ sample: MusicPlaybackFeedbackSample) -> Bool {
         [sample.position, sample.duration, sample.observedAt, sample.occurredAt, sample.rate]
             .allSatisfy { $0.isFinite && $0 >= 0 } && sample.sequence > 0 && (!sample.running || sample.rate > 0)
     }
+
     static func interval(_ old: MusicPlaybackFeedbackSample, _ next: MusicPlaybackFeedbackSample) -> (wall: Double, media: Double) {
         let elapsed = next.observedAt - old.observedAt, delta = next.position - old.position
-        // Native seek/buffer/rate boundaries break continuity, including small
-        // seeks. The tolerance covers media-clock sampling noise, never adds time.
         guard old.attemptID == next.attemptID, old.nativeAttemptID == next.nativeAttemptID,
               old.resourceID == next.resourceID, old.running, old.hasPlayed, old.rate > 0, next.kind != .playing,
               !next.discontinuity, next.rate == old.rate, elapsed >= 0,
               delta >= 0, delta <= elapsed * old.rate + 0.25 else { return (0, 0) }
         return (min(elapsed, delta / old.rate), min(elapsed * old.rate, delta))
     }
+
     func consume(_ sample: MusicPlaybackFeedbackSample, settings: MusicPlaybackFeedbackSettings,
-                 targets: [MusicPlaybackFeedbackTarget], accounts: any MusicNativeFeedbackProviding,
+                 targets: [MusicPlaybackFeedbackTarget], accounts: NativeMusicAccountService,
                  authorize: @escaping @Sendable (MusicAccountPlatform, Int) async throws -> Void) {
         guard Self.valid(sample) else {
             breakContinuity(sample)
@@ -263,12 +250,6 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         }
         if locked({ current == nil }) {
             replaceAttempt(attemptID: sample.attemptID, occurrenceID: sample.occurrenceID, preserving: false)
-        }
-        let admissibleTargets = targets.filter { target in
-            guard let proof = target.recommendationProof else { return true }
-            return proof.occurrenceID == sample.occurrenceID &&
-                (try? proof.check(nativeID: target.nativeID, source: target.source,
-                    sourceID: target.sourceID, algorithm: target.algorithm)) != nil
         }
         var starts: [(Listen, MusicPlaybackFeedbackReport)] = []
         var ends: [(Listen, MusicPlaybackFeedbackReport)] = []
@@ -281,17 +262,14 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             let time = continuous ? last.map { Self.interval($0, sample) } ?? (wall: 0, media: 0) : (wall: 0, media: 0)
             for (platform, item) in active {
                 guard settings.platforms[platform] == item.setting, item.setting.enabled,
-                      targets.contains(where: { $0.isSameRecording(as: item.sourceTarget) }),
-                      (try? item.authorization.checkLocal()) != nil,
-                      item.lease == nil || (try? item.lease!.authorization.checkLocal()) != nil else {
+                      targets.contains(where: { $0.isSameRecording(as: item.target) }),
+                      item.authorization.isActive else {
                     item.cancelled = true; revoked.append(item); active.removeValue(forKey: platform)
                     if item.workers == 0 { work.removeValue(forKey: item.id) }
                     continue
                 }
                 if let admittedAt = item.admittedAt, let last,
                    platform != .kugou || last.rate >= 0.25 {
-                    // Remove the maximum possible pre-admission advancement.
-                    // ACK latency never moves this exact-account boundary.
                     let beforeAdmission = max(0, admittedAt - last.observedAt)
                     item.listened += max(0, time.wall - beforeAdmission)
                     item.media += max(0, time.media - beforeAdmission * last.rate)
@@ -304,12 +282,14 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                     sample.reason ?? (sample.kind == .ended ? .playend : sample.kind == .failed ? .exception : .interrupt)
                 freeze(sample, reason: reason, ends: &ends, revoked: &revoked)
             } else if retiringReason == nil, sample.hasPlayed, sample.running, let startedAt {
-                for target in admissibleTargets {
+                for target in targets {
                     let setting = settings.platforms[target.platform] ?? .init()
                     guard setting.enabled, active[target.platform] == nil, spent[target.platform] != setting.generation,
                           target.platform != .kugou || sample.duration > 0 && sample.rate >= 0.25 else { continue }
-                    let gate = MusicPlaybackFeedbackAuthorization { try await authorize(target.platform, setting.generation) }
-                    let item = Listen(target: target, setting: setting, authorization: gate, startedAt: startedAt)
+                    let platform = target.platform, generation = setting.generation
+                    let item = Listen(target: target, setting: setting,
+                                      authorize: { try await authorize(platform, generation) }, startedAt: startedAt)
+                    item.accounts = accounts
                     active[target.platform] = item; work[item.id] = item
                     spent[target.platform] = setting.generation
                     starts.append((item, report(item, sample: sample, event: .start)))
@@ -318,15 +298,11 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         }
         for item in revoked { revoke(item) }
         for (item, value) in starts {
-            do {
-                try item.sourceTarget.recommendationProof?.authorization.register(item.id) { [weak self, weak item] in
-                    if let item { self?.sourceRevoked(item) }
-                }
-            } catch { sourceRevoked(item) }
             start(item, value: value, observedAt: sample.observedAt, accounts: accounts)
         }
         for (item, value) in ends { end(item, value: value) }
     }
+
     private func report(_ item: Listen, sample: MusicPlaybackFeedbackSample,
                         event: MusicPlaybackFeedbackReport.Event, reason: MusicPlaybackFeedbackReport.Reason? = nil) -> MusicPlaybackFeedbackReport {
         .init(instanceID: item.id, target: item.target, event: event, duration: sample.duration,
@@ -334,6 +310,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
               position: sample.position, rate: sample.rate, reason: reason,
               startedAt: item.startedAt, occurredAt: sample.occurredAt)
     }
+
     private func completed(_ item: Listen) {
         let release = locked {
             item.workers -= 1
@@ -345,45 +322,36 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         if release { revoke(item) }
         notifyIdle()
     }
+
     private func start(_ item: Listen, value: MusicPlaybackFeedbackReport, observedAt: TimeInterval,
-                       accounts: any MusicNativeFeedbackProviding) {
+                       accounts: NativeMusicAccountService) {
         let operation = UUID()
         let task = Task {
             defer { item.authorization.remove(operation); completed(item) }
             do {
-                try await item.authorization.check()
-                try item.sourceTarget.recommendationProof?.check(nativeID: item.target.nativeID,
-                    source: item.target.source, sourceID: item.target.sourceID, algorithm: item.target.algorithm)
-                let lease = try await accounts.beginPlaybackFeedback(platform: item.target.platform, authorization: item.authorization)
-                do { try await lease.authorization.check() }
-                catch { retireLease(lease); throw error }
-                let install = { [self] in locked {
+                try await item.checkAuthorization()
+                let session = try await accounts.beginPlaybackFeedback(
+                    platform: item.target.platform, settingGeneration: item.setting.generation
+                )
+                let installed = locked { () -> Bool in
                     guard work[item.id] === item, !item.finished, !item.cancelled else { return false }
                     let admittedAt = ProcessInfo.processInfo.systemUptime
-                    item.lease = lease; item.admittedAt = admittedAt
+                    item.session = session; item.admittedAt = admittedAt
                     item.startOccurredAt = value.occurredAt + max(0, admittedAt - observedAt)
                     return true
-                } }
-                let installed: Bool
-                do {
-                    if let proof = item.sourceTarget.recommendationProof { installed = try proof.authorization.perform(install) }
-                    else { installed = install() }
-                } catch {
-                    retireLease(lease); throw error
                 }
-                guard installed else { retireLease(lease); return }
+                guard installed else { retireSession(session, accounts: accounts); return }
                 notifyIdle()
-                item.sourceTarget.recommendationProof?.authorization.remove(item.id)
-                try await item.authorization.check()
+                try await item.checkAuthorization()
                 let dispatch = locked {
-                    guard !item.cancelled, !item.finished || lease.registersLocally else { return false }
+                    guard !item.cancelled, !item.finished || session.registersLocally else { return false }
                     item.dispatched = true; return true
                 }
                 guard dispatch else { return }
                 let admittedStart = MusicPlaybackFeedbackReport(instanceID: value.instanceID, target: value.target,
                     event: .start, duration: value.duration, listened: 0, mediaListened: 0,
                     position: value.position, rate: value.rate, startedAt: item.startedAt, occurredAt: item.startOccurredAt)
-                let result = try await lease.report(admittedStart)
+                let result = try await accounts.reportPlaybackFeedback(session, report: admittedStart)
                 let ending: MusicPlaybackFeedbackReport? = locked {
                     guard work[item.id] === item, !item.cancelled else { return nil }
                     item.startReceipt = result
@@ -399,14 +367,16 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         }
         try? item.authorization.register(operation) { task.cancel() }
     }
+
     private func end(_ item: Listen, value: MusicPlaybackFeedbackReport) {
         let operation = UUID()
         let task = Task {
             defer { item.authorization.remove(operation); completed(item) }
             do {
-                try await item.authorization.check()
-                guard let lease = locked({ item.lease }) else { return }
-                _ = try await lease.report(value)
+                try await item.checkAuthorization()
+                let (session, accounts) = locked { (item.session, item.accounts) }
+                guard let session, let accounts else { return }
+                _ = try await accounts.reportPlaybackFeedback(session, report: value)
             } catch {
                 if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
                     DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "end.failed", error: error)

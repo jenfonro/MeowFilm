@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Native consumers of the common runtime's canonical browse cards.
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 import MeowRuntime
 
 enum MusicNativePublicBrowseContent: Sendable {

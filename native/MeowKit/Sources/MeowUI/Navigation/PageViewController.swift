@@ -518,6 +518,18 @@ open class PageViewController: UIViewController {
 
     // MARK: - Modals & Lifecycle
 
+    /// Presents a modal only when presentation is currently admitted on this page.
+    @discardableResult
+    public func presentPageModal(
+        _ modal: UIViewController,
+        animated: Bool = true,
+        completion: (() -> Void)? = nil
+    ) -> Bool {
+        guard canPresentPageAlert else { return false }
+        present(modal, animated: animated, completion: completion)
+        return modal.presentingViewController != nil || presentedViewController === modal
+    }
+
     /// Present a page inside the unified navigation sheet container.
     @discardableResult
     public func presentPageSheet(
@@ -670,26 +682,6 @@ open class PageViewController: UIViewController {
 
 @MainActor
 public extension UIViewController {
-    /// Presents a modal only when presentation is currently admitted, using
-    /// `PageViewController.canPresentPageAlert` on page hosts and standard
-    /// transition/window guards on other view controllers.
-    @discardableResult
-    func presentPageModal(
-        _ modal: UIViewController,
-        animated: Bool = true,
-        completion: (() -> Void)? = nil
-    ) -> Bool {
-        if let page = self as? PageViewController {
-            guard page.canPresentPageAlert else { return false }
-        } else {
-            guard presentedViewController == nil,
-                  !isBeingPresented, !isBeingDismissed,
-                  viewIfLoaded?.window != nil else { return false }
-        }
-        present(modal, animated: animated, completion: completion)
-        return modal.presentingViewController != nil || presentedViewController === modal
-    }
-
     /// Safely dismisses `self` from its presenter, deferring if entry presentation is
     /// still in flight and routing through `PageViewController.dismissPageModal` when
     /// presented by an active page so `completedAppearanceTransition` and queued feedback settle.

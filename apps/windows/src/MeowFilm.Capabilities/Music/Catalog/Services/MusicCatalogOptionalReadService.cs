@@ -228,7 +228,7 @@ internal sealed class MusicCatalogOptionalReadService : IAsyncDisposable
             using var request = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime.Token, scope.Cancellation.Token);
             request.CancelAfter(TimeSpan.FromSeconds(8));
             requireCatalogAccount(card);
-            var reply = await MusicCatalogDispatcher.InvokeCardReadAsync(ctx.Application, card, previewLimit: true, request.Token);
+            var reply = await MusicCatalogDispatcher.InvokeCardReadAsync(ctx.Application.Catalog, card, previewLimit: true, request.Token);
             request.Token.ThrowIfCancellationRequested();
             if (!ScopeCurrent(scope)) return;
             read.Cover = MusicCatalogDto.Text(reply, "cover");
@@ -273,7 +273,7 @@ internal sealed class MusicCatalogOptionalReadService : IAsyncDisposable
             if (admitted.Count == 0) return;
             using var request = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime.Token, scope.Cancellation.Token);
             request.CancelAfter(TimeSpan.FromSeconds(8));
-            var reply = await ctx.Application.GetCatalogPlaylistsBatchAsync(scope.Platform, admitted.Keys.ToArray(), request.Token);
+            var reply = await ctx.Application.Catalog.PlaylistsAsync(scope.Platform, admitted.Keys.ToArray(), request.Token);
             request.Token.ThrowIfCancellationRequested();
             if (!ScopeCurrent(scope)) return;
             foreach (var item in MusicCatalogDto.Rows(MusicCatalogDto.Field(reply, "items")))
@@ -295,12 +295,8 @@ internal sealed class MusicCatalogOptionalReadService : IAsyncDisposable
         }
     }
 
-    private static string OptionalReadError(Exception error) => error switch
-    {
-        MusicOperationException failure => failure.Code,
-        OperationCanceledException => "CANCELLED",
-        _ => "INVALID_RESPONSE"
-    };
+    private static string OptionalReadError(Exception error) =>
+        MusicRuntimeContext.ErrorCode(error) ?? "INVALID_RESPONSE";
 
     private void PublishResults(CatalogOptionalReads scope, CatalogOptionalRead? completing = null,
         IEnumerable<MusicCatalogCard>? cards = null)

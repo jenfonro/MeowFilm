@@ -2,7 +2,6 @@ using System.Text;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Core.Debug;
 using MeowFilm.Platform.Storage;
-using static MeowFilm.Capabilities.PlaybackCache.PlaybackCacheValidation;
 
 namespace MeowFilm.Capabilities.PlaybackCache;
 
@@ -21,7 +20,7 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
 
     internal async Task<PlaybackSourceEntry?> ReadAsync(string scope, string song, string signature, CancellationToken token)
     {
-        ValidateIdentity(scope, song, signature);
+        if (string.IsNullOrEmpty(scope) || string.IsNullOrEmpty(song) || string.IsNullOrEmpty(signature)) return null;
         try
         {
             return await database.ReadSnapshotAsync(db =>
@@ -43,15 +42,15 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return null; }
+        catch (StorageException) { return null; }
     }
 
     internal async Task<PlaybackSourceEntry?> ReadHistoryAsync(string scope, string song, string policy, string request,
         long generation, CancellationToken token)
     {
-        ValidateIdentity(scope, song, policy);
-        RequireNonEmpty(request);
-        if (generation <= 0) throw MusicPlaybackCacheDataException.Corrupt();
+        if (string.IsNullOrEmpty(scope) || string.IsNullOrEmpty(song) || string.IsNullOrEmpty(policy) ||
+            string.IsNullOrEmpty(request) || generation <= 0)
+            return null;
         try
         {
             return await database.ReadSnapshotAsync(db =>
@@ -71,12 +70,11 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return null; }
+        catch (StorageException) { return null; }
     }
 
     internal async Task PutAsync(string scope, string song, string signature, PlaybackSourceEntry info, CancellationToken token)
     {
-        ValidateIdentity(scope, song, signature);
         try
         {
             await database.WriteAsync(db =>
@@ -88,14 +86,14 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
                 if (until <= at) return false;
                 var candidate = info with { Signature = signature, At = at, Until = until, Recording = null };
                 int bytes = EstimateEntryBytes(candidate);
-                if (bytes > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
+                if (bytes > MaximumBytes) return false;
                 PlaybackSourceCacheStore.SaveEntry(db, scope, song, "urls", candidate with { StoredBytes = bytes });
                 Trim(db, at);
                 return true;
-            }, token, 65536).ConfigureAwait(false);
+            }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+        catch (StorageException error)
         {
             DebugLog.Warn(DebugCategories.Storage, "music.sourceCache", "storeUrl.failed",
                 new { scope, song }, error: error);
@@ -105,7 +103,6 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
     internal async Task ConfirmAsync(string scope, string song, string signature, PlaybackSourceEntry info,
         MusicSongSourceRecord recording, CancellationToken token)
     {
-        ValidateIdentity(scope, song, signature);
         var durable = NativeMusicSong.DurableSource(recording);
         var snapshot = ToRecordingSnapshot(durable);
         try
@@ -124,14 +121,14 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
                     Delivery: info.Delivery, RequestedQuality: info.RequestedQuality,
                     Recording: snapshot);
                 int bytes = EstimateEntryBytes(pointer);
-                if (bytes > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
+                if (bytes > MaximumBytes) return false;
                 PlaybackSourceCacheStore.SaveEntry(db, scope, song, "pointers", pointer with { StoredBytes = bytes });
                 Trim(db, at);
                 return true;
-            }, token, 65536).ConfigureAwait(false);
+            }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+        catch (StorageException error)
         {
             DebugLog.Warn(DebugCategories.Storage, "music.sourceCache", "confirmPointer.failed",
                 new { scope, song }, error: error);
@@ -140,7 +137,6 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
 
     internal async Task InvalidateAsync(string scope, string song, CancellationToken token)
     {
-        ValidateIdentity(scope, song);
         var id = (scope, song);
         lock (gate) pendingInvalidations[id] = pendingInvalidations.GetValueOrDefault(id) + 1;
         try
@@ -150,10 +146,10 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
                 PlaybackSourceCacheStore.DeleteEntry(db, scope, song, "urls");
                 Trim(db, Now);
                 return true;
-            }, token, 4096).ConfigureAwait(false);
+            }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+        catch (StorageException error)
         {
             DebugLog.Warn(DebugCategories.Storage, "music.sourceCache", "invalidate.failed",
                 new { scope, song }, error: error);
@@ -185,7 +181,7 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
                 db.Execute("DELETE FROM windows_music_playback_sources WHERE info_platform=$platform", ("$platform", platform));
             }
             return true;
-        }, token, 4096).ConfigureAwait(false);
+        }, token).ConfigureAwait(false);
     }
 
     internal async Task<(int EntryCount, long StoredBytes, int MaximumBytes)> GetStatsAsync(CancellationToken token = default)

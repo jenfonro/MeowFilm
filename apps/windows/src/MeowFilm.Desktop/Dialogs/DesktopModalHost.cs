@@ -16,8 +16,6 @@ public sealed class DesktopModalHost : Grid
 {
     private static readonly DependencyProperty HostProperty = DependencyProperty.RegisterAttached(
         "Host", typeof(DesktopModalHost), typeof(DesktopModalHost), new PropertyMetadata(null));
-    private static readonly DependencyProperty ModalHostsProperty = DependencyProperty.RegisterAttached(
-        "ModalHosts", typeof(List<DesktopModalHost>), typeof(DesktopModalHost), new PropertyMetadata(null));
 
     private sealed class ActiveModal
     {
@@ -58,45 +56,16 @@ public sealed class DesktopModalHost : Grid
     public void Attach(DesktopWindow window)
     {
         window.Root.SetValue(HostProperty, this);
-        RegisterModalHost(window.Root, this);
         window.Deactivated += (_, _) => CancelPress();
         window.VisibilityChanged += (_, _) => { if (!window.IsVisible) CloseAll(); };
-        window.Closed += (_, _) =>
-        {
-            UnregisterModalHost(window.Root, this);
-            CloseAll(restoreFocus: false);
-        };
+        window.Closed += (_, _) => CloseAll(restoreFocus: false);
     }
 
     internal void AttachSystem(DesktopWindow window)
     {
-        RegisterModalHost(window.Root, this);
         window.Deactivated += (_, _) => CancelPress();
-        window.Closed += (_, _) =>
-        {
-            UnregisterModalHost(window.Root, this);
-            CloseAll(restoreFocus: false);
-        };
+        window.Closed += (_, _) => CloseAll(restoreFocus: false);
     }
-
-    private static void RegisterModalHost(FrameworkElement root, DesktopModalHost host)
-    {
-        if (root.GetValue(ModalHostsProperty) is not List<DesktopModalHost> hosts)
-        {
-            hosts = [];
-            root.SetValue(ModalHostsProperty, hosts);
-        }
-        if (!hosts.Contains(host)) hosts.Add(host);
-    }
-
-    private static void UnregisterModalHost(FrameworkElement root, DesktopModalHost host)
-    {
-        if (root.GetValue(ModalHostsProperty) is List<DesktopModalHost> hosts)
-            hosts.Remove(host);
-    }
-
-    internal static bool HasOpenModal(FrameworkElement root) =>
-        root.GetValue(ModalHostsProperty) is List<DesktopModalHost> hosts && hosts.Any(host => host.IsOpen);
 
     public bool IsPresented(FrameworkElement content) =>
         modals.Any(item => ReferenceEquals(item.Content, content));

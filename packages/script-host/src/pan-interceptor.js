@@ -66,35 +66,27 @@ export class PanInterceptor {
         this.response = response;
         let settled = false;
         const cleanup = () => {
-          let failure;
-          try { response.off('end', completed); } catch (error) { failure ??= error; }
-          try { response.off('close', completed); } catch (error) { failure ??= error; }
-          try { response.off('error', failed); } catch (error) { failure ??= error; }
+          response.off('end', completed);
+          response.off('close', completed);
+          response.off('error', failed);
           if (this.responseCleanup === cleanup) this.responseCleanup = null;
-          if (failure) throw failure;
         };
         const completed = () => {
           if (settled) return;
           settled = true;
-          try { cleanup(); }
-          catch (error) { this.destroy(error); return; }
+          cleanup();
           this.destroy();
         };
         const failed = error => {
           if (settled) return;
           settled = true;
-          try { cleanup(); } catch (cleanupError) { error ??= cleanupError; }
+          cleanup();
           this.destroy(error);
         };
         this.responseCleanup = cleanup;
-        try {
-          response.once('end', completed);
-          response.once('close', completed);
-          response.once('error', failed);
-        } catch (error) {
-          try { cleanup(); } catch (cleanupError) { error ??= cleanupError; }
-          throw error;
-        }
+        response.once('end', completed);
+        response.once('close', completed);
+        response.once('error', failed);
       }
       _final(done) {
         let body;
@@ -126,18 +118,16 @@ export class PanInterceptor {
         return this;
       }
       _destroy(error, done) {
-        let failure = error;
-        const failed = next => { failure ??= next; };
         clearTimeout(this.timer);
         this.timer = null;
-        try { this.responseCleanup?.(); } catch (next) { failed(next); }
+        this.responseCleanup?.();
         const response = this.response;
         this.responseCleanup = null;
         this.response = null;
-        try { response?.destroy?.(); } catch (next) { failed(next); }
+        response?.destroy?.();
         this.chunks = [];
         this.headers = {};
-        done(failure);
+        done(error);
       }
     }
     return new ShareRequest();

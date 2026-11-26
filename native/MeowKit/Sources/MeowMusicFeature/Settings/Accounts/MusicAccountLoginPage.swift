@@ -57,7 +57,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
 
     init(
         owner: MusicViewModel,
-        service: any MusicAccountsServing,
+        service: NativeMusicAccountService,
         platform: MusicAccountPlatform,
         appearance: MusicAppearancePreferencesStore
     ) {
@@ -314,11 +314,6 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
     }
 
     private func bindState() {
-        owner.accessChanges.receive(on: RunLoop.main).sink { [weak self] in
-            self?.state.reconcileAccess()
-            self?.render()
-        }.store(in: &subscriptions)
-
         owner.accountChanges.receive(on: RunLoop.main).sink { [weak self] platform in
             self?.state.accountSessionChanged(platform)
         }.store(in: &subscriptions)
@@ -464,12 +459,13 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
     }
 
     private func presentQRShare(_ image: UIImage) {
+        guard presentedViewController == nil, !isBeingDismissed, viewIfLoaded?.window != nil else { return }
         let activity = UIActivityViewController(activityItems: [image], applicationActivities: nil)
         if let popover = activity.popoverPresentationController {
             popover.sourceView = qrActionButton
             popover.sourceRect = qrActionButton.bounds
         }
-        presentPageModal(activity, animated: true)
+        present(activity, animated: true)
     }
 
     private func closeCard() {

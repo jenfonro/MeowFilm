@@ -20,7 +20,6 @@ public sealed partial class ShellWindow : DesktopWindow
     private readonly ShellInputCoordinator _input;
     private readonly ShellSearchCoordinator _search;
     private readonly ShellCloseCoordinator _closeCoordinator;
-    private readonly ShellOwnedNoticeBridge _ownedNotices;
     private readonly ShellSurfaceMotion _motion = new();
     private readonly RectangleGeometry _presentationClip = new();
     private readonly CloseWindowDialog _closeDialog = new();
@@ -59,7 +58,6 @@ public sealed partial class ShellWindow : DesktopWindow
         _input = new ShellInputCoordinator(this);
         _search = new ShellSearchCoordinator(SearchBox, SearchTargetPicker, SearchInput, SearchDivider, () => _currentPage, () => _modules.ActiveRequest);
         _closeCoordinator = new ShellCloseCoordinator(this, shutdown, closePreferences);
-        _ownedNotices = new ShellOwnedNoticeBridge(Notices, QueueUi);
         SessionEnding += (_, _) => PrepareForSessionEnding();
         Root.Loaded += OnLoaded;
         PresentationSurface.Clip = _presentationClip;
@@ -116,7 +114,6 @@ public sealed partial class ShellWindow : DesktopWindow
     internal ShellSidebarCoordinator Sidebar => _sidebar;
     internal ShellSearchCoordinator SearchCoordinator => _search;
     internal ShellCloseCoordinator CloseCoordinator => _closeCoordinator;
-    internal ShellOwnedNoticeBridge OwnedNotices => _ownedNotices;
     internal IReadOnlyList<ModuleSession> Sessions => _modules.Sessions;
     internal IReadOnlyList<ShellPageSession> Pages => _pages;
     internal ModuleSession? CurrentSession => _modules.CurrentSession;
@@ -356,7 +353,6 @@ public sealed partial class ShellWindow : DesktopWindow
         SystemAppearance.Changed -= OnSystemAppearanceChanged;
         _modules.DisposeSubscriptions();
         _sidebar.Dispose();
-        _ownedNotices.Dispose();
         RetireHeaderPresentation(); DisposeGlobalSurfaces();
         _nativeCaption?.Dispose(); _nativeCaption = null;
         if (!_userDataResetStarted || _closeCoordinator.IsSessionEnding) _ = _closeCoordinator.EnsureShutdownAsync();

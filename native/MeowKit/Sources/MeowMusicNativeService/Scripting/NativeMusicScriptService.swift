@@ -1,11 +1,39 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 import MeowRuntime
+
+private struct MusicScriptTransport: Sendable {
+    let connection: RuntimeHTTPClient
+    func call(_ operation: String, _ parameters: RuntimeObject = [:]) async throws -> RuntimeValue {
+        try await connection.call(module: .music, operation: operation, parameters: .object(parameters))
+    }
+    func upload(_ source: Data, installationID: String, revision: Int, basename: String) async throws {
+        let receipt = try await connection.upload(module: .music, installationID: installationID,
+            sourceRevision: revision, source: source, basename: basename)
+        guard receipt.scriptField("installationId") == .string(installationID),
+              receipt.scriptField("sourceRevision")?.scriptInteger == revision,
+              receipt.scriptField("sourceBytes")?.scriptInteger == source.count else {
+            throw MusicServiceError.invalidResponse
+        }
+    }
+}
+
+private extension RuntimeValue {
+    func scriptField(_ key: String) -> RuntimeValue? {
+        if case .object(let fields) = self { return fields[key] }; return nil
+    }
+    var scriptText: String? { if case .string(let value) = self { return value }; return nil }
+    var scriptInteger: Int? {
+        guard case .number(let value) = self, value.rounded(.towardZero) == value,
+              abs(value) <= 9_007_199_254_740_991 else { return nil }
+        return Int(value)
+    }
+}
 
 /// Thin adapter of music.script.v3. The shared module owns installations,
 /// source bytes, checks and request-bound guest storage under the App data root.
-public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceManaging {
+public actor NativeMusicScriptService {
     private let connect: @Sendable () async throws -> RuntimeHTTPClient
     private var connection: RuntimeHTTPClient?
     private var starting: Task<Void, Error>?
@@ -381,13 +409,12 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
     /// LX media is a direct HTTP or HTTPS URL.
     static func mediaURL(_ text: String) throws -> URL {
         guard !text.unicodeScalars.contains(where: { $0.value <= 32 || $0.value == 127 }),
-              var components = URLComponents(string: text),
+              let components = URLComponents(string: text),
               let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              components.host?.isEmpty == false, components.user == nil, components.password == nil else {
+              components.host?.isEmpty == false,
+              let url = components.url else {
             throw MusicServiceError.invalidMediaCandidate
         }
-        components.fragment = nil
-        guard let url = components.url else { throw MusicServiceError.invalidMediaCandidate }
         return url
     }
 

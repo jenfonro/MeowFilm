@@ -30,16 +30,16 @@ extension MusicPublicBrowseViewModel {
 
     func loadArtworkDemand() {
         guard !closed, visible, displayVisible, contentIsCurrent, canLoadDisplayPreviews, !isLoading,
-              artworkTask == nil, let reader = service as? any MusicPublicPlaylistSummaryReading else { return }
+              artworkTask == nil else { return }
         let missing = artworkDemand.filter { artworkReads[$0] == nil }
             .sorted { ($0.platform.rawValue, $0.id) < ($1.platform.rawValue, $1.id) }
         guard let first = missing.first else { return }
         let batch = Array(missing.filter { $0.platform == first.platform }.prefix(30))
-        let own = artworkEpoch
+        let own = artworkEpoch, service = service
         for ref in batch { artworkReads[ref] = .loading }
         artworkTask = Task { [weak self] in
             let result: Result<[MusicPublicBrowseCollection], Error>
-            do { result = .success(try await reader.publicPlaylistSummaries(platform: first.platform, ids: batch.map(\.id))) }
+            do { result = .success(try await service.publicPlaylistSummaries(platform: first.platform, ids: batch.map(\.id))) }
             catch { result = .failure(error) }
             guard let self, !Task.isCancelled, !self.closed, self.artworkEpoch == own else { return }
             for ref in batch {
@@ -85,8 +85,8 @@ extension MusicPublicBrowseViewModel {
     }
 
     func observeSongs() {
-        guard !closed, visible, songObservation == nil,
-              let repository = service as? any MusicSongRepositoryReading else { return }
+        guard !closed, visible, songObservation == nil else { return }
+        let repository = service
         songObservation = Task { [weak self] in
             let changes = await repository.songChanges()
             await self?.refreshSongProjections(repository)
@@ -97,7 +97,7 @@ extension MusicPublicBrowseViewModel {
         }
     }
 
-    func refreshSongProjections(_ repository: any MusicSongRepositoryReading, changed: Set<String>? = nil) async {
+    func refreshSongProjections(_ repository: NativeMusicService, changed: Set<String>? = nil) async {
         guard !Task.isCancelled, !closed, visible else { return }
         let projection = UUID(), page = pageEpoch
         let songs: [String: MusicRemoteTrack]

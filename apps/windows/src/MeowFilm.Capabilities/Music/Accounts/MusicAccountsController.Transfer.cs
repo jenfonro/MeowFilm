@@ -12,7 +12,7 @@ public sealed partial class MusicAccountsController
     private CancellationTokenSource? accountTransferCancellation;
 
     public bool CanTransferAccounts => !stopping && !disposed &&
-        !AccountBusy && !HasAccountQr && !HasAccountSms && !accountQrSaving && !accountTransferBusy && !accountSaveUncertain;
+        !AccountBusy && !HasAccountQr && !HasAccountSms && !accountQrSaving && !accountTransferBusy;
 
     private static string TransferPlatform(string value) =>
         value is "wy" or "tx" or "kg" ? MusicPlatformInfo.DisplayName(value) : "";
@@ -51,7 +51,7 @@ public sealed partial class MusicAccountsController
                     MusicAccountTransferPlan plan;
                     using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 16384, FileOptions.Asynchronous))
                     using (var file = await MusicAccountTransferFile.ReadAsync(input, token))
-                        plan = await application.PrepareAccountTransferAsync(file, token);
+                        plan = await application.Accounts.PrepareAccountTransferAsync(file, token);
                     using (plan)
                     {
                         token.ThrowIfCancellationRequested();
@@ -59,11 +59,9 @@ public sealed partial class MusicAccountsController
                             await ChooseTransferPolicy(plan.Conflicts, token);
                         token.ThrowIfCancellationRequested();
                         if (policy == MusicAccountTransferPolicy.Cancel) return;
-                        var summary = await application.ImportAccountTransferAsync(plan, policy, token);
-                        bool unknown = summary.Items.Any(item => item.Code == "COMMIT_UNKNOWN");
-                        if (unknown) accountSaveUncertain = true;
+                        var summary = await application.Accounts.ImportAccountTransferAsync(plan, policy, token);
                         // Use the normal safe account read after settlement; never publish a stale candidate profile.
-                        if (!unknown && !stopping && !token.IsCancellationRequested) await ReadAccountsAsync();
+                        if (!stopping && !token.IsCancellationRequested) await ReadAccountsAsync();
                         if (!stopping && !token.IsCancellationRequested)
                         {
                             string Part(string status, string title) => title + " " + summary.Items.Count(item => item.Status == status) +
@@ -76,7 +74,7 @@ public sealed partial class MusicAccountsController
                 }
                 else
                 {
-                    using var file = await application.ExportAccountTransferAsync(token);
+                    using var file = await application.Accounts.ExportAccountTransferAsync(token);
                     token.ThrowIfCancellationRequested();
                     if (file is null) { accountStatus = "没有可导出的账号"; return; }
                     string? path = await CapabilityFilePicker.SaveAsync(ctx.ModalOwner(MusicModalAnchor.Settings), "导出账号", "meowfilm-music-accounts.json", ".json");
@@ -104,7 +102,7 @@ public sealed partial class MusicAccountsController
     private static string TransferError(string code) => code switch
     {
         "TRANSFER_FORMAT" => "账号文件格式无效", "LIMIT" => "账号文件超出容量限制",
-        "TRANSFER_FILE" => "账号文件读写失败", "COMMIT_UNKNOWN" => "保存结果未确认，请读取账号状态",
+        "TRANSFER_FILE" => "账号文件读写失败",
         "STORAGE_CONFLICT" or "STALE_SESSION" => "账号已变更", "CANCELLED" or "CLOSED" => "已取消",
         _ => AccountError(new MusicOperationException(code))
     };

@@ -15,7 +15,6 @@ public extension MusicViewModel {
     var isResolving: Bool { playbackState.isResolving }
     var isNavigating: Bool { playbackState.isNavigating }
     var isChangingQueue: Bool { playbackState.isChangingQueue }
-    var isClosed: Bool { accessState.isClosed }
     var options: [MusicPlaybackOption] { playbackState.options }
     var lyricState: String { metadataState.lyricState }
     var lyricLines: [MusicLyricLine] { metadataState.lyricLines }
@@ -24,7 +23,7 @@ public extension MusicViewModel {
     var playedSongs: [MusicPlayedSong] { libraryState.playedSongs }
     var playedPlaylists: [MusicPlayedPlaylist] { libraryState.playedPlaylists }
     var error: String? {
-        get { notices.error ?? settingsReceipts.unknown.first?.message }
+        get { notices.error }
         set { notices.error = newValue }
     }
     var queueNotice: String? { notices.queueNotice }

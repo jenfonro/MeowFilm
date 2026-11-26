@@ -1,22 +1,10 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 
 enum MusicNativeSimilarQueueChange: Equatable { case replace, clear, select, edit, insertNext, append }
 
 extension NativeMusicService {
-    /// Keep uncertain CAS outcomes out of the live recommendation session.
-    /// Never roll back or overwrite a possibly committed queue with old state.
-    /// The next read must acquire a fresh lease against the persisted session.
-    func similarQueueTransaction<T>(_ sections: Set<MusicDomainSection>, _ change: (inout MusicDomainState) throws -> T) throws -> T {
-        do { return try transaction(sections, change) }
-        catch MusicServiceError.commitUnconfirmed {
-            clearFMPlayback(); clearSimilarRuntime()
-            invalidatePlayback(reason: .interrupt)
-            throw MusicServiceError.commitUnconfirmed
-        }
-    }
-
     func commitSimilarPreview(id: UUID, candidateIndex: Int? = nil) throws -> MusicSimilarModeResult {
         try check()
         guard let item = similarMode.preview, item.id == id, let lease = item.lease else { throw MusicServiceError.targetChanged }
@@ -43,7 +31,7 @@ extension NativeMusicService {
         let batchID = UUID().uuidString.lowercased()
         var live: [String: MusicRecommendationMetadata] = [:]
         let state = try lease.authorization.perform {
-            try similarQueueTransaction([.queue, .playback, .history]) { d in
+            try transaction([.queue, .playback, .history]) { d in
                 try musicRequire(similarEntranceIsCurrent(item, d), .targetChanged)
                 if session.continueEnabled { selectContinuationMode(&d) }
                 let old = d.queue
@@ -183,7 +171,7 @@ extension NativeMusicService {
             authorization = nil
         }
         let performExit: () throws -> (MusicPlaybackState, Bool) = {
-            try self.similarQueueTransaction([.queue, .playback, .history]) { d in
+            try self.transaction([.queue, .playback, .history]) { d in
                 let old = d.queue
                 try self.restoreSimilarQueue(returnQueue, into: &d)
                 if let currentID = old.currentID,
@@ -223,7 +211,6 @@ extension NativeMusicService {
     }
 
     func restoreSimilarQueue(_ snapshot: MusicQueueSimilarReturnRecord, into state: inout MusicDomainState) throws {
-        try MusicNativeSimilarData.validateQueue(snapshot, songs: state.referenceSongs(snapshot.entries.map(\.songID)))
         state.queue.entries = snapshot.entries
         state.queue.currentID = snapshot.currentID
         state.queue.priority = snapshot.priority
@@ -329,7 +316,7 @@ extension NativeMusicService {
             var batch: MusicQueueSimilarBatchRecord?
             var live: [String: MusicRecommendationMetadata] = [:]
             try lease.authorization.perform {
-                try similarQueueTransaction([.queue]) { draft in
+                try transaction([.queue]) { draft in
                     if !songs.isEmpty {
                         let batchID = UUID().uuidString.lowercased()
                         var rows = try makeEntries(
@@ -399,7 +386,7 @@ extension NativeMusicService {
 
     func persistSimilarSession(_ session: MusicNativeSimilarSession) throws {
         try session.lease.authorization.perform {
-            try similarQueueTransaction([.queue]) { $0.queue.similar = session.saved }
+            try transaction([.queue]) { $0.queue.similar = session.saved }
         }
     }
 

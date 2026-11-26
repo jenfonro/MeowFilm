@@ -92,5 +92,5 @@ native-local-lyrics
 
 - 文件选择或确认取消不写入。
 - CAS 准入前允许取消；准入后以真实提交结果为准，不能把取消当作回滚。
-- `REVISION_CONFLICT`、`PENDING_WRITE`、`COMMIT_UNKNOWN`、`CORRUPT_STORAGE` 和限额错误都必须保留其实际语义。
+- `REVISION_CONFLICT`、`CORRUPT_STORAGE` 和限额错误都必须保留其实际语义。
 - 页面只显示必要状态或错误；持久状态由唯一 owner 决定。

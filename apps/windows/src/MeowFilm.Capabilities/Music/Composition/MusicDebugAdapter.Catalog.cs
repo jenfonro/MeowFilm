@@ -111,8 +111,10 @@ internal sealed partial class MusicDebugAdapter
             };
         }
 
-        var activeSongs = search.IsSearchPage ? search.SearchSongsSource : library.CatalogSongsSource;
-        var activeSelection = search.IsSearchPage ? search.SearchSelectedSong : library.CatalogSelectedSong;
+        var activeSongs = search.IsSearchPage ? search.SearchSongsSource :
+            catalog.IsCatalogPage ? catalog.CatalogSongsSource : library.LibrarySongsSource;
+        var activeSelection = search.IsSearchPage ? search.SearchSelectedSong :
+            catalog.IsCatalogPage ? catalog.CatalogSelectedSong : library.SelectedSong;
         var songRows = activeSongs.Take(maxItems).Select((song, idx) => new
         {
             index = idx,
@@ -135,7 +137,7 @@ internal sealed partial class MusicDebugAdapter
         {
             target = currentTarget,
             kind = "list",
-            loading = capability.LoadCancellation is not null || search.ShowSearchLoading || library.ShowDetailLoading,
+            loading = capability.LoadCancellation is not null || search.ShowSearchLoading || catalog.ShowDetailLoading,
             error = string.IsNullOrWhiteSpace(capability.RawStatus) ? null : capability.RawStatus,
             tabs = Array.Empty<object>(),
             filters = dateFilters,
@@ -371,11 +373,30 @@ internal sealed partial class MusicDebugAdapter
                 }
                 else song = songs.FirstOrDefault(s => string.Equals(s.Id, id, StringComparison.Ordinal));
                 if (song is null) throw DebugApiException.NotFound("Song row not found.");
-                library.SelectedSong = song;
+                if (search.IsSearchPage) search.SearchSelectedSong = song;
+                else if (catalog.IsCatalogPage) catalog.CatalogSelectedSong = song;
+                else library.SelectedSong = song;
                 if (verb == "select") return new { invoked = true, verb, id = song.Id, title = song.Title };
-                if (verb == "favorite") { await library.FavoriteAsync(); return new { invoked = true, verb, id = song.Id }; }
+                if (verb == "favorite") { await library.FavoriteSongAsync(song); return new { invoked = true, verb, id = song.Id }; }
                 if (verb == "delete") { await library.RemoveSongAsync(); return new { invoked = true, verb, id = song.Id }; }
-                await library.PlaySelectionAsync();
+                if (search.IsSearchPage)
+                {
+                    var playCtx = search.SearchKeyword.Length > 0
+                        ? Library.MusicPlayContextRecord.Empty with { SourceType = "search", SearchKeyword = search.SearchKeyword }
+                        : null;
+                    var src = search.SearchKeyword.Length > 0
+                        ? new Library.MusicQueueSourceRecord("catalog-search", search.SearchKeyword, "search", "")
+                        : null;
+                    await library.PlaySingleSongAsync(song, searchDirect: true, playCtx, src);
+                }
+                else if (catalog.IsCatalogDetailPage)
+                {
+                    await catalog.PlaySelectedCatalogSongAsync();
+                }
+                else
+                {
+                    await library.PlaySelectionAsync();
+                }
                 return new { invoked = true, verb = "play", id = song.Id, title = song.Title };
             }
 

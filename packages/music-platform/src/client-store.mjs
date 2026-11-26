@@ -1,6 +1,5 @@
 import { openDatabase } from '@meowfilm/storage';
 import { upsert } from '@meowfilm/storage/statements';
-import { createHash } from 'node:crypto';
 
 const OWNER = 'music.anonymous';
 const kgColumns = ['seed', 'mid', 'dfid'];
@@ -26,7 +25,6 @@ export function anonymousClient(platform, value, code) {
   } else if (platform === 'kg') {
     require(object(value) && /^[0-9a-f]{32}$/.test(value.seed) && text(value.mid) &&
       (value.dfid === null || text(value.dfid)));
-    require(value.mid === BigInt('0x' + createHash('md5').update(value.seed).digest('hex')).toString());
     return Object.fromEntries(kgColumns.map(key => [key, value[key]]));
   } else {
     require(platform === 'tx' && object(value));

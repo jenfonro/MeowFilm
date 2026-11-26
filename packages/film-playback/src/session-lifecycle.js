@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { isSmartSiteAllowed } from './policy.js';
 import { resolveEpisode } from './episodes.js';
 import { providerFamily } from './rules.js';
-import { validateManual } from './library.js';
 import { checkSource, checkTarget, clone, codeOf, fields, identity, isIdentifier, object,
   requireValue, sourceRevision, text } from './identity.js';
 import { episodeTarget, historyPosition, manualIdentity, mergeSeason,
@@ -275,9 +274,8 @@ export function createSessionLifecycle(ctx) {
     }
     if (target.kind === 'source' && target.source.engine === 'pan') {
       const row = library.read().manual.find(value => value?.id === target.source.detailId &&
-        value.targetId === target.id && value.share && value.enabled !== false);
+        value.targetId === target.id && value.share && !value.errorCode && value.enabled !== false);
       requireValue(row && target.source.key === `manual:${row.id}`, 'SOURCE_NOT_FOUND');
-      validateManual(row, 'CORRUPT_STORAGE');
       const source = { key: target.source.key, engine: 'pan', name: row.name || '人工匹配', detailId: row.id };
       const added = await ctx.candidates.addResults(session, source, [{ id: row.id, title: row.title || target.title }], 'linked');
       requireValue(!ctx.isClosed(), 'CLOSED');

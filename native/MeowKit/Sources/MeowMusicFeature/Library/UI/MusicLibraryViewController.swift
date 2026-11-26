@@ -75,7 +75,6 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         ])
         emptyLabel.textAlignment = .center
         observe(model.libraryChanges, whenVisible: true) { [weak self] in self?.render() }
-        observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
         observe(model.playbackChanges, whenVisible: true) { [weak self] in self?.renderHeartbeat() }
         observeDistinct(appearance.$preferences.map(\.playlistView).dropFirst().eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) {
             [weak self] _ in

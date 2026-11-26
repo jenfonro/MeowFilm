@@ -1,15 +1,9 @@
 import Foundation
 import MeowDebug
 
-public protocol RuntimeLaunching: Sendable {
-    func connect() async throws -> RuntimeHTTPClient
-    func close() async
-    func waitForExit() async
-}
-
 /// App-owned, single-launch runtime shared by independent business modules.
 public actor RuntimeSession {
-    private let launcher: any RuntimeLaunching
+    private let launcher: RuntimeEmbeddedLauncher
     private var launch: Task<Void, Never>?
     private var outcome: Result<RuntimeHTTPClient, Error>?
     private var waiters: [UUID: CheckedContinuation<RuntimeHTTPClient, Error>] = [:]
@@ -20,7 +14,7 @@ public actor RuntimeSession {
     private nonisolated let notificationLifetime = RuntimeSettingsNotificationLifetime()
     private var notifications: [UUID: Task<Void, Never>] = [:]
 
-    public init(launcher: any RuntimeLaunching) { self.launcher = launcher }
+    public init(launcher: RuntimeEmbeddedLauncher) { self.launcher = launcher }
 
     /// Cancelling a borrower cancels its wait, never the shared startup.
     public func connection() async throws -> RuntimeHTTPClient {

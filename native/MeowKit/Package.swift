@@ -37,7 +37,7 @@ let package = Package(
                     .copy("Resources/storage-data-schema.sql"),
                     .copy("Resources/storage-cache-schema.sql")
                 ]),
-        .target(name: "MeowAccounts", dependencies: ["MeowContracts"]),
+        .target(name: "MeowAccounts", dependencies: ["MeowContracts", "MeowStorage"]),
         .target(name: "MeowAudio", dependencies: ["MeowDebug",
             .product(name: "CMeowAudioKernel", package: "audiokernel")]),
         .target(name: "MeowPlayback", dependencies: ["MeowContracts", "MeowDebug", "MeowAudio", "MeowStorage"]),
@@ -46,10 +46,10 @@ let package = Package(
             .product(name: "MeowAetherKernel", package: "aetherkernel")]),
         .target(name: "MeowUI", dependencies: ["MeowDebug", "MeowStorage"]),
         .target(name: "MeowRuntime", dependencies: ["MeowDebug", "MeowJSON", "MeowStorage"]),
-        .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowDebug", "MeowStorage", "MeowPlayback", "MeowUI"]),
-        .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowAudio", "MeowContracts", "MeowDebug", "MeowJSON", "MeowAccounts", "MeowStorage", "MeowRuntime", "MeowUI"]),
-        .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowDebug", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),
-        .target(name: "MeowFilmFeature", dependencies: ["MeowContracts", "MeowDebug", "MeowUI", "MeowStorage", "MeowRuntime"]),
+        .target(name: "MeowMusicPlatform", dependencies: ["MeowAudio", "MeowContracts", "MeowDebug", "MeowJSON", "MeowAccounts", "MeowStorage", "MeowRuntime", "MeowUI"]),
+        .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowDebug", "MeowJSON", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),
+        .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowDebug", "MeowStorage", "MeowPlayback", "MeowUI", "MeowMusicPlatform", "MeowMusicNativeService"]),
+        .target(name: "MeowFilmFeature", dependencies: ["MeowContracts", "MeowDebug", "MeowPlayback", "MeowUI", "MeowStorage", "MeowRuntime"]),
         .target(name: "MeowNovelFeature", dependencies: ["MeowDebug", "MeowUI", "MeowStorage", "MeowRuntime"])
     ],
     swiftLanguageVersions: [.v5]

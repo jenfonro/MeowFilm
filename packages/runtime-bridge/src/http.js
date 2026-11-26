@@ -1,10 +1,9 @@
 import http from 'node:http';
-import https from 'node:https';
 import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { BridgeError, HTTP_PROTOCOL } from './errors.js';
-import { checkJSON, encodeJSONValue, decodeJSONValue, parseJSON } from './json.js';
+import { decodeJSONValue } from './json.js';
 import { stringifyJSONValue } from './json-value.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/i;
@@ -15,18 +14,10 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 export function validateSession({ sessionId }) {
   if (typeof sessionId !== 'string' || !uuid.test(sessionId)) invalid();
 }
-export function validateEndpoint(value) {
-  let url;
-  try { url = new URL(value); } catch { invalid(); }
-  if (!['http:', 'https:'].includes(url.protocol) || !url.hostname ||
-      url.pathname !== '/' || url.search || url.hash) invalid();
-  return url;
-}
 function envelope(value, contract) {
   if (!object(value) || typeof value.ok !== 'boolean' || value.contract !== contract) throw new BridgeError('INVALID_RESPONSE');
   if (value.ok) {
     if (!Object.hasOwn(value, 'value')) throw new BridgeError('INVALID_RESPONSE');
-    checkJSON(value.value);
   } else if (typeof value.code !== 'string' || !value.code) {
     throw new BridgeError('INVALID_RESPONSE');
   }
@@ -310,112 +301,6 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
             throw new BridgeError('INVALID_RESPONSE');
           }
         }
-      })();
-    },
-  });
-}
-
-/** Standard HTTP client; no retry, redirects, response-size branch or body processing. */
-export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
-  const endpoint = validateEndpoint(baseUrl);
-  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 300000) invalid();
-  const transport = endpoint.protocol === 'https:' ? https : http;
-  const agent = new transport.Agent({ keepAlive: true });
-  const pending = new Set();
-  let closed = false, closing;
-  function send({ method = 'POST', path, body, contract = HTTP_PROTOCOL,
-    signal, timeout: deadline = timeout, requestId = randomUUID(), raw = false,
-    debugOpId, debugTraceId } = {}, withDeadline) {
-    if (closed) return Promise.reject(new BridgeError('CLOSED'));
-    if (signal?.aborted) return Promise.reject(new BridgeError('CANCELLED'));
-    let bytes;
-    try {
-      if (typeof path !== 'string' || !path.startsWith('/v1/') || path.startsWith('//') ||
-          !uuid.test(requestId)) invalid();
-      if (withDeadline && (!Number.isSafeInteger(deadline) || deadline < 1 || deadline > 300000)) invalid();
-      const url = new URL(path, endpoint);
-      if (url.pathname + url.search !== path || url.hash ||
-          !['GET', 'POST', 'PUT'].includes(method)) invalid();
-      if (raw && !(body instanceof Uint8Array)) invalid();
-      bytes = method === 'GET' ? undefined : raw ? Buffer.from(body) : encodeJSONValue(body);
-    } catch (error) { return Promise.reject(error instanceof BridgeError ? error : new BridgeError('INVALID_REQUEST')); }
-    return new Promise((resolve, reject) => {
-      let failure, reply, result, settled = false, transportClosed = false, reading = false, received = false;
-      const owner = { cancel: code => {
-        failure ??= new BridgeError(code);
-        reply?.destroy(); outgoing.destroy();
-      }, done: undefined };
-      let drained;
-      owner.done = new Promise(done => { drained = done; });
-      const outgoing = transport.request(new URL(path, endpoint), {
-        method, agent, headers: { 'x-meow-request-id': requestId,
-          ...(typeof debugOpId === 'string' && debugOpId ? { 'x-meow-debug-op': debugOpId } : {}),
-          ...(typeof debugTraceId === 'string' && debugTraceId ? { 'x-meow-debug-trace': debugTraceId } : {}),
-          ...(bytes === undefined ? {} : { 'content-type': raw ? 'application/octet-stream' : 'application/json',
-            'content-length': bytes.length }) },
-      });
-      pending.add(owner);
-      const abort = () => owner.cancel('CANCELLED');
-      let timer;
-      if (withDeadline) timer = setTimeout(() => owner.cancel('TIMEOUT'), deadline);
-      function drain() {
-        if (!transportClosed || reading) return;
-        settle(failure ?? (received ? undefined : new BridgeError('CLOSED')), result);
-        pending.delete(owner); drained();
-      }
-      function settle(error, value) {
-        if (settled) return;
-        settled = true;
-        if (withDeadline) clearTimeout(timer);
-        signal?.removeEventListener('abort', abort);
-        if (error) reject(error); else resolve(value);
-      }
-      outgoing.on('response', response => {
-        reply = response; reading = true;
-        response.on('error', () => { failure ??= new BridgeError('CLOSED'); });
-        void (async () => {
-          try {
-            if (response.headers['x-meow-request-id'] !== requestId ||
-                response.headers['content-type'] !== 'application/json' ||
-                ![200, 400, 401, 403, 404, 413, 415].includes(response.statusCode)) {
-              throw new BridgeError('INVALID_RESPONSE');
-            }
-            const bytes = await readBody(response);
-            if (!response.complete) throw new BridgeError('CLOSED');
-            const value = parseJSON(bytes);
-            if (value?.contract === HTTP_PROTOCOL && contract !== HTTP_PROTOCOL) {
-              envelope(value, HTTP_PROTOCOL);
-              if (value.ok) throw new BridgeError('INVALID_RESPONSE');
-            } else envelope(value, contract);
-            if (response.statusCode !== 200 && value.ok) throw new BridgeError('INVALID_RESPONSE');
-            received = true; result = value;
-          } catch (error) {
-            failure ??= new BridgeError(['CLOSED', 'CANCELLED'].includes(error.code) ? 'CLOSED' : 'INVALID_RESPONSE');
-            response.destroy(); outgoing.destroy();
-          } finally { reading = false; drain(); }
-        })();
-      });
-      outgoing.on('error', () => { failure ??= new BridgeError('CLOSED'); });
-      outgoing.once('close', () => {
-        transportClosed = true;
-        drain();
-      });
-      signal?.addEventListener('abort', abort, { once: true });
-      if (signal?.aborted) abort();
-      else outgoing.end(bytes);
-    });
-  }
-  return Object.freeze({
-    request: options => send(options, true),
-    requestWithoutDeadline: options => send(options, false),
-    get state() { return { closed, pending: pending.size }; },
-    close() {
-      return closing ??= (async () => {
-        closed = true;
-        const owners = [...pending];
-        for (const owner of owners) owner.cancel('CLOSED');
-        agent.destroy();
-        await Promise.all(owners.map(owner => owner.done));
       })();
     },
   });

@@ -2,7 +2,6 @@ import { isDeepStrictEqual } from 'node:util';
 import { isCandidateAllowed } from './policy.js';
 import { contentResults, matchesResult, mediaVariants, normalizeDetail, recognizeCandidates, recognizeVariantCandidates } from './recognition.js';
 import { providerFamily, qualityKey } from './rules.js';
-import { validateBlock } from './library.js';
 import { clone, codeOf, fields, identity, isIdentifier, object, requireValue,
   resultDetailId, text, variantParentId } from './identity.js';
 import { manualIdentity, sameVariantFile } from './session-helpers.js';
@@ -227,9 +226,8 @@ export function createSessionCandidates(ctx) {
     const constraint = explicit || discoverVariants && session.constraint.action === 'quality'
       ? { action: 'default' } : session.constraint;
     const blocks = library.read().blocks.filter(row => row.targetId === target.id &&
-      row.sourceKey === candidate.source?.key && (row.errorCode ||
-        row.detailId === (candidate.detailId ?? candidate.source?.detailId) && row.lineId === candidate.lineId));
-    for (const row of blocks) validateBlock(row, 'CORRUPT_STORAGE');
+      row.sourceKey === candidate.source?.key && !row.errorCode &&
+      row.detailId === (candidate.detailId ?? candidate.source?.detailId) && row.lineId === candidate.lineId);
     if (!isCandidateAllowed(candidate, {
       target: policyTarget, constraint,
       excluded: retry ? new Set() : session.excluded, blocks,

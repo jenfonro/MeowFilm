@@ -7,7 +7,7 @@ import { createSnapshotStream } from './sse.js';
 import { mapWithConcurrency } from './concurrency.js';
 import { checkSource, clone, codeOf, object, requireValue, sourceIdentity,
   sourceRevision, text } from './identity.js';
-import { filmRuleFailure, validRuleText } from './rules.js';
+import { filmRuleFailure } from './rules.js';
 
 const require = createRequire(import.meta.url);
 const MAX_SITE_CONCURRENCY = 6;
@@ -22,13 +22,9 @@ const metadataDetailRequest = item => ({ kind: 'metadata', provider: 'tmdb',
 const members = card => card.aggregateItems?.length ? card.aggregateItems
   : card.sourceKind === 'site' ? [card] : [];
 const rawSelection = card => card.sourceKind === 'site' && card.displayKey.startsWith('site:');
-// Display identities are opaque. JSON-escaping the complete group key keeps
-// lone UTF16 code units and avoids collisions with legitimate textual escapes.
 const displayIdentity = key => key.startsWith('group:') ? `group:${JSON.stringify(key.slice(6))}` : key;
 function wireValue(value) {
   if (isRawJSON(value)) return clone(value);
-  if (typeof value === 'string') return validRuleText(value) ? value
-    : Array.from({ length: value.length }, (_, index) => value.charCodeAt(index));
   if (Array.isArray(value)) return value.map(wireValue);
   if (object(value)) return Object.fromEntries(Object.entries(value).map(([key, child]) =>
     [key, key === 'raw' ? clone(child)

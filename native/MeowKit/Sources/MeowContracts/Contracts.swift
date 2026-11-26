@@ -64,7 +64,7 @@ public struct PlaybackResource: Sendable, Equatable {
     public init(id: String, url: URL, title: String, headers: [String: String] = [:], startPosition: TimeInterval = 0,
                 byteSource: (any PlaybackByteSource)? = nil) throws {
         guard !id.isEmpty, ["https", "http", "file"].contains(url.scheme?.lowercased() ?? ""),
-              url.user == nil, url.password == nil, startPosition.isFinite, startPosition >= 0 else {
+              startPosition.isFinite, startPosition >= 0 else {
             throw ContractError.invalidURL
         }
         self.id = id; self.url = url; self.title = title

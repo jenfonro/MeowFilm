@@ -8,30 +8,20 @@ internal static class FilmPreferencesStore
 
     internal static FilmPreferences? Read(DatabaseSession db)
     {
-        bool hasRoot = db.TryQuerySingle(
+        if (!db.TryQuerySingle(
             "SELECT ios_auto_prepare,metadata_view_provider FROM film_preferences WHERE singleton=1",
             row => (IosAutoPrepare: row.GetBool(0), Provider: row.GetString(1)),
-            out var root);
-
-        var items = db.Query(
-            "SELECT list_kind,item_value FROM film_preference_items ORDER BY list_kind, position",
-            row => (Kind: row.GetString(0), Value: row.GetString(1)));
-
-        if (!hasRoot)
-        {
-            if (items.Count > 0) throw new StorageException(StorageError.Corrupt);
+            out var root))
             return null;
-        }
-
-        if (root.Provider is not ("tmdb" or "douban"))
-            throw new StorageException(StorageError.Corrupt);
 
         var ruleOrder = new List<string>();
         var panOrder = new List<string>();
         var keywords = new List<string>();
         var siteCleanKeywords = new List<string>();
 
-        foreach (var (kind, value) in items)
+        foreach (var (kind, value) in db.Query(
+            "SELECT list_kind,item_value FROM film_preference_items ORDER BY list_kind, position",
+            row => (Kind: row.GetString(0), Value: row.GetString(1))))
         {
             switch (kind)
             {
@@ -39,7 +29,6 @@ internal static class FilmPreferencesStore
                 case "panOrder": panOrder.Add(value); break;
                 case "keywords": keywords.Add(value); break;
                 case "siteCleanKeywords": siteCleanKeywords.Add(value); break;
-                default: throw new StorageException(StorageError.Corrupt);
             }
         }
 

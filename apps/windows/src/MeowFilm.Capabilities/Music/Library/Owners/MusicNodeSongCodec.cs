@@ -41,6 +41,19 @@ internal static class MusicNodeSongCodec
     internal static JsonElement BuildObject(Action<Utf8JsonWriter> writeFields) =>
         Build(w => { w.WriteStartObject(); writeFields(w); w.WriteEndObject(); });
 
+    internal static string HashJsonObject(Action<Utf8JsonWriter> writeFields)
+    {
+        var buffer = new ArrayBufferWriter<byte>(256);
+        using (var writer = new Utf8JsonWriter(buffer, WriterOptions))
+        {
+            writer.WriteStartObject();
+            writeFields(writer);
+            writer.WriteEndObject();
+            writer.Flush();
+        }
+        return MusicRules.HashUtf8(buffer.WrittenSpan);
+    }
+
     internal static void WriteStringArray(Utf8JsonWriter w, string propertyName, IReadOnlyList<string> items)
     {
         w.WritePropertyName(propertyName);

@@ -3,7 +3,6 @@ import { isDeepStrictEqual } from 'node:util';
 import { compareCandidates } from './policy.js';
 import { resolveEpisode } from './episodes.js';
 import { providerFamily } from './rules.js';
-import { validateManual } from './library.js';
 import { checkTarget, clone, codeOf, fail, fields, identity, isIdentifier, requireValue, text } from './identity.js';
 import { actualSourceEpisodes, canDiscoverVariants, cancelled, episodeTarget,
   manualIdentity, mergeSeason, replaceLine, sameActualEpisode, sameEpisode, sameVariantFile,
@@ -182,7 +181,6 @@ export function createSessionSelection(ctx) {
     await library.update(document => {
       const entry = document.manual.find(item => item?.id === row.id);
       if (!entry || entry.enabled === false || manualIdentity(entry) !== manualIdentity(row)) return;
-      requireValue(Number.isSafeInteger(entry.failureCount) && entry.failureCount >= 0, 'CORRUPT_STORAGE');
       entry.failureCount = error ? entry.failureCount + 1 : 0;
       if (entry.autoDisable && entry.failureCount >= 3) entry.enabled = false;
       debug?.emit({
@@ -262,11 +260,9 @@ export function createSessionSelection(ctx) {
         const rows = document[stage].filter(row => row?.targetId === session.target.id && row.enabled !== false);
         for (const row of rows) {
           if (!ctx.valid(session, generation)) return;
-          if (stage === 'manual') {
-            try {
-              validateManual(row, 'CORRUPT_STORAGE');
-              requireValue(row.failureCount < Number.MAX_SAFE_INTEGER, 'CORRUPT_STORAGE');
-            } catch (error) { session.selectionError = codeOf(error); continue; }
+          if (stage === 'manual' && row.errorCode) {
+            session.selectionError = row.errorCode;
+            continue;
           }
           if (stage === 'manual' && row.share) {
             if (['source', 'group'].includes(session.target.kind)) continue;

@@ -1,17 +1,12 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
 import MeowStorage
 import MeowRuntime
 
-/// Only a proven not-sent failure from the platform layer may return an inflight
-/// event to pending. Timeout, connection loss, cancellation and bad ACK are ambiguous.
 enum MusicAccountFeedbackNotSent: Error {
     case notSent(code: String)
 }
 
-/// The existing account owner drives this queue. The lock also lets explicit
-/// revocation fence persistence and cancel I/O without waiting for its actor.
 final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     static let retention: TimeInterval = 7 * 86_400
 
@@ -97,7 +92,6 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
                 "target": .object(["nativeId": .string(nativeID), "source": .string(source), "sourceId": .string(sourceID),
                                     "algorithm": .string(algorithm), "origin": .object(["kind": .string(heartbeat ? "heartbeat" : "")])])
             ]))
-
         }
     }
     private struct Admission {
@@ -116,14 +110,13 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     private var admissions: [UUID: Admission] = [:]
     private var setting = MusicPlaybackFeedbackSetting()
     private var scope: String?
-    private var authorization = MusicPlaybackFeedbackAuthorization()
+    private var authorization = MusicQueueAuthorization()
 
     init(database: SQLiteDatabase?) { self.database = database }
     private func locked<T>(_ action: () throws -> T) rethrows -> T {
         lock.lock(); defer { lock.unlock() }; return try action()
     }
     private func save(_ draft: [Entry], clearAll: Bool = false) throws {
-        // A failed ordinary write must not prevent a later explicit safe unlink.
         guard writable || draft.isEmpty else { throw MusicServiceError.storageFailed }
         do {
             guard let database else { throw MusicServiceError.storageFailed }
@@ -153,7 +146,6 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             }
             entries = draft
         } catch {
-            // A failed inflight/ACK write cannot authorize another send.
             writable = false
             DebugRuntime.logError(.musicPlayback, sub: "feedback.outbox", event: "save.error", error: error)
             throw MusicServiceError.storageFailed
@@ -171,13 +163,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
                         "FROM ios_music_feedback_outbox ORDER BY occurred_at_ms, event_id"
                     ) { try Entry(cursor: $0) }
                 }
-                guard Set(saved.map(\.id)).count == saved.count, saved.allSatisfy({
-                          !$0.scope.isEmpty && $0.generation >= 0 &&
-                          (try? $0.eventBody()) != nil
-                      }) else { throw MusicServiceError.storageFailed }
                 entries = saved
-                // A process may have died after sending but before saving ACK.
-                // Such inflight records, and their dependent ends, are spent.
                 let uncertain = Set(entries.filter { $0.state == .inflight && $0.phase == .start }.map(\.instance))
                 let safe = entries.filter { $0.state == .pending && !uncertain.contains($0.instance) }
                 try save(pruned(safe, at: now))
@@ -211,7 +197,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         try locked {
             try load(at: now)
             guard armed, setting.enabled, !frozen, writable else { throw MusicServiceError.cancelled }
-            if scope != next || !authorization.isActive && !dispatchStopped {
+            if scope != next || (!authorization.isActive && !dispatchStopped) {
                 authorization.revoke(); authorization = .init(); admissions.removeAll()
             }
             scope = next
@@ -233,7 +219,6 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
                 guard admission?.scope == expected else { return .unconfirmed }
             }
             let entry = Entry(value, scope: expected, generation: setting.generation, startConfirmed: admission?.confirmed == true)
-            // Verify representable original times/payload before admitting it.
             _ = try entry.eventBody()
             let draft = pruned(entries + [entry], at: now)
             guard draft.contains(where: { $0.id == entry.id }) else { return .unconfirmed }
@@ -244,7 +229,6 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             return .registered
         }
     }
-    /// A snapshot per real trigger, not a repeating retry loop.
     func candidates(at now: TimeInterval) throws -> [UUID] {
         try locked {
             guard armed, !frozen, !dispatchStopped, setting.enabled, authorization.isActive else { return [] }
@@ -253,16 +237,16 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             return entries.filter { $0.state == .pending }.map(\.id)
         }
     }
-    func reserve(_ id: UUID) throws -> (Entry, MusicPlaybackFeedbackAuthorization)? {
+    func reserve(_ id: UUID) throws -> (Entry, MusicQueueAuthorization)? {
         try locked {
             guard armed, !frozen, !dispatchStopped, setting.enabled, let index = entries.firstIndex(where: { $0.id == id }),
                   entries[index].state == .pending, entries[index].scope == scope,
                   entries[index].generation == setting.generation else { return nil }
-            try authorization.checkLocal()
+            try authorization.check()
             let value = entries[index]
             guard value.phase == .start || value.startConfirmed else { return nil }
             var draft = entries; draft[index].state = .inflight
-            try save(draft) // Must complete before entering the physical sender.
+            try save(draft)
             return (value, authorization)
         }
     }
@@ -297,15 +281,11 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             try save(draft)
         }
     }
-    /// Validation temporarily retires current I/O, but only an explicit account
-    /// or settings change may erase safe pending events.
     func suspend(preserving: Bool, closing: Bool = false, revokingConsent: Bool = false) {
         locked {
             authorization.revoke(); scope = nil; admissions.removeAll()
             frozen = frozen || closing
             if revokingConsent { armed = false }
-            // A local-only restore/normal close must not erase a cold outbox
-            // before authoritative settings and account identity are available.
             if preserving, !loaded || !writable { return }
             let uncertain = Set(entries.filter { $0.state == .inflight && $0.phase == .start }.map(\.instance))
             let draft = preserving ? entries.filter { $0.state == .pending && !uncertain.contains($0.instance) } : []

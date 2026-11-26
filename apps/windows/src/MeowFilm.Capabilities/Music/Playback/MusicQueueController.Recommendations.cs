@@ -36,12 +36,10 @@ public sealed partial class MusicQueueController
     private SearchRecommendationStart? searchRecommendationStart;
 
     public IReadOnlyList<MusicRecommendationCandidate> RecommendationCandidates { get; private set; } = [];
-    public bool HasRecommendationSession => recommendationSnapshot is { } value &&
-        (value.Id.Length > 0 || value.ReconcileIds.Length > 0);
+    public bool HasRecommendationSession => recommendationSnapshot is { Id.Length: > 0 };
     public bool HasQueueRecommendations => HasActiveRecommendation &&
         recommendationSnapshot!.Kind == "queue";
-    public bool CanChooseRecommendation => !stopping && HasQueueRecommendations && !RecommendationLoading &&
-        !CanReconcileRecommendation;
+    public bool CanChooseRecommendation => !stopping && HasQueueRecommendations && !RecommendationLoading;
     public bool HasActiveRecommendation => recommendationSnapshot is { Active: true };
     public bool RecommendationLoading => recommendationSnapshot is { Loading: true };
     public string RecommendationTitle => recommendationSnapshot is not { } value ? "" :
@@ -82,10 +80,10 @@ public sealed partial class MusicQueueController
     private bool CurrentFromLocalFavorites => playbackController.CurrentFeedbackContext?.PlaylistId == "favorites";
     public bool HasCurrentRecommendationIdentity => CurrentWyId.Length > 0;
     public bool CanRecommendCurrent => playbackController.CanPlay && playbackController.OwnsCurrent && playback.HasMedia && HasCurrentRecommendationIdentity &&
-        !CanReconcileRecommendation && !RecommendationLoading;
+        !RecommendationLoading;
     public bool CanHeartbeatCurrent => playbackController.CanPlay && playbackController.OwnsCurrent && playback.HasMedia &&
         HasCurrentRecommendationIdentity && (HasHeartbeatContext || CurrentFromLocalFavorites) &&
-        !CanReconcileRecommendation && !RecommendationLoading;
+        !RecommendationLoading;
     public string PlaybackQueueSourceText => HasActiveRecommendation &&
         (recommendationSnapshot!.Kind != "queue" || recommendationSnapshot.Started)
             ? RecommendationTitle : playbackController.QueueSource is { } source ? source.Kind switch
@@ -96,19 +94,16 @@ public sealed partial class MusicQueueController
         get
         {
             var account = accounts.Accounts.Single(value => value.Platform == "wy");
-            return recommendationCommandEpoch + ":" + recommendationRevision + ":" + catalogActions.Generation + ":" +
+            return recommendationCommandEpoch + ":" + recommendationRevision + ":" + ctx.CatalogActionGeneration + ":" +
                 accounts.AccountEpoch + ":" + account.UserId + ":" + account.Generation + ":" +
                 playbackController.QueueEpoch + ":" + playbackController.PlaybackPresentationKey;
         }
     }
     public bool RecommendationContinue => recommendationSnapshot is { Continue: true };
-    public bool CanChangeRecommendationContinue => !stopping && HasActiveRecommendation && !RecommendationLoading &&
-        !CanReconcileRecommendation;
-    public bool HasRecommendationPanel => HasQueueRecommendations || CanRetryRecommendation || CanReconcileRecommendation;
+    public bool CanChangeRecommendationContinue => !stopping && HasActiveRecommendation && !RecommendationLoading;
+    public bool HasRecommendationPanel => HasQueueRecommendations || CanRetryRecommendation;
     public bool CanRetryRecommendation => !stopping && recommendationSnapshot is { CanRetry: true };
     public bool CanReturnRecommendation => !stopping && recommendationSnapshot is { CanReturn: true };
-    public bool CanReconcileRecommendation => !stopping && recommendationSnapshot is { } value &&
-        (value.RequiresReconcile || value.ReconcileIds.Length > 0);
 
     private static bool CandidatesEqual(MusicRecommendationCandidateSnapshot[] a, MusicRecommendationCandidateSnapshot[] b)
     {
@@ -122,7 +117,7 @@ public sealed partial class MusicQueueController
     private void InitializeRecommendations()
     {
         recommendationBinding = application.BindSelection(SelectRecommendationAsync);
-        application.Changed += RecommendationChanged;
+        application.Recommendations.Changed += RecommendationChanged;
     }
 
     internal void RecommendationBindings()
@@ -136,7 +131,7 @@ public sealed partial class MusicQueueController
             nameof(PlaybackQueueSourceText), nameof(PlaybackSourceActionKey), nameof(HasActiveRecommendation),
             nameof(RecommendationTitle), nameof(RecommendationLoading), nameof(RecommendationContinue),
             nameof(CanChangeRecommendationContinue), nameof(CanRetryRecommendation), nameof(CanReturnRecommendation),
-            nameof(CanReconcileRecommendation), nameof(HasRecommendationPanel) })
+            nameof(HasRecommendationPanel) })
             Changed(name);
     }
 
@@ -226,7 +221,7 @@ public sealed partial class MusicQueueController
         var token = recommendationLifetime.Token;
         long command = ++recommendationCommandEpoch;
         if (!isStart)
-            catalogActions.ClearPreparingCardIf(card => card.Kind is "fm" or "similar" or "heartbeat");
+            ctx.ClearPreparingCardIf(card => card.Kind is "fm" or "similar" or "heartbeat");
         RecommendationBindings();
         try
         {
@@ -234,11 +229,10 @@ public sealed partial class MusicQueueController
             token.ThrowIfCancellationRequested();
             // Command replies may describe a retired session. Only the actual
             // current snapshot may replace the shared playback controls.
-            var actual = await application.GetRecommendationAsync(cancellationToken: token);
+            var actual = await application.Recommendations.GetAsync(cancellationToken: token);
             token.ThrowIfCancellationRequested();
             if (!stopping) PublishRecommendation(actual);
-            if (!actual.RequiresReconcile && actual.ReconcileIds.Length == 0)
-                await RefreshRecommendationQueue(token);
+            await RefreshRecommendationQueue(token);
         }
         catch (OperationCanceledException) { }
         catch (Exception error)
@@ -249,18 +243,18 @@ public sealed partial class MusicQueueController
     }
 
     public Task ReturnRecommendationAsync() => CanReturnRecommendation
-        ? RecommendationCommand(false, token => application.ReturnRecommendationAsync(recommendationSnapshot!.Id, token))
+        ? RecommendationCommand(false, token => application.Recommendations.ReturnAsync(recommendationSnapshot!.Id, token))
         : Task.CompletedTask;
     public Task RetryRecommendationAsync() => CanRetryRecommendation
-        ? RecommendationCommand(false, token => application.RetryRecommendationAsync(recommendationSnapshot!.Id, token))
+        ? RecommendationCommand(false, token => application.Recommendations.RetryAsync(recommendationSnapshot!.Id, token))
         : Task.CompletedTask;
     public Task ChangeRecommendationContinueAsync(bool enabled) => CanChangeRecommendationContinue
-        ? RecommendationCommand(false, token => application.SetRecommendationContinueAsync(recommendationSnapshot!.Id, enabled, token))
+        ? RecommendationCommand(false, token => application.Recommendations.SetContinueAsync(recommendationSnapshot!.Id, enabled, token))
         : Task.CompletedTask;
     public Task ChooseRecommendationAsync(MusicRecommendationCandidate candidate) =>
         CanChooseRecommendation && candidate.SessionId == recommendationSnapshot!.Id &&
         RecommendationCandidates.Any(item => ReferenceEquals(item, candidate))
-            ? RecommendationCommand(false, token => application.ChooseRecommendationCandidateAsync(candidate.SessionId, candidate.Id, token))
+            ? RecommendationCommand(false, token => application.Recommendations.ChooseAsync(candidate.SessionId, candidate.Id, token))
             : Task.CompletedTask;
     public Task ChangePlaybackFmAsync(string mode, string submode, string actionKey)
     {
@@ -305,11 +299,11 @@ public sealed partial class MusicQueueController
             if (!Current() || CurrentWyId.Length == 0) return;
             await Task.Yield();
             if (!Current()) return;
-            var actual = await application.GetRecommendationAsync(cancellationToken: token);
+            var actual = await application.Recommendations.GetAsync(cancellationToken: token);
             token.ThrowIfCancellationRequested();
             if (!Current()) return;
             PublishRecommendation(actual);
-            if (!Current() || actual.Active || actual.RequiresReconcile || actual.ReconcileIds.Length > 0) return;
+            if (!Current() || actual.Active) return;
             var request = new MusicRecommendationStartRequest(
                 Kind: "queue",
                 Platform: "wy",
@@ -332,33 +326,17 @@ public sealed partial class MusicQueueController
         }
     }
 
-    public Task ReconcileRecommendationAsync()
-    {
-        if (!CanReconcileRecommendation) return Task.CompletedTask;
-        string[] ids = recommendationSnapshot!.ReconcileIds;
-        if (ids.Length == 0) ids = [recommendationSnapshot.Id];
-        return TrackRecommendation(Reconcile());
-        async Task Reconcile()
-        {
-            foreach (string id in ids)
-            {
-                if (stopping) break;
-                await ExecuteRecommendationCommand(false, ct => application.ReconcileRecommendationAsync(id, ct));
-            }
-        }
-    }
-
     internal async Task StartRecommendation(CatalogTarget target, MusicCatalogCard? card = null)
     {
         if (stopping) return;
-        catalogActions.Invalidate();
+        ctx.InvalidateCatalogAction();
         long command = ++recommendationCommandEpoch;
-        long action = catalogActions.Generation, navigation = ctx.NavigationSubmission;
+        long action = ctx.CatalogActionGeneration, navigation = ctx.NavigationSubmission;
         long observation = accounts.PlatformObservation(target.Platform);
         bool Current() => !stopping && command == recommendationCommandEpoch &&
-            action == catalogActions.Generation && navigation == ctx.NavigationSubmission &&
+            action == ctx.CatalogActionGeneration && navigation == ctx.NavigationSubmission &&
             observation == accounts.PlatformObservation(target.Platform);
-        catalogActions.SetPreparingCard(card);
+        ctx.SetPreparingCard(card);
         RecommendationBindings();
         try
         {
@@ -392,11 +370,10 @@ public sealed partial class MusicQueueController
             await RecommendationCommand(true, ct => application.StartRecommendationAsync(request, ct));
         }
         catch (OperationCanceledException) { }
-        catch (Exception error) { if (Current()) RecommendationActionError?.Invoke(error); }
+        catch (Exception error) { if (Current()) ctx.PublishCatalogActionError(error); }
         finally
         {
-            if (action == catalogActions.Generation && ReferenceEquals(catalogActions.PreparingCard, card))
-                catalogActions.ClearPreparingCard();
+            ctx.ClearPreparingCardIfEquals(card, action);
         }
     }
 
@@ -431,7 +408,7 @@ public sealed partial class MusicQueueController
         long epoch = -1;
         try
         {
-            var response = await application.GetQueueAsync(0, 1, token);
+            var response = await application.Library.GetQueueAsync(0, 1, token);
             if (!Current() || response.Version != selection.QueueVersion) return false;
             var state = MusicPlaybackController.ParseQueue(response);
             if (state.Current?.EntryId != selection.EntryId || !state.Saved) return false;
@@ -488,7 +465,7 @@ public sealed partial class MusicQueueController
             IsLocal: true, PlaybackEvent: playbackController.PlaybackEvent);
         if (recommendationObservation == state) return;
         recommendationObservation = state;
-        TrackRecommendation(application.OnPlaybackAsync(state, recommendationLifetime.Token));
+        TrackRecommendation(application.Recommendations.OnPlaybackAsync(state, recommendationLifetime.Token));
     }
 
     internal void ObserveExplicitRecommendationPause()
@@ -497,11 +474,11 @@ public sealed partial class MusicQueueController
         var state = new MusicRecommendationPlaybackState(id, false, playbackController.Recorded && playbackController.OpenedEntry == id,
             playback.OwnerId == Id && playback.Identity == id && playback.HasMedia, PlaybackEvent: playbackController.PlaybackEvent);
         recommendationObservation = state;
-        TrackRecommendation(application.OnPlaybackAsync(state, recommendationLifetime.Token));
+        TrackRecommendation(application.Recommendations.OnPlaybackAsync(state, recommendationLifetime.Token));
     }
 
     internal Task<bool> AdvanceRecommendation(bool naturalEnd) => playbackController.CurrentSong?.EntryId is { } id
-        ? application.TryAdvanceAsync(id, naturalEnd, true, recommendationLifetime.Token)
+        ? application.Recommendations.TryAdvanceAsync(id, naturalEnd, true, recommendationLifetime.Token)
         : Task.FromResult(false);
 
     internal async Task<bool> TryAdvanceRecommendationForStepAsync(bool naturalEnd, CancellationToken token)
@@ -546,7 +523,11 @@ public sealed partial class MusicQueueController
 
     internal void ReleaseRecommendations()
     {
-        application.Changed -= RecommendationChanged;
+        application.Library.QueueChanged -= OnLibraryQueueChanged;
+        playback.PropertyChanged -= OnPlaybackDeviceChanged;
+        playbackController.PropertyChanged -= OnPlaybackControllerChanged;
+        accounts.PropertyChanged -= OnAccountsPropertyChanged;
+        application.Recommendations.Changed -= RecommendationChanged;
         recommendationBinding?.Dispose(); recommendationBinding = null;
         recommendationLifetime.Cancel(); recommendationLifetime.Dispose();
     }

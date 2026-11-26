@@ -25,129 +25,67 @@ enum FilmInputWhitespace {
 // MARK: - Strongly-Typed Setting Records (Zero JSON / RuntimeValue AST)
 
 public struct FilmTMDBSettingsRecord: Equatable, Sendable {
-    public var apiBase: String
-    public var imageBase: String
-    public var apiKey: String
-    public var accessToken: String
-    public var language: String
-    public var region: String
-    public var includeAdult: Bool
-
+    public var apiBase: String, imageBase: String, apiKey: String, accessToken: String
+    public var language: String, region: String, includeAdult: Bool
     public init(apiBase: String, imageBase: String, apiKey: String, accessToken: String,
                 language: String, region: String, includeAdult: Bool) {
-        self.apiBase = apiBase
-        self.imageBase = imageBase
-        self.apiKey = apiKey
-        self.accessToken = accessToken
-        self.language = language
-        self.region = region
-        self.includeAdult = includeAdult
+        self.apiBase = apiBase; self.imageBase = imageBase; self.apiKey = apiKey
+        self.accessToken = accessToken; self.language = language; self.region = region; self.includeAdult = includeAdult
     }
-
     public static let defaults = FilmTMDBSettingsRecord(
-        apiBase: "https://api.themoviedb.org/3",
-        imageBase: "https://image.tmdb.org",
-        apiKey: "",
-        accessToken: "",
-        language: "zh-CN",
-        region: "CN",
-        includeAdult: false
+        apiBase: "https://api.themoviedb.org/3", imageBase: "https://image.tmdb.org",
+        apiKey: "", accessToken: "", language: "zh-CN", region: "CN", includeAdult: false
     )
 }
 
 public struct FilmDoubanSettingsRecord: Equatable, Sendable {
-    public var apiBase: String
-    public var searchBase: String
-    public var imageBase: String
-    public var apiProxy: String
-    public var imageProxy: String
-    public var cookie: String
-
+    public var apiBase: String, searchBase: String, imageBase: String
+    public var apiProxy: String, imageProxy: String, cookie: String
     public init(apiBase: String, searchBase: String, imageBase: String,
                 apiProxy: String, imageProxy: String, cookie: String) {
-        self.apiBase = apiBase
-        self.searchBase = searchBase
-        self.imageBase = imageBase
-        self.apiProxy = apiProxy
-        self.imageProxy = imageProxy
-        self.cookie = cookie
+        self.apiBase = apiBase; self.searchBase = searchBase; self.imageBase = imageBase
+        self.apiProxy = apiProxy; self.imageProxy = imageProxy; self.cookie = cookie
     }
-
     public static let defaults = FilmDoubanSettingsRecord(
-        apiBase: "https://m.douban.com",
-        searchBase: "https://search.douban.com",
-        imageBase: "https://img3.doubanio.com",
-        apiProxy: "",
-        imageProxy: "",
-        cookie: ""
+        apiBase: "https://m.douban.com", searchBase: "https://search.douban.com",
+        imageBase: "https://img3.doubanio.com", apiProxy: "", imageProxy: "", cookie: ""
     )
 }
 
 public struct FilmPanAccountRecord: Equatable, Sendable {
     public var provider: String
-    public var accountRevision: Int64
-    public var rowRevision: Int64
-    public var cookie: String?
-    public var username: String?
-    public var password: String?
-    public var authorization: String?
+    public var accountRevision: Int64, rowRevision: Int64
+    public var cookie: String?, username: String?, password: String?, authorization: String?
     public var refreshedAtMs: Int64?
-
     public init(provider: String, accountRevision: Int64, rowRevision: Int64,
                 cookie: String? = nil, username: String? = nil, password: String? = nil,
                 authorization: String? = nil, refreshedAtMs: Int64? = nil) {
-        self.provider = provider
-        self.accountRevision = accountRevision
-        self.rowRevision = rowRevision
-        self.cookie = cookie
-        self.username = username
-        self.password = password
-        self.authorization = authorization
-        self.refreshedAtMs = refreshedAtMs
+        self.provider = provider; self.accountRevision = accountRevision; self.rowRevision = rowRevision
+        self.cookie = cookie; self.username = username; self.password = password
+        self.authorization = authorization; self.refreshedAtMs = refreshedAtMs
     }
 }
 
 public struct FilmCatProviderRecord: Equatable, Sendable {
-    public var provider: String
-    public var enabled: Bool
-
-    public init(provider: String, enabled: Bool) {
-        self.provider = provider
-        self.enabled = enabled
-    }
+    public var provider: String, enabled: Bool
+    public init(provider: String, enabled: Bool) { self.provider = provider; self.enabled = enabled }
 }
 
 public struct FilmCatMappingRecord: Equatable, Sendable {
-    public var provider: String
-    public var aliases: [String]
-
-    public init(provider: String, aliases: [String]) {
-        self.provider = provider
-        self.aliases = aliases
-    }
+    public var provider: String, aliases: [String]
+    public init(provider: String, aliases: [String]) { self.provider = provider; self.aliases = aliases }
 }
 
 public struct FilmCatScriptRecord: Equatable, Sendable {
-    public var installationId: String
-    public var name: String
-    public var sourceType: String
-    public var sourceUrl: String?
-    public var localPath: String?
-    public var localHash: String?
-    public var enabled: Bool
-    public var inputRevision: Int64
-
+    public var installationId: String, name: String, sourceType: String
+    public var sourceUrl: String?, localPath: String?, localHash: String?
+    public var enabled: Bool, inputRevision: Int64
     public init(installationId: String, name: String, sourceType: String,
                 sourceUrl: String?, localPath: String?, localHash: String?,
                 enabled: Bool, inputRevision: Int64) {
-        self.installationId = installationId
-        self.name = name
-        self.sourceType = sourceType
-        self.sourceUrl = sourceUrl
-        self.localPath = localPath
-        self.localHash = localHash
-        self.enabled = enabled
-        self.inputRevision = inputRevision
+        self.installationId = installationId; self.name = name; self.sourceType = sourceType
+        self.sourceUrl = sourceUrl; self.localPath = localPath; self.localHash = localHash
+        self.enabled = enabled; self.inputRevision = inputRevision
     }
 }
 
@@ -156,27 +94,17 @@ public struct FilmCatSourcesRecord: Equatable, Sendable {
     public var providers: [FilmCatProviderRecord]
     public var mappings: [FilmCatMappingRecord]
     public var scripts: [FilmCatScriptRecord]
-
     public init(port: Int = 0, providers: [FilmCatProviderRecord] = [],
                 mappings: [FilmCatMappingRecord] = [], scripts: [FilmCatScriptRecord] = []) {
-        self.port = port
-        self.providers = providers
-        self.mappings = mappings
-        self.scripts = scripts
+        self.port = port; self.providers = providers; self.mappings = mappings; self.scripts = scripts
     }
-
     public static let empty = FilmCatSourcesRecord()
 }
 
 public struct FilmRuleEntryRecord: Equatable, Sendable {
-    public var pattern: String
-    public var replace: String
-    public var flags: String
-
+    public var pattern: String, replace: String, flags: String
     public init(pattern: String, replace: String = "", flags: String = "") {
-        self.pattern = pattern
-        self.replace = replace
-        self.flags = flags
+        self.pattern = pattern; self.replace = replace; self.flags = flags
     }
 }
 
@@ -185,44 +113,26 @@ public struct FilmRulesRecord: Equatable, Sendable {
     public var episodeRules: [FilmRuleEntryRecord]
     public var movieRules: [FilmRuleEntryRecord]
     public var aggregateRegexRules: [String]
-
-    public init(episodeCleanRegexRules: [String] = [],
-                episodeRules: [FilmRuleEntryRecord] = [],
-                movieRules: [FilmRuleEntryRecord] = [],
-                aggregateRegexRules: [String] = []) {
-        self.episodeCleanRegexRules = episodeCleanRegexRules
-        self.episodeRules = episodeRules
-        self.movieRules = movieRules
-        self.aggregateRegexRules = aggregateRegexRules
+    public init(episodeCleanRegexRules: [String] = [], episodeRules: [FilmRuleEntryRecord] = [],
+                movieRules: [FilmRuleEntryRecord] = [], aggregateRegexRules: [String] = []) {
+        self.episodeCleanRegexRules = episodeCleanRegexRules; self.episodeRules = episodeRules
+        self.movieRules = movieRules; self.aggregateRegexRules = aggregateRegexRules
     }
 }
 
 public struct FilmPreferencesRecord: Equatable, Sendable {
-    public var iosAutoPrepare: Bool
-    public var metadataViewProvider: String
-    public var ruleOrder: [String]
-    public var panOrder: [String]
-    public var keywords: [String]
-    public var siteCleanKeywords: [String]
-
+    public var iosAutoPrepare: Bool, metadataViewProvider: String
+    public var ruleOrder: [String], panOrder: [String], keywords: [String], siteCleanKeywords: [String]
     public init(iosAutoPrepare: Bool, metadataViewProvider: String,
-                ruleOrder: [String], panOrder: [String],
-                keywords: [String], siteCleanKeywords: [String]) {
-        self.iosAutoPrepare = iosAutoPrepare
-        self.metadataViewProvider = metadataViewProvider
-        self.ruleOrder = ruleOrder
-        self.panOrder = panOrder
-        self.keywords = keywords
-        self.siteCleanKeywords = siteCleanKeywords
+                ruleOrder: [String], panOrder: [String], keywords: [String], siteCleanKeywords: [String]) {
+        self.iosAutoPrepare = iosAutoPrepare; self.metadataViewProvider = metadataViewProvider
+        self.ruleOrder = ruleOrder; self.panOrder = panOrder
+        self.keywords = keywords; self.siteCleanKeywords = siteCleanKeywords
     }
-
     public static let defaults = FilmPreferencesRecord(
-        iosAutoPrepare: true,
-        metadataViewProvider: "tmdb",
-        ruleOrder: ["quality", "pan", "keyword"],
-        panOrder: ["yidong", "tianyi", "quark", "uc", "baidu"],
-        keywords: [],
-        siteCleanKeywords: ["直播", "体育", "短剧", "听书", "舞曲", "哔哩"]
+        iosAutoPrepare: true, metadataViewProvider: "tmdb",
+        ruleOrder: ["quality", "pan", "keyword"], panOrder: ["yidong", "tianyi", "quark", "uc", "baidu"],
+        keywords: [], siteCleanKeywords: ["直播", "体育", "短剧", "听书", "舞曲", "哔哩"]
     )
 }
 
@@ -565,18 +475,10 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         let rev = try revision(db, block: .tmdb)
         guard rev > 0 else { return (nil, 0) }
         guard let row = try db.queryOne(
-            "SELECT api_base,image_base,api_key,access_token,language,region,include_adult " +
-            "FROM tmdb_settings WHERE singleton=1",
+            "SELECT api_base,image_base,api_key,access_token,language,region,include_adult FROM tmdb_settings WHERE singleton=1",
             map: { c in
-                FilmTMDBSettingsRecord(
-                    apiBase: try c.text(0),
-                    imageBase: try c.text(1),
-                    apiKey: try c.text(2),
-                    accessToken: try c.text(3),
-                    language: try c.text(4),
-                    region: try c.text(5),
-                    includeAdult: try c.bool(6)
-                )
+                FilmTMDBSettingsRecord(apiBase: try c.text(0), imageBase: try c.text(1), apiKey: try c.text(2),
+                    accessToken: try c.text(3), language: try c.text(4), region: try c.text(5), includeAdult: try c.bool(6))
             }
         ) else { throw FilmSettingsStorageError.invalidData }
         return (row, rev)
@@ -586,17 +488,10 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         let rev = try revision(db, block: .douban)
         guard rev > 0 else { return (nil, 0) }
         guard let row = try db.queryOne(
-            "SELECT api_base,search_base,image_base,api_proxy,image_proxy,cookie " +
-            "FROM douban_settings WHERE singleton=1",
+            "SELECT api_base,search_base,image_base,api_proxy,image_proxy,cookie FROM douban_settings WHERE singleton=1",
             map: { c in
-                FilmDoubanSettingsRecord(
-                    apiBase: try c.text(0),
-                    searchBase: try c.text(1),
-                    imageBase: try c.text(2),
-                    apiProxy: try c.text(3),
-                    imageProxy: try c.text(4),
-                    cookie: try c.text(5)
-                )
+                FilmDoubanSettingsRecord(apiBase: try c.text(0), searchBase: try c.text(1), imageBase: try c.text(2),
+                    apiProxy: try c.text(3), imageProxy: try c.text(4), cookie: try c.text(5))
             }
         ) else { throw FilmSettingsStorageError.invalidData }
         return (row, rev)
@@ -606,19 +501,11 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         let rev = try revision(db, block: .panAccounts)
         guard rev > 0 else { return ([], 0) }
         let rows: [FilmPanAccountRecord] = try db.query(
-            "SELECT provider,account_revision,row_revision,cookie,username,password,authorization,refreshed_at_ms " +
-            "FROM pan_accounts ORDER BY provider"
+            "SELECT provider,account_revision,row_revision,cookie,username,password,authorization,refreshed_at_ms FROM pan_accounts ORDER BY provider"
         ) { c in
-            FilmPanAccountRecord(
-                provider: try c.text(0),
-                accountRevision: try c.int64(1),
-                rowRevision: try c.int64(2),
-                cookie: try c.optionalText(3),
-                username: try c.optionalText(4),
-                password: try c.optionalText(5),
-                authorization: try c.optionalText(6),
-                refreshedAtMs: try c.optionalInt64(7)
-            )
+            FilmPanAccountRecord(provider: try c.text(0), accountRevision: try c.int64(1), rowRevision: try c.int64(2),
+                cookie: try c.optionalText(3), username: try c.optionalText(4), password: try c.optionalText(5),
+                authorization: try c.optionalText(6), refreshedAtMs: try c.optionalInt64(7))
         }
         return (rows.filter { $0.accountRevision > 0 }, rev)
     }
@@ -627,35 +514,22 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         let rev = try revision(db, block: .catSources)
         guard rev > 0 else { return (nil, 0) }
         let port = try db.queryOne("SELECT port FROM cat_settings WHERE singleton=1") { try $0.integer(0) } ?? 0
-        let providers: [FilmCatProviderRecord] = try db.query(
-            "SELECT provider,enabled FROM cat_providers ORDER BY position,provider"
-        ) { c in
+        let providers: [FilmCatProviderRecord] = try db.query("SELECT provider,enabled FROM cat_providers ORDER BY position,provider") { c in
             FilmCatProviderRecord(provider: try c.text(0), enabled: try c.bool(1))
         }
         var aliasesByMapping: [Int: [String]] = [:]
         try db.scan("SELECT mapping_position,alias FROM cat_mapping_aliases ORDER BY mapping_position,position") { c in
             aliasesByMapping[try c.integer(0), default: []].append(try c.text(1))
         }
-        let mappings: [FilmCatMappingRecord] = try db.query(
-            "SELECT position,provider FROM cat_mappings ORDER BY position"
-        ) { c in
-            let pos = try c.integer(0)
-            return FilmCatMappingRecord(provider: try c.text(1), aliases: aliasesByMapping[pos] ?? [])
+        let mappings: [FilmCatMappingRecord] = try db.query("SELECT position,provider FROM cat_mappings ORDER BY position") { c in
+            FilmCatMappingRecord(provider: try c.text(1), aliases: aliasesByMapping[try c.integer(0)] ?? [])
         }
         let scripts: [FilmCatScriptRecord] = try db.query(
-            "SELECT installation_id,name,source_type,source_url,local_path,local_hash,enabled,input_revision " +
-            "FROM cat_scripts ORDER BY position,installation_id"
+            "SELECT installation_id,name,source_type,source_url,local_path,local_hash,enabled,input_revision FROM cat_scripts ORDER BY position,installation_id"
         ) { c in
-            FilmCatScriptRecord(
-                installationId: try c.text(0),
-                name: try c.text(1),
-                sourceType: try c.text(2),
-                sourceUrl: try c.optionalText(3),
-                localPath: try c.optionalText(4),
-                localHash: try c.optionalText(5),
-                enabled: try c.bool(6),
-                inputRevision: try c.int64(7)
-            )
+            FilmCatScriptRecord(installationId: try c.text(0), name: try c.text(1), sourceType: try c.text(2),
+                sourceUrl: try c.optionalText(3), localPath: try c.optionalText(4), localHash: try c.optionalText(5),
+                enabled: try c.bool(6), inputRevision: try c.int64(7))
         }
         return (FilmCatSourcesRecord(port: port, providers: providers, mappings: mappings, scripts: scripts), rev)
     }

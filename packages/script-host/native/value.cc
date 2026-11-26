@@ -145,23 +145,7 @@ static bool IsResourceLimitError(const std::u16string& errorName, const std::u16
   } catch (...) { return false; }
 }
 std::string ExceptionCode(JSContext* ctx) {
-  QValue error(ctx, JS_GetException(ctx));
-  if (!JS_IsObject(error.value)) return "SCRIPT_EXCEPTION";
-  QValue code(ctx, JS_GetPropertyStr(ctx, error.value, "code"));
-  if (JS_IsString(code.value)) {
-    try { auto s = Utf8(QString(ctx, code.value)); if (SafeCode(s)) return s; }
-    catch (...) {}
-  }
-  if (JS_IsException(code.value)) { QValue ignored(ctx, JS_GetException(ctx)); }
-  std::u16string errorName, errorMessage;
-  QValue name(ctx, JS_GetPropertyStr(ctx, error.value, "name"));
-  QValue message(ctx, JS_GetPropertyStr(ctx, error.value, "message"));
-  if (JS_IsString(name.value)) { try { errorName = QString(ctx, name.value); } catch (...) {} }
-  if (JS_IsString(message.value)) { try { errorMessage = QString(ctx, message.value); } catch (...) {} }
-  if (JS_IsException(name.value) || JS_IsException(message.value)) {
-    QValue ignored(ctx, JS_GetException(ctx));
-  }
-  return IsResourceLimitError(errorName, errorMessage) ? "RESOURCE_LIMIT" : "SCRIPT_EXCEPTION";
+  return ExceptionDetail(ctx).Get("code").Text();
 }
 Value ExceptionDetail(JSContext* ctx) {
   QValue error(ctx, JS_GetException(ctx));

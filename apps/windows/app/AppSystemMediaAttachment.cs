@@ -32,7 +32,6 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
     private sealed class AppSystemPlayback(ISystemPlayback music, FilmPlayback video, FilmCapability film,
         AppPlaybackCoordinator coordinator) : ISystemPlayback, IDisposable
     {
-        private FilmPlaybackPage? trackedPlayback;
         private bool FilmSelected => coordinator.ActiveOwner == "film";
         public SystemPlaybackState State
         {
@@ -40,14 +39,14 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
             {
                 if (!FilmSelected) return music.State;
                 var media = film.PlaybackMedia;
-                double rate = film.Playback is { HasOutput: true } page ? page.PlaybackRate : 1.0;
+                double rate = video.HasOutput ? video.Rate : 1.0;
                 return video.Identity == media.Identity
                     ? new("film", media.Identity, media.Title, media.HasMedia, media.IsPlaying,
                         media.Position, media.Duration, Kind: SystemPlaybackKind.Video,
                         CanSeek: media.HasMedia && video.CanSeek, PlaybackRate: rate)
                     : new("film", video.Identity, "", video.HasOutput,
                         video.HasOutput && !video.IsPaused, video.PositionSeconds, video.DurationSeconds,
-                        Kind: SystemPlaybackKind.Video, CanSeek: video.HasOutput && video.CanSeek, PlaybackRate: 1.0);
+                        Kind: SystemPlaybackKind.Video, CanSeek: video.HasOutput && video.CanSeek, PlaybackRate: rate);
             }
         }
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -57,30 +56,11 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
             video.PropertyChanged += Changed;
             film.PropertyChanged += FilmChanged;
             coordinator.ActiveOwnerChanged += OwnerChanged;
-            TrackPlaybackPage(film.Playback);
-        }
-        private void TrackPlaybackPage(FilmPlaybackPage? next)
-        {
-            if (ReferenceEquals(trackedPlayback, next)) return;
-            if (trackedPlayback is not null) trackedPlayback.PropertyChanged -= PlaybackPageChanged;
-            trackedPlayback = next;
-            if (trackedPlayback is not null) trackedPlayback.PropertyChanged += PlaybackPageChanged;
-        }
-        private void PlaybackPageChanged(object? sender, PropertyChangedEventArgs args)
-        {
-            if (args.PropertyName is null or "" or nameof(FilmPlaybackPage.PlaybackRate) or nameof(FilmPlaybackPage.CanSeek))
-                PropertyChanged?.Invoke(this, new(nameof(State)));
         }
         private void Changed(object? sender, PropertyChangedEventArgs args) => PropertyChanged?.Invoke(this, args);
         private void OwnerChanged(object? sender, EventArgs args) => PropertyChanged?.Invoke(this, new(nameof(State)));
         private void FilmChanged(object? sender, PropertyChangedEventArgs args)
         {
-            if (args.PropertyName == nameof(FilmCapability.Playback))
-            {
-                TrackPlaybackPage(film.Playback);
-                Changed(sender, new(nameof(State)));
-                return;
-            }
             if (args.PropertyName == nameof(FilmCapability.PlaybackMedia)) Changed(sender, args);
         }
         public Task PlayAsync() => FilmSelected ? film.ResumePlaybackAsync() : music.PlayAsync();
@@ -89,7 +69,6 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
         public Task SeekAsync(double seconds) => FilmSelected ? film.SeekPlaybackAsync(seconds) : music.SeekAsync(seconds);
         public void Dispose()
         {
-            TrackPlaybackPage(null);
             music.PropertyChanged -= Changed;
             video.PropertyChanged -= Changed;
             film.PropertyChanged -= FilmChanged;

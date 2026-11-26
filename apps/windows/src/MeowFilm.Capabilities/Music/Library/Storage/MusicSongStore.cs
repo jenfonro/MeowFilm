@@ -202,23 +202,13 @@ internal static class MusicSongStore
 
         if (artistsChanged)
         {
-            if (previous is null)
-            {
-                db.Execute("DELETE FROM music_song_artists WHERE song_id=$id", ("$id", next.SongId));
-                for (int pos = 0; pos < next.ArtistNames.Length; pos++)
-                    db.Execute("INSERT INTO music_song_artists(song_id,position,name) VALUES($id,$pos,$name)",
-                        ("$id", next.SongId), ("$pos", pos), ("$name", next.ArtistNames[pos]));
-            }
-            else
-            {
-                int prefix = CommonPrefixLength(previous.ArtistNames, next.ArtistNames, StringComparer.Ordinal);
-                if (prefix < previous.ArtistNames.Length)
-                    db.Execute("DELETE FROM music_song_artists WHERE song_id=$id AND position>=$pos",
-                        ("$id", next.SongId), ("$pos", prefix));
-                for (int pos = prefix; pos < next.ArtistNames.Length; pos++)
-                    db.Execute("INSERT INTO music_song_artists(song_id,position,name) VALUES($id,$pos,$name)",
-                        ("$id", next.SongId), ("$pos", pos), ("$name", next.ArtistNames[pos]));
-            }
+            int prefix = previous is null ? 0 : CommonPrefixLength(previous.ArtistNames, next.ArtistNames, StringComparer.Ordinal);
+            if (previous is null || prefix < previous.ArtistNames.Length)
+                db.Execute("DELETE FROM music_song_artists WHERE song_id=$id AND position>=$pos",
+                    ("$id", next.SongId), ("$pos", prefix));
+            for (int pos = prefix; pos < next.ArtistNames.Length; pos++)
+                db.Execute("INSERT INTO music_song_artists(song_id,position,name) VALUES($id,$pos,$name)",
+                    ("$id", next.SongId), ("$pos", pos), ("$name", next.ArtistNames[pos]));
         }
 
         var prevByKey = new Dictionary<string, (int Position, MusicSongSourceRecord Source)>(StringComparer.Ordinal);
@@ -276,24 +266,13 @@ internal static class MusicSongStore
 
             if (!existed || !src.ArtistNames.SequenceEqual(oldEntry.Source.ArtistNames, StringComparer.Ordinal))
             {
-                if (!existed)
-                {
-                    db.Execute("DELETE FROM music_song_source_artists WHERE song_id=$id AND source_key=$skey",
-                        ("$id", next.SongId), ("$skey", src.SourceKey));
-                    for (int apos = 0; apos < src.ArtistNames.Length; apos++)
-                        db.Execute("INSERT INTO music_song_source_artists(song_id,source_key,position,name) VALUES($id,$skey,$pos,$name)",
-                            ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", apos), ("$name", src.ArtistNames[apos]));
-                }
-                else
-                {
-                    int prefix = CommonPrefixLength(oldEntry.Source.ArtistNames, src.ArtistNames, StringComparer.Ordinal);
-                    if (prefix < oldEntry.Source.ArtistNames.Length)
-                        db.Execute("DELETE FROM music_song_source_artists WHERE song_id=$id AND source_key=$skey AND position>=$pos",
-                            ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", prefix));
-                    for (int apos = prefix; apos < src.ArtistNames.Length; apos++)
-                        db.Execute("INSERT INTO music_song_source_artists(song_id,source_key,position,name) VALUES($id,$skey,$pos,$name)",
-                            ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", apos), ("$name", src.ArtistNames[apos]));
-                }
+                int prefix = existed ? CommonPrefixLength(oldEntry.Source.ArtistNames, src.ArtistNames, StringComparer.Ordinal) : 0;
+                if (!existed || prefix < oldEntry.Source.ArtistNames.Length)
+                    db.Execute("DELETE FROM music_song_source_artists WHERE song_id=$id AND source_key=$skey AND position>=$pos",
+                        ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", prefix));
+                for (int apos = prefix; apos < src.ArtistNames.Length; apos++)
+                    db.Execute("INSERT INTO music_song_source_artists(song_id,source_key,position,name) VALUES($id,$skey,$pos,$name)",
+                        ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", apos), ("$name", src.ArtistNames[apos]));
             }
 
             if (!existed || !StorageValue.StructuralEquals(src.WireExtras, oldEntry.Source.WireExtras))
@@ -322,12 +301,8 @@ internal static class MusicSongStore
         }
         var result = new Dictionary<(string SongId, string SourceKey), StorageValue>(grouped.Count);
         foreach (var (key, rows) in grouped)
-        {
-            var decoded = TypedValueNodes.Decode(rows);
-            if (decoded is null || decoded.Kind != StorageValueKind.Object)
-                throw new StorageException(StorageError.Corrupt);
-            result[key] = decoded;
-        }
+            if (TypedValueNodes.Decode(rows) is { Kind: StorageValueKind.Object } decoded)
+                result[key] = decoded;
         return result;
     }
 }

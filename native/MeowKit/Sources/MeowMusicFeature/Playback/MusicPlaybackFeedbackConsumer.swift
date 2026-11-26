@@ -7,7 +7,7 @@ import MeowPlayback
 public final class MusicPlaybackFeedbackConsumer {
     private static let steadyProgressInterval: TimeInterval = 1.0
 
-    private let service: (any MusicPlaybackFeedbackConsuming)?
+    private let service: NativeMusicService?
     private var tail: Task<Void, Never>?
     private var generation = UUID(), nativeID: UUID?, attemptID: String?
     private var draining: [UUID: String] = [:]
@@ -15,7 +15,7 @@ public final class MusicPlaybackFeedbackConsumer {
     private var played = false, broken = false, submitted = false
     private var lastProgressSubmittedAt: TimeInterval?
 
-    public init(service: (any MusicPlaybackFeedbackConsuming)?) {
+    public init(service: NativeMusicService?) {
         self.service = service
     }
 

@@ -1,13 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-only
+using System.Text.Json;
+using MeowFilm.Capabilities.Accounts;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Search;
 
+public sealed record MusicSearchDiscoveryHot(string Keyword, double? Score);
+public sealed record MusicSearchDiscoveryChart(string Id, string Name, string Cover, long? Count, string Creator,
+    JsonElement[] Songs);
+public sealed record MusicSearchDiscoveryFailure(string Stage, string? ChartId, string Code);
+public sealed record MusicSearchDiscoverySnapshot(long Generation, MusicSearchDiscoveryHot[] Hot,
+    string[] Suggestions, string[] Recommended, MusicSearchDiscoveryChart[] Charts,
+    MusicSearchDiscoveryFailure[] Failures, long FetchedAt);
+
 /// <summary>Read-only native discovery with one bounded in-memory snapshot, not a document/credential owner.</summary>
-public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
+internal sealed class NativeMusicSearchDiscovery(
+    MusicAccountOwner accounts, MusicPlatformClient client, MusicLibraryOwner library) : IAsyncDisposable
 {
-    private readonly IMusicPlatformSessionSource sessions;
-    private readonly MusicPlatformSearchDiscovery protocol;
+    private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
     private static TimeProvider clock => TimeProvider.System;
     private readonly SemaphoreSlim changes = new(1);
     private readonly object gate = new();
@@ -18,6 +29,7 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
     private long generation;
     private bool closed;
     private Task? closeTask;
+
     private sealed class Flight(long generation, bool refresh)
     {
         internal readonly long Generation = generation;
@@ -35,13 +47,17 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
             catch (AggregateException) { }
         }
     }
-    internal NativeMusicSearchDiscovery(IMusicPlatformSessionSource sessions, MusicPlatformClient client,
-        MeowFilm.Capabilities.Library.MusicLibraryOwner library)
+
+    public bool IsCurrent(long expectedGeneration)
     {
-        this.sessions = sessions; protocol = new(client, library);
+        lock (gate)
+            return !closed && expectedGeneration > 0 && cache is not null &&
+                cache.Generation == expectedGeneration && Current(cachedSession);
     }
+
     public async Task<MusicSearchDiscoverySnapshot> ReadAsync(bool refresh = false, CancellationToken cancellationToken = default)
     {
+        await accounts.RestoreForDiscoveryAsync(cancellationToken).ConfigureAwait(false);
         Flight flight;
         try { await changes.WaitAsync(cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException) { throw Error("CANCELLED"); }
@@ -73,8 +89,6 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
                     }
                     if (previous.Reason.Length == 0) Volatile.Write(ref previous.Reason, "STALE_SESSION");
                 }
-                // Account invalidation can leave a retiring physical request. Do not
-                // join it or start a replacement until all of its cleanup has settled.
                 previous.Cancel(); await Settle(previous.Task).ConfigureAwait(false);
             }
         }
@@ -92,15 +106,25 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
         }
         catch (OperationCanceledException) { throw Error("CANCELLED"); }
     }
+
     private async Task<MusicSearchDiscoverySnapshot> Fetch(Flight flight)
     {
         var token = flight.Linked.Token;
         try
         {
             Guard(flight); flight.Session = await Acquire(token).ConfigureAwait(false); Guard(flight);
-            var data = await protocol.ReadAsync(flight.Session, flight.Refresh, () => Guard(flight), token).ConfigureAwait(false);
-            var snapshot = new MusicSearchDiscoverySnapshot(flight.Generation, data.Hot, data.Suggestions,
-                data.Suggestions.Take(6).ToArray(), data.Charts, data.Failures, clock.GetUtcNow().ToUnixTimeMilliseconds());
+            long observation = library.BeginSongObservation();
+            var value = await client.RequestAsync("wy", "searchDiscovery", new { refresh = flight.Refresh }, flight.Session, token, () => Guard(flight)).ConfigureAwait(false);
+            value = await library.AdoptPlatformResultAsync(value, token, observation: observation,
+                shape: MusicLibraryOwner.PlatformSongShape.Discovery).ConfigureAwait(false);
+            Guard(flight);
+            var suggestions = value.GetProperty("suggestions").Deserialize<string[]>(Json)!;
+            var snapshot = new MusicSearchDiscoverySnapshot(flight.Generation,
+                value.GetProperty("hot").Deserialize<MusicSearchDiscoveryHot[]>(Json)!,
+                suggestions, suggestions.Take(6).ToArray(),
+                value.GetProperty("charts").Deserialize<MusicSearchDiscoveryChart[]>(Json)!,
+                value.GetProperty("failures").Deserialize<MusicSearchDiscoveryFailure[]>(Json)!,
+                clock.GetUtcNow().ToUnixTimeMilliseconds());
             lock (gate)
             {
                 Guard(flight); cache = snapshot; cachedSession = flight.Session; offset = 0;
@@ -116,22 +140,25 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
             lock (gate) if (ReferenceEquals(active, flight)) active = null;
         }
     }
+
     private async Task<MusicPlatformSession?> Acquire(CancellationToken token)
     {
         MusicPlatformSession? value;
-        try { value = await sessions.AcquireAsync("wy", token).ConfigureAwait(false); }
+        try { value = await accounts.AcquireSettledAsync("wy", token).ConfigureAwait(false); }
         catch (OperationCanceledException) { throw; }
         catch { throw Error("CREDENTIALS_UNAVAILABLE"); }
         token.ThrowIfCancellationRequested();
         if (value is not null && (value.Platform != "wy" || !Current(value))) throw Error("STALE_SESSION");
         return value;
     }
+
     private bool Current(MusicPlatformSession? session)
     {
         if (session is null) return true;
-        try { return sessions.IsCurrent(session); }
+        try { return accounts.IsCurrent(session); }
         catch { throw Error("CREDENTIALS_UNAVAILABLE"); }
     }
+
     private void Guard(Flight flight)
     {
         lock (gate)
@@ -144,6 +171,7 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
             if (flight.Cancelled.IsCancellationRequested) throw Error("CANCELLED");
         }
     }
+
     public MusicSearchDiscoverySnapshot Rotate(long expectedGeneration)
     {
         lock (gate)
@@ -156,6 +184,7 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
             return Copy(cache);
         }
     }
+
     public void Invalidate(string? platform = null)
     {
         if (platform is not null and not "wy") return;
@@ -168,9 +197,9 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
         }
         old?.Cancel();
     }
+
     public async Task CancelAndDrainAsync()
     {
-        // Do not hold gate while waiting for native cleanup or callback completion.
         await changes.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -188,6 +217,7 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
         }
         finally { changes.Release(); }
     }
+
     public ValueTask DisposeAsync()
     {
         lock (gate)
@@ -195,11 +225,11 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
             if (closeTask is not null) return new(closeTask);
             closed = true; generation++; cache = null; cachedSession = null;
             var old = active; if (old is not null) Volatile.Write(ref old.Reason, "CLOSED");
-            // Schedule outside caller lock/callback stacks; still return the actual drain task.
             closeTask = Task.Run(async () => { old?.Cancel(); await CancelAndDrainAsync().ConfigureAwait(false); });
             return new(closeTask);
         }
     }
+
     private static async Task Settle(Task task) { try { await task.ConfigureAwait(false); } catch when (task.IsCompleted) { } }
     private static MusicSearchDiscoverySnapshot Copy(MusicSearchDiscoverySnapshot value) => value with
     {

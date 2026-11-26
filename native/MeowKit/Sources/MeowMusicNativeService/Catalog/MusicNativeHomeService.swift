@@ -1,7 +1,7 @@
 import Foundation
 import MeowContracts
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 
 struct MusicNativeHomeLoad {
     let id: UUID
@@ -26,7 +26,7 @@ struct MusicNativeHomeFirstRead {
     var handoff = false
 }
 
-extension NativeMusicService: MusicHomeBrowsing {
+extension NativeMusicService {
     /// Implemented home/channel catalogue providers, in settings order.
     static let homeSources: [MusicPublicBrowsePlatform] = [.netease, .kugou]
     public func homeSourceSelection() throws -> MusicHomeSourceSelection {
@@ -44,7 +44,7 @@ extension NativeMusicService: MusicHomeBrowsing {
         try musicRequire(current.revision == ifRevision, .staleRevision)
         guard current.platform != source else { return homeSourceSelection(current) }
         let saved: (platform: MusicPublicBrowsePlatform, revision: Int) =
-            try transaction([.catalogSource], reportingCancellationAfterCommit: false) { state in
+            try transaction([.catalogSource]) { state in
             let revision = state.catalogSource.revision
             try musicRequire(revision == ifRevision, .staleRevision)
             try musicRequire(revision < musicMaxSafeInteger, .limit)
@@ -111,13 +111,8 @@ extension NativeMusicService: MusicHomeBrowsing {
         try check(); try requireHomeSource(source)
         let own = epoch
         let value: MusicNativeCacheScope
-        if source == .netease, let owner = accounts as? any MusicNativeHomeDisplayProviding {
-            // Local storage only. Do not enter work()/nativeHomeBinding():
-            // those may verify/refresh credentials or wait on provider HTTP.
-            value = try await owner.nativeHomeDisplayScope()
-        } else if source == .netease, accounts is any MusicNativeHomeProviding {
-            // Account observation cannot fall back to live binding acquisition.
-            throw MusicServiceError.unsupported
+        if source == .netease, let accounts {
+            value = try await accounts.nativeHomeDisplayScope()
         } else {
             let guest = anonymousHomeBinding(source)
             value = .init(scope: guest.scope, revision: guest.revision, authorization: guest.authorization)
@@ -131,8 +126,8 @@ extension NativeMusicService: MusicHomeBrowsing {
         try check(); try requireHomeSource(source)
         let own = epoch
         let binding: MusicNativeHomeBinding
-        if source == .netease, let owner = accounts as? any MusicNativeHomeProviding {
-            binding = try await work(label: "musicHome") { try await owner.nativeHomeBinding() }
+        if source == .netease, let accounts {
+            binding = try await work(label: "musicHome") { try await accounts.nativeHomeBinding() }
         } else { binding = anonymousHomeBinding(source) }
         try check(own); try binding.authorization.check()
         if source == .netease { lastHomeScope = binding.scope }
@@ -141,8 +136,8 @@ extension NativeMusicService: MusicHomeBrowsing {
     func checkHomeBinding(_ binding: MusicNativeHomeBinding, epoch own: UUID) async throws {
         try check(own); try binding.authorization.check()
         if !anonymousHomeBindings.values.contains(binding) {
-            guard let owner = accounts as? any MusicNativeHomeProviding else { throw MusicServiceError.staleResult }
-            try await owner.checkNativeHomeBinding(binding)
+            guard let accounts else { throw MusicServiceError.staleResult }
+            try await accounts.checkNativeHomeBinding(binding)
         }
         try check(own); try binding.authorization.check()
     }
@@ -152,28 +147,18 @@ extension NativeMusicService: MusicHomeBrowsing {
         let continuation = pair.continuation
         homeObservers[id] = continuation
         let task: Task<Void, Never>?
-        if let owner = accounts as? any MusicNativeHomeProviding {
+        if let accounts {
             let previousScope = lastHomeScope
             let previousObservation = lastHomeObservation
-            let hasDisplayScope = accounts is any MusicNativeHomeDisplayProviding
-            // Sample before subscribing; the owner's replay closes this gap.
-            // The same subscription also receives explicit source changes;
-            // account notifications only concern a NetEase home.
-            let baseline: MusicNativeCacheScope?
-            if hasDisplayScope { baseline = try? await currentHomeDisplayScope() }
-            else { baseline = nil }
+            let baseline = try? await currentHomeDisplayScope()
             let initialChange = previousScope != nil && (previousScope != baseline?.scope ||
                 (previousObservation != nil && previousObservation != baseline))
             if let baseline { lastHomeObservation = baseline }
-            let stream = await owner.nativeHomeChanges()
+            let stream = await accounts.nativeHomeChanges()
             task = Task { [weak self] in
                 var previous = baseline, pending = initialChange
                 for await _ in stream {
                     guard !Task.isCancelled, let self else { break }
-                    if !hasDisplayScope {
-                        if await self.homeFollowsNeteaseAccount() { continuation.yield(()) }
-                        continue
-                    }
                     let change = await self.homeAccountChange(previous: previous, pending: pending, epoch: own)
                     guard !Task.isCancelled else { break }
                     previous = change.binding; pending = false
@@ -249,20 +234,17 @@ extension NativeMusicService: MusicHomeBrowsing {
     }
     public func restoredHome() async throws -> MusicPublicBrowsePage? {
         let source = try currentHomeSource(), own = epoch, revision = homeSourceRevision
-        let display = try access.perform {
-            if !homeDisplayPrepared {
-                homeDisplayPrepared = true
-                if let store = homeSnapshot {
-                    do { homeDisplay = try store.readDisplay() }
-                    catch {
-                        DebugRuntime.logError(.musicCatalog, sub: "home", event: "displaySnapshot.readFailed", error: error)
-                        homeDisplay = nil
-                    }
+        if !homeDisplayPrepared {
+            homeDisplayPrepared = true
+            if let store = homeSnapshot {
+                do { homeDisplay = try store.readDisplay() }
+                catch {
+                    DebugRuntime.logError(.musicCatalog, sub: "home", event: "displaySnapshot.readFailed", error: error)
+                    homeDisplay = nil
                 }
             }
-            return homeDisplay
         }
-        guard let display, display.source == source else { return nil }
+        guard let display = homeDisplay, display.source == source else { return nil }
         // Last-success snapshots deliberately carry no account binding. Retain
         // public albums/songs, but only a live scoped read may publish private
         // entrances, including a section's account-only navigation action.
@@ -285,9 +267,7 @@ extension NativeMusicService: MusicHomeBrowsing {
         let songs = try await publicSongMetadata(page)
         let sections = try publicSections(page, prefix: source.rawValue + ":home:", songs: songs)
         try checkHomeSource(source, revision: revision, epoch: own)
-        return try access.perform {
-            .init(sections: sections)
-        }
+        return .init(sections: sections)
     }
     public func homePage(cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {
         try await scopedHomePage(.home, cursor: cursor, refresh: refresh)
@@ -339,7 +319,7 @@ extension NativeMusicService: MusicHomeBrowsing {
     private func readHomeContent(_ destination: MusicPublicBrowseDestination, position: MusicNativePublicBrowseCursor,
                                  source: MusicPublicBrowsePlatform, binding: MusicNativeHomeBinding) async throws
         -> MusicNativePublicBrowseDiscovery {
-        let port = publicPlatforms, account = accounts as? any MusicNativeHomeProviding
+        let port = publicPlatforms, account = accounts
         return try await work(label: "musicHome") {
             if source == .netease, case .channel(let channel, _) = destination, channel.kind == .vip {
                 return try await port.browseVIP(binding: binding)
@@ -472,36 +452,27 @@ extension NativeMusicService: MusicHomeBrowsing {
         guard var current = homeLoad, current.id == load.id,
               cursor == nil || current.nextCursor == cursor else { throw MusicServiceError.staleResult }
         return try load.binding.authorization.perform {
-            // finishHome checks access itself; never nest that check inside
-            // the non-recursive access commit lock.
             let page = try finishHome(value, destination: .home, position: position, key: key,
                                       source: load.source, epoch: own, songs: songs)
-            if value.sections.contains(where: { $0.error != nil }) { return try access.perform { page } }
+            if value.sections.contains(where: { $0.error != nil }) { return page }
             current.nextCursor = page.cursor
             current.sections = cursor == nil ? value.sections : mergeHomeSections(current.sections, value.sections)
-            let display = try MusicNativeHomeSnapshot.references(.init(sections: current.sections), sourceOwner: { try repositoryReader.sourceOwner(key: $0) })
-            let cachedDisplay = try MusicNativeHomeSnapshot.references(value, sourceOwner: { try repositoryReader.sourceOwner(key: $0) })
-            return try access.perform {
-                homeLoad = current
-                // Reusing the real first-response cache is not a newer
-                // successful network batch; keep the display, but seed only
-                // this new chain's first page for its later continuations.
-                if cached != nil { return page }
-                homeDisplay = (load.source, display); homeDisplayPrepared = true
-                if cursor == nil {
-                    homeCache = (load.source, load.binding.scope, load.binding.revision,
-                                 now().addingTimeInterval(600), cachedDisplay)
-                }
-                if let store = homeSnapshot {
-                    // Storage failure keeps the previous durable success
-                    // without discarding the usable in-memory display.
-                    do { try store.writeDisplay(display, source: load.source) }
-                    catch {
-                        DebugRuntime.logError(.musicCatalog, sub: "home", event: "displaySnapshot.writeFailed", error: error)
-                    }
-                }
-                return page
+            let display = try MusicNativeHomeSnapshot.references(.init(sections: current.sections), sourceOwner: { try database.sourceOwner(key: $0) })
+            let cachedDisplay = try MusicNativeHomeSnapshot.references(value, sourceOwner: { try database.sourceOwner(key: $0) })
+            homeLoad = current
+            if cached != nil { return page }
+            homeDisplay = (load.source, display); homeDisplayPrepared = true
+            if cursor == nil {
+                homeCache = (load.source, load.binding.scope, load.binding.revision,
+                             now().addingTimeInterval(600), cachedDisplay)
             }
+            if let store = homeSnapshot {
+                do { try store.writeDisplay(display, source: load.source) }
+                catch {
+                    DebugRuntime.logError(.musicCatalog, sub: "home", event: "displaySnapshot.writeFailed", error: error)
+                }
+            }
+            return page
         }
     }
 

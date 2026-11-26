@@ -192,12 +192,14 @@ public partial class MusicCatalogView : UserControl
 
     private void Changed(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(MusicCatalogController.CatalogSections) or nameof(MusicCatalogController.CurrentChannelKey) or nameof(MusicLibraryController.ContentPage))
+        if (e.PropertyName is nameof(MusicCatalogController.CatalogSections) or nameof(MusicCatalogController.CurrentChannelKey) or
+            nameof(MusicCatalogController.IsCatalogContent) or nameof(MusicLibraryController.IsLocalLibraryPage))
             ShowChannelPresentation();
         if (e.PropertyName is nameof(MusicCatalogController.IsCatalogHome) or nameof(MusicCatalogController.HasChannelTabs) or
             nameof(MusicCatalogController.CurrentChannelKey) or nameof(MusicCatalogController.ShowCatalogLoading) or
+            nameof(MusicCatalogController.IsCatalogContent) or
             nameof(MusicSearchController.ShowSearchLoading) or nameof(MusicSearchController.IsSearchPage) or
-            nameof(MusicSearchController.SearchTab) or nameof(MusicLibraryController.ContentPage)) Refresh();
+            nameof(MusicSearchController.SearchTab) or nameof(MusicLibraryController.IsLocalLibraryPage)) Refresh();
     }
 
     private void ShowChannelPresentation()

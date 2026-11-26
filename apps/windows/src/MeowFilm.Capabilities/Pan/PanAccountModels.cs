@@ -53,41 +53,24 @@ internal sealed record PanAccountSnapshot(string Provider,
 
     internal static PanAccountSnapshot Read(JsonElement value)
     {
-        string provider;
-        try { provider = BridgeCodec.RequiredProperty(value, "provider").GetString()!; }
-        catch { throw new BridgeException("INVALID_RESPONSE"); }
-        if (PanSettingsStore.FindProvider(provider) is not { } declaration)
+        if (value.ValueKind != JsonValueKind.Object ||
+            !value.TryGetProperty("provider", out var providerVal) || providerVal.GetString() is not { } provider ||
+            PanSettingsStore.FindProvider(provider) is not { } declaration)
             throw new BridgeException("INVALID_RESPONSE");
-        if (value.TryGetProperty("errorCode", out _))
+        if (value.TryGetProperty("errorCode", out var errVal))
         {
-            try
-            {
-                if (BridgeCodec.RequiredProperty(value, "errorCode").GetString() != "CORRUPT_STORAGE" ||
-                    new[] { "revision", "configured", "status", "fields" }.Any(key => value.TryGetProperty(key, out _)))
-                    throw new BridgeException("INVALID_RESPONSE");
-                return Corrupt(provider);
-            }
-            catch { throw new BridgeException("INVALID_RESPONSE"); }
+            return errVal.GetString() == "CORRUPT_STORAGE" ? Corrupt(provider) : throw new BridgeException("INVALID_RESPONSE");
         }
-        foreach (string key in new[] { "revision", "configured", "status", "fields" })
-            if (value.EnumerateObject().Count(item => item.NameEquals(key)) != 1)
-                throw new BridgeException("INVALID_RESPONSE");
-        if (!value.TryGetProperty("revision", out var revisionValue) || revisionValue.ValueKind != JsonValueKind.Number ||
-            !revisionValue.TryGetInt64(out long revision) ||
+        if (!value.TryGetProperty("revision", out var revisionValue) || !revisionValue.TryGetInt64(out long revision) ||
             !value.TryGetProperty("configured", out var configuredValue) ||
             configuredValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
-            !value.TryGetProperty("status", out var statusValue) || statusValue.ValueKind != JsonValueKind.String ||
-            !value.TryGetProperty("fields", out var fieldValues) || fieldValues.ValueKind != JsonValueKind.Array ||
-            fieldValues.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String))
+            !value.TryGetProperty("status", out var statusValue) || statusValue.GetString() is not { } status ||
+            !value.TryGetProperty("fields", out var fieldValues) || fieldValues.ValueKind != JsonValueKind.Array)
             throw new BridgeException("INVALID_RESPONSE");
         bool configured = configuredValue.GetBoolean();
-        string status = statusValue.GetString()!;
-        var fields = fieldValues.EnumerateArray().Select(item => item.GetString()!).ToArray();
-        if (fields.Distinct().Count() != fields.Length ||
-            fields.Any(field => !declaration.HasField(field)) ||
-            configured != (fields.Length > 0) || revision < 0 || revision > BridgeCodec.MaximumSafeInteger ||
-            status is not ("signedIn" or "expired" or "signedOut") ||
-            !configured && status != "signedOut")
+        var fields = fieldValues.EnumerateArray().Select(item => item.GetString() ?? throw new BridgeException("INVALID_RESPONSE")).ToArray();
+        if (fields.Any(field => !declaration.HasField(field)) ||
+            status is not ("signedIn" or "expired" or "signedOut"))
             throw new BridgeException("INVALID_RESPONSE");
         return new(provider, revision, configured, status, fields);
     }

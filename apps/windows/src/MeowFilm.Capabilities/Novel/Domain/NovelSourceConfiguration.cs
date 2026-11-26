@@ -311,7 +311,7 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
         if (raw.ValueKind == JsonValueKind.String && raw.GetString()!.TrimStart().StartsWith('<'))
             raw = NovelJson.Value(new { html = raw.GetString() });
         if (raw.ValueKind != JsonValueKind.Object) throw new InvalidDataException();
-        JsonElement Member(string key) => raw.TryGetProperty(key, out _) ? BridgeCodec.RequiredProperty(raw, key) : default;
+        JsonElement Member(string key) => raw.TryGetProperty(key, out var v) ? v : default;
         string Text(string key, string fallback = "") => Member(key) is { ValueKind: JsonValueKind.String } value ? value.GetString()! : fallback;
         bool Bool(string key, bool fallback)
         {
@@ -383,24 +383,11 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
             throw new InvalidDataException("排序格式无效");
         return ((long)Math.Round(number, MidpointRounding.AwayFromZero), number);
     }
-    private static bool SameCustomOrder(JsonNode? existingNode, long existingOrder, long nextOrder, double nextExact)
-    {
-        if (existingOrder != nextOrder) return false;
-        if (existingNode is JsonValue existingVal)
-        {
-            if (existingVal.TryGetValue<double>(out double existingDouble) && double.IsFinite(existingDouble))
-                return existingDouble == nextExact;
-            if (existingVal.TryGetValue<long>(out long existingLong))
-                return existingLong == nextExact;
-            if (existingVal.TryGetValue<decimal>(out decimal existingDecimal))
-                return (double)existingDecimal == nextExact;
-            if (existingVal.TryGetValue<string>(out var existingText) &&
-                double.TryParse(existingText, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed) &&
-                double.IsFinite(parsed))
-                return parsed == nextExact;
-        }
-        return existingOrder == nextExact;
-    }
+    private static bool SameCustomOrder(JsonNode? existingNode, long existingOrder, long nextOrder, double nextExact) =>
+        existingOrder == nextOrder &&
+        (existingNode is JsonValue existingVal &&
+         double.TryParse(existingVal.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed) &&
+         double.IsFinite(parsed) ? parsed == nextExact : existingOrder == nextExact);
     private static bool IsRemoteHtmlList(string value)
     {
         var entries = value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);

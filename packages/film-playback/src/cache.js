@@ -3,19 +3,9 @@ import { cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 
 const maximumBytes = 32 * 1024 * 1024;
 const completenessRank = { partial: 0, complete: 1 };
-const codes = new Set([
-  'INVALID_REQUEST', 'INVALID_RESULT', 'CACHE_LOAD_FAILED', 'CANCELLED', 'CLOSED',
-  'UPSTREAM_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'NETWORK_ERROR', 'TIMEOUT',
-  'AUTH_REQUIRED', 'AUTH_FAILED', 'LOGIN_EXPIRED', 'NOT_FOUND', 'STALE_ACCOUNT',
-  'STALE_SOURCE', 'CAPABILITY_UNAVAILABLE', 'NOT_CONFIGURED', 'CHALLENGE_REQUIRED',
-  'UPSTREAM_REDIRECT', 'PAN_FAILURE', 'PAN_INTERCEPTION_UNSUPPORTED', 'UNSUPPORTED_OPERATION', 'STORAGE_ERROR', 'CORRUPT_STORAGE',
-  'WEB_INTERACTION_REQUIRED', 'MEDIA_UNAVAILABLE', 'SOURCE_FAILURE', 'CAT_FAILURE',
-  'SCRIPT_FAILURE', 'SCRIPT_PROTOCOL_ERROR', 'STALE_METADATA', 'RESOURCE_LIMIT',
-  'PERMISSION_DENIED', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED', 'COMMIT_UNKNOWN',
-]);
 
 function failure(code) {
-  const error = new Error(codes.has(code) ? code : 'CACHE_LOAD_FAILED');
+  const error = new Error(typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'CACHE_LOAD_FAILED');
   error.name = 'PlaybackCacheError';
   error.code = error.message;
   return error;
@@ -25,39 +15,28 @@ function requireValue(condition) {
   if (!condition) throw failure('INVALID_REQUEST');
 }
 
-// Owned, immutable JSON data. The accounting includes UTF-16 strings, property
-// names, slots and conservative object/entry overhead, not just wire JSON bytes.
-function snapshot(value, ancestors = new Set()) {
-  if (isRawJSON(value)) return { value: cloneJSONValue(value), bytes: 64 + value.rawJSON.length * 2 };
-  if (value === null) return { value, bytes: 8 };
-  if (typeof value === 'string') return { value, bytes: 24 + value.length * 2 };
-  if (typeof value === 'boolean') return { value, bytes: 8 };
-  if (typeof value === 'number' && Number.isFinite(value)) return { value, bytes: 8 };
-  if (!value || typeof value !== 'object' || ancestors.has(value)) {
-    throw failure('INVALID_RESULT');
-  }
-  const array = Array.isArray(value);
-  const prototype = Object.getPrototypeOf(value);
-  if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
-    throw failure('INVALID_RESULT');
-  }
-  const keys = Object.keys(value);
-  if (array && (keys.length !== value.length || keys.some((key, index) => key !== String(index)))) {
-    throw failure('INVALID_RESULT');
-  }
-  ancestors.add(value);
-  const result = array ? [] : {};
+function estimateBytes(value) {
+  if (isRawJSON(value)) return 64 + value.rawJSON.length * 2;
+  if (typeof value === 'string') return 24 + value.length * 2;
+  if (!value || typeof value !== 'object') return 8;
   let bytes = 64;
-  for (const key of keys) {
-    if (!array && value[key] === undefined) continue;
-    const child = snapshot(value[key], ancestors);
-    Object.defineProperty(result, key, {
-      value: child.value, enumerable: true, configurable: false, writable: false,
-    });
-    bytes += 32 + key.length * 2 + child.bytes;
+  if (Array.isArray(value)) {
+    for (const item of value) bytes += 32 + estimateBytes(item);
+    return bytes;
   }
-  ancestors.delete(value);
-  return { value: Object.freeze(result), bytes };
+  for (const [key, item] of Object.entries(value)) {
+    bytes += 32 + key.length * 2 + estimateBytes(item);
+  }
+  return bytes;
+}
+
+function snapshot(value) {
+  try {
+    const cloned = cloneJSONValue(value);
+    return { value: cloned, bytes: estimateBytes(cloned) };
+  } catch {
+    throw failure('INVALID_RESULT');
+  }
 }
 
 function normalizedError(error) {

@@ -199,7 +199,7 @@ public final class FilmPlaybackModel {
     var openedSources: [FilmPlaybackSource]?
     var reentryTarget: FilmPlaybackTarget?
     var reentryError: String?
-    let media: any FilmPlaybackMediaControlling
+    let media: FilmPlaybackMedia.Session
     let preferencesStore: FilmPlayerPreferencesStore
     let playbackPreferences: FilmPlaybackSettingsModel?
     let chapterModel: FilmPlaybackChapterModel
@@ -304,7 +304,7 @@ public final class FilmPlaybackModel {
         var directoryAdmission: UUID? = nil
     }
 
-    public init(transport: FilmPlaybackTransport, media: any FilmPlaybackMediaControlling,
+    public init(transport: FilmPlaybackTransport, media: FilmPlaybackMedia.Session,
                 searchContext: FilmSearchContext? = nil,
                 playerPreferences: FilmPlayerPreferencesStore? = nil,
                 playbackPreferences: FilmPlaybackSettingsModel? = nil,

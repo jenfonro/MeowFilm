@@ -73,7 +73,7 @@ internal static class MusicContentMenus
     }
 
     internal static void PopulateSongMenu(MenuFlyout menu, MusicLibraryController library,
-        MusicCatalogController catalog, SongRow? song, MusicCatalogCard? card, Func<bool> targetCurrent)
+        MusicCatalogController catalog, MusicSearchController search, SongRow? song, MusicCatalogCard? card, Func<bool> targetCurrent)
     {
         menu.Items.Clear();
         var generation = library.LoadGeneration;
@@ -92,20 +92,42 @@ internal static class MusicContentMenus
         AddItem(menu.Items, "播放", Current(), () => Run(() =>
         {
             if (card is not null) return catalog.OpenCatalogCardAsync(card);
+            if (search.IsSearchPage)
+            {
+                search.SearchSelectedSong = song;
+                var playCtx = search.SearchKeyword.Length > 0
+                    ? Library.MusicPlayContextRecord.Empty with { SourceType = "search", SearchKeyword = search.SearchKeyword }
+                    : null;
+                var src = search.SearchKeyword.Length > 0
+                    ? new Library.MusicQueueSourceRecord("catalog-search", search.SearchKeyword, "search", "")
+                    : null;
+                return library.PlaySingleSongAsync(song!, searchDirect: true, playCtx, src);
+            }
+            if (catalog.IsCatalogDetailPage)
+            {
+                catalog.CatalogSelectedSong = song;
+                return catalog.PlaySelectedCatalogSongAsync();
+            }
             library.SelectedSong = song;
-            return library.PlayContentSelectionAsync();
+            return library.PlaySelectionAsync();
         }), library.ReportUiError);
-        AddItem(menu.Items, "下一首播放", Current(), () => Run(() => library.AppendSongNextAsync(song)), library.ReportUiError);
+        AddItem(menu.Items, "下一首播放", Current(), () => Run(() =>
+        {
+            var queueContext = search.IsSearchPage && search.SearchKeyword.Length > 0
+                ? Library.MusicPlayContextRecord.Empty with { SourceType = "search", SearchKeyword = search.SearchKeyword }
+                : catalog.CaptureCatalogFeedbackContext();
+            return library.AppendSongNextAsync(song, queueContext);
+        }), library.ReportUiError);
         AddItem(menu.Items, "收藏", Current(), () => Run(() => library.FavoriteSongAsync(song)), library.ReportUiError);
         var playlists = AddItem(menu.Items, "添加到歌单", Current());
         foreach (var playlist in library.Playlists)
             AddItem(((MenuFlyoutSubItem)playlists).Items, playlist.Name, Current(), () => Run(() => library.AddSongToPlaylistAsync(song, playlist.Id)), library.ReportUiError);
-        if (card is null && library.HasCollection)
+        if (card is null && library.IsCollectionPage)
         {
             menu.Items.Add(new MenuFlyoutSeparator());
             AddItem(menu.Items, "移除", Current(), () => Run(() =>
             {
-                if (!library.HasCollection) return Task.CompletedTask;
+                if (!library.IsCollectionPage) return Task.CompletedTask;
                 library.SelectedSong = song;
                 return library.RemoveSongAsync();
             }), library.ReportUiError);

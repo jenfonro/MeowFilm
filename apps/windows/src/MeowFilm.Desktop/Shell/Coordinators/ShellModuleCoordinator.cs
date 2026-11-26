@@ -50,7 +50,6 @@ internal sealed class ShellModuleCoordinator
         foreach (var session in _sessions)
         {
             session.Module.PropertyChanged += OnModulePropertyChanged;
-            _shell.OwnedNotices.Subscribe(session.Module);
             _shell.SubscribeGlobalSurfaces(session);
             if (session.Module is IDesktopNavigationSource source)
             {

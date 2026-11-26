@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 struct MusicNativeFMPreviewEntry {
     let id: UUID
@@ -56,14 +56,12 @@ actor MusicNativeFMRead {
     }
 }
 
-extension NativeMusicService: MusicFMPreviewServing {
+extension NativeMusicService {
     public func fmPreview(_ action: MusicHomeAction) async throws -> MusicFMPreview? {
         try check(); try requirePlatform("wy")
         guard let key = action.fmConfiguration else { throw MusicServiceError.invalidRequest }
         let own = epoch, binding = try await currentHomeBinding()
         try check(own)
-        // Includes failed and in-flight entries. Account changes cannot leak a
-        // previous cover or make a previous first batch playable.
         for (candidate, value) in fmPreviews where value.binding != binding || !value.authorization.isActive {
             discardFMPreview(candidate)
         }
@@ -82,7 +80,6 @@ extension NativeMusicService: MusicFMPreviewServing {
                     await self?.discardFMPreview(key, id: id); return
                 }
             }
-            access.register(id) { authorization.revoke(); task.cancel() }
             fmPreviews[key] = .init(id: id, binding: binding, authorization: authorization,
                 task: task, observer: observer)
             fmPreviewOrder.append(key)
@@ -97,7 +94,7 @@ extension NativeMusicService: MusicFMPreviewServing {
                                epoch own: UUID) async -> MusicNativeFMResponse? {
         let value: MusicNativeFMResponse?
         do { value = try await loadFM(key, preview: true, binding: binding, epoch: own) }
-        catch { value = nil } // Optional preview never becomes a page/playback error.
+        catch { value = nil }
         if fmPreviews[key]?.id == id {
             fmPreviews[key]?.completed = true; fmPreviews[key]?.value = value
         }
@@ -106,7 +103,7 @@ extension NativeMusicService: MusicFMPreviewServing {
     func discardFMPreview(_ key: MusicHomeAction, id: UUID? = nil) {
         guard let entry = fmPreviews[key], id == nil || entry.id == id else { return }
         fmPreviews.removeValue(forKey: key); fmPreviewOrder.removeAll { $0 == key }
-        access.remove(entry.id); entry.observer?.cancel()
+        entry.observer?.cancel()
         entry.authorization.revoke(); entry.task.cancel()
         retainSimilarDrain(Task { _ = await entry.task.value })
     }
@@ -116,7 +113,7 @@ extension NativeMusicService: MusicFMPreviewServing {
     private func loadFM(_ action: MusicHomeAction, preview: Bool, binding: MusicNativeHomeBinding,
                         epoch own: UUID) async throws -> MusicNativeFMResponse {
         try await checkHomeBinding(binding, epoch: own)
-        let owner = accounts as? any MusicNativeFMProviding, port = publicPlatforms
+        let owner = accounts, port = publicPlatforms
         let value = try await work(label: "musicFM", draining: true) {
             if let owner { return try await owner.nativeFM(action, preview: preview, binding: binding) }
             return try await port.homeAction(action, preview: preview)
@@ -137,16 +134,14 @@ extension NativeMusicService: MusicFMPreviewServing {
             if case .fm = action, entry.binding == binding, entry.authorization.isActive,
                !entry.completed || entry.value?.tracks.isEmpty == false {
                 preview = entry.task
-                // Transfer the pending first batch, not its display fence.
                 fmPreviews.removeValue(forKey: key); fmPreviewOrder.removeAll { $0 == key }
-                access.remove(entry.id); entry.observer?.cancel(); entry.authorization.revoke()
+                entry.observer?.cancel(); entry.authorization.revoke()
             } else { discardFMPreview(key) }
         }
         let reader = MusicNativeFMRead(preview: preview) { [weak self] in
             guard let self else { throw MusicServiceError.closed }
             return try await self.loadFM(action, preview: false, binding: binding, epoch: own)
         }
-        access.register(id) { authorization.revoke(); Task { await reader.close() } }
         fmQueues[id] = (key, authorization, reader)
         let source = MusicRemoteQueueSource(context: context, authorization: authorization,
             loadPage: { try await reader.page($0) },
@@ -163,7 +158,6 @@ extension NativeMusicService: MusicFMPreviewServing {
         } catch { await source.close(); throw error }
     }
     private func releaseFMQueue(_ id: UUID) {
-        access.remove(id)
         if let entry = fmQueues.removeValue(forKey: id) {
             entry.1.revoke()
             retainSimilarDrain(Task { await entry.2.close() })

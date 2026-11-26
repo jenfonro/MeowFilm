@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 import MeowAccounts
-import MeowMusicFeature
 
 /// Per-write proof, independent of the account owner's early cancellation gate.
 /// Once stopped, even a non-cooperative token completion cannot start the send.

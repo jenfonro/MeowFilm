@@ -28,7 +28,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private readonly Dictionary<ListView, ScrollViewer> songScrolls = [];
     private readonly Dictionary<string, bool> favoriteCache = new(StringComparer.Ordinal);
     private long favoritesEpoch;
-    private bool loadingMoreSongs, syncingDate, projectedSearch;
+    private bool loadingMoreSongs, syncingDate, syncingSelection, projectedSearch;
     private bool playlistDialogOpen;
     private MenuFlyout? songMenu, dailyMoreMenu;
     private bool playlistDialogSubmitting;
@@ -43,6 +43,10 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private bool visibilityActive;
     private (bool CollectionActions, bool RefreshAction, bool Editable) publishedHeaderState;
     private ListView ActiveSongsGrid => Search.IsSearchPage ? SearchSongsGrid : SongsGrid;
+    private MusicContentPage CurrentContentPage => discovery.IsDiscovery ? MusicContentPage.Discovery :
+        Library.IsArchives ? MusicContentPage.Archives :
+        Search.IsSearchSongs ? MusicContentPage.SearchSongs :
+        (Library.IsSongList || Catalog.IsCatalogDetailPage) ? MusicContentPage.Songs : MusicContentPage.Catalog;
     internal bool IsPlaylistDialogOpen => playlistDialogOpen;
     internal DesktopNavigationGroupAction CreatePlaylistAction { get; }
 
@@ -80,7 +84,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             [MusicContentPage.SearchSongs] = SearchSongsPage
         });
         BodyPages.Children.Add(content);
-        content.Show(Library.ContentPage);
+        content.Show(CurrentContentPage);
         songLists = [SongsGrid, SearchSongsGrid];
         foreach (var list in songLists)
         {
@@ -114,6 +118,12 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             };
             list.SelectionChanged += (_, e) =>
             {
+                if (ReferenceEquals(list, SongsGrid) && !syncingSelection)
+                {
+                    var selected = SongsGrid.SelectedItem as SongRow;
+                    if (Catalog.IsCatalogPage) Catalog.CatalogSelectedSong = selected;
+                    else if (Library.IsSongList) Library.SelectedSong = selected;
+                }
                 foreach (var item in e.RemovedItems)
                     if (list.ContainerFromItem(item) is ListViewItem removed) RefreshSongRow(removed, syncFavorite: false);
                 foreach (var item in e.AddedItems)
@@ -126,6 +136,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             Library.PropertyChanged -= LibraryChanged; Library.PropertyChanged += LibraryChanged;
             Catalog.PropertyChanged -= CatalogChanged; Catalog.PropertyChanged += CatalogChanged;
             Search.PropertyChanged -= SearchChanged; Search.PropertyChanged += SearchChanged;
+            discovery.PropertyChanged -= DiscoveryChanged; discovery.PropertyChanged += DiscoveryChanged;
             playback.PropertyChanged -= OnPlaybackChanged; playback.PropertyChanged += OnPlaybackChanged;
             Library.SongFavoritesChanged -= OnSongFavoritesChanged; Library.SongFavoritesChanged += OnSongFavoritesChanged;
             Library.Playlists.CollectionChanged -= OnPlaylistsChanged; Library.Playlists.CollectionChanged += OnPlaylistsChanged;
@@ -135,7 +146,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             PublishHeaderState();
             if (!DesktopVisual.IsVisible(this))
             {
-                content.Show(Library.ContentPage);
+                content.Show(CurrentContentPage);
                 Refresh();
             }
             visibilityObserver?.Dispose();
@@ -151,6 +162,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             Library.PropertyChanged -= LibraryChanged;
             Catalog.PropertyChanged -= CatalogChanged;
             Search.PropertyChanged -= SearchChanged;
+            discovery.PropertyChanged -= DiscoveryChanged;
             playback.PropertyChanged -= OnPlaybackChanged;
             Library.SongFavoritesChanged -= OnSongFavoritesChanged;
             Library.Playlists.CollectionChanged -= OnPlaylistsChanged;
@@ -168,7 +180,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         visibilityActive = active;
         if (active)
         {
-            content.Show(Library.ContentPage);
+            content.Show(CurrentContentPage);
             Refresh();
             onPageLoaded();
         }
@@ -177,19 +189,31 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         catch { /* Navigation and shutdown retain final drain ownership. */ }
     }
 
+    private void DiscoveryChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MusicDiscoveryController.IsDiscovery))
+        {
+            content.Show(CurrentContentPage);
+            Refresh();
+            PublishHeaderState();
+        }
+    }
+
     private void LibraryChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(MusicLibraryController.ContentPage))
-        {
-            content.Show(Library.ContentPage);
-            Refresh();
-        }
+        if (e.PropertyName is nameof(MusicLibraryController.IsLocalLibraryPage) or nameof(MusicLibraryController.IsArchives) or
+            nameof(MusicLibraryController.IsSongList))
+            content.Show(CurrentContentPage);
         if (e.PropertyName == nameof(MusicLibraryController.CanReorderPlaylist) && !Library.CanReorderPlaylist) EndDrag();
         if (playlistDialogOpen && !playlistDialogSubmitting && e.PropertyName is nameof(MusicLibraryController.Heading) or nameof(MusicLibraryController.IsCollectionPage)) DesktopModalHost.CloseFor(this);
-        if (e.PropertyName is nameof(MusicLibraryController.HistoryDate) or nameof(MusicLibraryController.CanEdit) or
-            nameof(MusicLibraryController.DetailArtwork) or nameof(MusicLibraryController.IsContentDetailPage)) Refresh();
+        if (e.PropertyName is nameof(MusicLibraryController.IsLocalLibraryPage) or nameof(MusicLibraryController.IsArchives) or
+            nameof(MusicLibraryController.IsSongList) or nameof(MusicLibraryController.IsCollectionPage) or
+            nameof(MusicLibraryController.HistoryDate) or nameof(MusicLibraryController.CanEdit) or
+            nameof(MusicLibraryController.Heading) or nameof(MusicLibraryController.CollectionArtwork) or
+            nameof(MusicLibraryController.CanPlayCollection) or nameof(MusicLibraryController.CountText) or
+            nameof(MusicLibraryController.SelectedSong)) Refresh();
         if (e.PropertyName is nameof(MusicLibraryController.IsCollectionPage) or nameof(MusicLibraryController.CanDeleteCollection) or
-            nameof(MusicLibraryController.ContentPage) or nameof(MusicLibraryController.CanEdit))
+            nameof(MusicLibraryController.IsLocalLibraryPage) or nameof(MusicLibraryController.CanEdit))
             PublishHeaderState();
     }
 
@@ -201,13 +225,30 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             if (Catalog.IsDailyStyleEditorOpen) _ = ShowDailyStylePopupAsync(request);
             else if (dailyStyleOpen is not null) DailyStylePopup.Hide();
         }
-        if (e.PropertyName is nameof(MusicCatalogController.IsCatalogHome) or nameof(MusicCatalogController.HasChannelTabs) or
+        if (e.PropertyName is nameof(MusicCatalogController.IsCatalogPage) or nameof(MusicCatalogController.IsCatalogDetailPage) or
+            nameof(MusicCatalogController.IsCatalogContent))
+        {
+            content.Show(CurrentContentPage);
+            PublishHeaderState();
+        }
+        if (e.PropertyName is nameof(MusicCatalogController.IsCatalogPage) or nameof(MusicCatalogController.IsCatalogDetailPage) or
+            nameof(MusicCatalogController.IsCatalogContent) or nameof(MusicCatalogController.IsCatalogHome) or
+            nameof(MusicCatalogController.IsCatalogLanding) or nameof(MusicCatalogController.HasChannelTabs) or
             nameof(MusicCatalogController.CurrentChannelKey) or nameof(MusicCatalogController.CanEdit) or
-            nameof(MusicCatalogController.IsCatalogArtist)) Refresh();
+            nameof(MusicCatalogController.IsCatalogArtist) or nameof(MusicCatalogController.CatalogHeading) or
+            nameof(MusicCatalogController.DetailSubtitle) or nameof(MusicCatalogController.CatalogDetailArtwork) or
+            nameof(MusicCatalogController.CanPlayCatalogPlaylist) or nameof(MusicCatalogController.CatalogDetailSectionTitle) or
+            nameof(MusicCatalogController.CatalogDetailCountText) or nameof(MusicCatalogController.CatalogSelectedSong)) Refresh();
     }
 
     private void SearchChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName is nameof(MusicSearchController.IsSearchPage) or nameof(MusicSearchController.IsSearchSongs) or
+            nameof(MusicSearchController.SearchTab))
+        {
+            content.Show(CurrentContentPage);
+            PublishHeaderState();
+        }
         if (e.PropertyName is nameof(MusicSearchController.IsSearchPage) or nameof(MusicSearchController.ShowSearchLoading) or
             nameof(MusicSearchController.SearchTab)) Refresh();
     }
@@ -246,10 +287,35 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         PageContent.Margin = projectedSearch ? new Thickness(0) : Catalog.IsCatalogLanding ? new Thickness(0, 12, 0, 0) : new Thickness(40, 16, 24, 20);
         PageContent.MaxWidth = Catalog.IsCatalogLanding ? double.PositiveInfinity : 1490;
         SearchHeading.Visibility = !projectedSearch && Search.IsSearchPage ? Visibility.Visible : Visibility.Collapsed;
+
+        bool isCatalogDetail = Catalog.IsCatalogDetailPage;
+        bool isDetail = isCatalogDetail || Library.IsCollectionPage;
+        DetailHeaderGrid.Visibility = isDetail ? Visibility.Visible : Visibility.Collapsed;
+        DetailSectionHeader.Visibility = isDetail ? Visibility.Visible : Visibility.Collapsed;
+        string detailArtwork = isCatalogDetail ? Catalog.CatalogDetailArtwork : Library.CollectionArtwork;
+        DetailArtworkImage.Address = detailArtwork;
+        AutomationProperties.SetName(DetailArtworkImage, isCatalogDetail ? Catalog.CatalogDetailArtworkName : "歌单封面");
+        DetailHeadingText.Text = isCatalogDetail ? Catalog.CatalogHeading : Library.Heading;
+        DetailSubtitleText.Text = isCatalogDetail ? Catalog.DetailSubtitle : "";
+        PlayContentDetailButton.IsEnabled = isCatalogDetail ? Catalog.CanPlayCatalogPlaylist : Library.CanPlayCollection;
+        DetailSectionTitleText.Text = isCatalogDetail ? Catalog.CatalogDetailSectionTitle : "歌曲";
+        DetailCountTextBlock.Text = isCatalogDetail ? Catalog.CatalogDetailCountText : (Library.IsCollectionPage ? $"{Library.Total}" : "");
+
         double artworkRadius = Catalog.IsCatalogArtist ? 76 : 18;
         DetailArtworkFrame.CornerRadius = new CornerRadius(artworkRadius);
         CardClip.SetRadius(DetailArtworkFrame, artworkRadius);
-        DetailArtworkFallback.Visibility = string.IsNullOrWhiteSpace(Library.DetailArtwork) ? Visibility.Visible : Visibility.Collapsed;
+        DetailArtworkFallback.Visibility = string.IsNullOrWhiteSpace(detailArtwork) ? Visibility.Visible : Visibility.Collapsed;
+
+        var targetSongs = Catalog.IsCatalogPage ? Catalog.CatalogSongsSource : Library.LibrarySongsSource;
+        if (!ReferenceEquals(SongsGrid.ItemsSource, targetSongs)) SongsGrid.ItemsSource = targetSongs;
+        var targetSelected = Catalog.IsCatalogPage ? Catalog.CatalogSelectedSong : Library.SelectedSong;
+        if (!ReferenceEquals(SongsGrid.SelectedItem, targetSelected))
+        {
+            syncingSelection = true;
+            SongsGrid.SelectedItem = targetSelected;
+            syncingSelection = false;
+        }
+
         syncingDate = true; HistoryPicker.SelectedItem = Library.HistoryDate; syncingDate = false;
         CreatePlaylistAction.Refresh();
     }
@@ -334,7 +400,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
 
     internal void RestoreScroll(double offset) { songScrollIntent.Clear(); if (Visibility == Visibility.Visible) UpdateLayout(); ActiveScroll()?.ChangeView(null, offset, null, true); }
 
-    private ScrollViewer? ActiveScroll() => Library.ContentPage switch
+    private ScrollViewer? ActiveScroll() => CurrentContentPage switch
     {
         MusicContentPage.Archives => ArchiveScroll,
         MusicContentPage.Discovery => DesktopVisual.Descendant<ScrollViewer>(DiscoveryView),
@@ -390,7 +456,8 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
 
     private void DailyStyleCancel_Click(object sender, RoutedEventArgs e) => Catalog.CancelDailyStyleEditor();
     private void DailyStyleConfirm_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Catalog.ConfirmDailyStyleAsync());
-    private void PlayContentDetail_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Library.PlayContentDetailAsync());
+    private void PlayContentDetail_Click(object sender, RoutedEventArgs e) =>
+        RunUiAction(() => Catalog.IsCatalogDetailPage ? Catalog.PlayCatalogPlaylistAsync() : Library.PlayCollectionAsync());
 
     private void HistoryDate_Changed(object sender, SelectionChangedEventArgs e)
     { if (!syncingDate && Library.CanEdit && HistoryPicker.SelectedItem is string day && day != Library.HistoryDate) RunUiAction(() => Library.SelectHistoryDateAsync(day)); }
@@ -488,19 +555,46 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         AutomationProperties.SetName(button, favorited ? "取消收藏" : "收藏");
     }
 
+    private SongRow? ActiveSelectedSong => Search.IsSearchPage ? Search.SearchSelectedSong :
+        Catalog.IsCatalogPage ? Catalog.CatalogSelectedSong : Library.SelectedSong;
+
+    private void SetActiveSelectedSong(SongRow? song)
+    {
+        if (Search.IsSearchPage) Search.SearchSelectedSong = song;
+        else if (Catalog.IsCatalogPage) Catalog.CatalogSelectedSong = song;
+        else Library.SelectedSong = song;
+    }
+
+    private Task PlayActiveSelectedSongAsync()
+    {
+        if (Search.IsSearchPage)
+        {
+            if (Search.SearchSelectedSong is not { } s) return Task.CompletedTask;
+            var playCtx = Search.SearchKeyword.Length > 0
+                ? MeowFilm.Capabilities.Library.MusicPlayContextRecord.Empty with { SourceType = "search", SearchKeyword = Search.SearchKeyword }
+                : null;
+            var src = Search.SearchKeyword.Length > 0
+                ? new MeowFilm.Capabilities.Library.MusicQueueSourceRecord("catalog-search", Search.SearchKeyword, "search", "")
+                : null;
+            return Library.PlaySingleSongAsync(s, searchDirect: true, playCtx, src);
+        }
+        if (Catalog.IsCatalogDetailPage) return Catalog.PlaySelectedCatalogSongAsync();
+        return Library.PlaySelectionAsync();
+    }
+
     private void Song_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
-    { if (Library.CanEdit && sender is FrameworkElement { DataContext: SongRow song }) { Library.SelectedSong = song; e.Handled = true; RunUiAction(() => Library.PlayContentSelectionAsync()); } }
+    { if (Library.CanEdit && sender is FrameworkElement { DataContext: SongRow song }) { SetActiveSelectedSong(song); e.Handled = true; RunUiAction(PlayActiveSelectedSongAsync); } }
 
     private void Song_RightTapped(object sender, RightTappedRoutedEventArgs e)
     { if (sender is FrameworkElement host && OpenSongMenu(host) is not null) e.Handled = true; }
 
     internal MenuFlyout? OpenSongMenu(FrameworkElement host)
     {
-        if (host.DataContext is not SongRow song) { Library.SelectedSong = null; return null; }
-        Library.SelectedSong = song;
+        if (host.DataContext is not SongRow song) { SetActiveSelectedSong(null); return null; }
+        SetActiveSelectedSong(song);
         songMenu?.Hide();
         var menu = new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
-        MusicContentMenus.PopulateSongMenu(menu, Library, Catalog, song, null, () => host.IsLoaded && DesktopVisual.IsVisible(host) && ReferenceEquals(host.DataContext, song));
+        MusicContentMenus.PopulateSongMenu(menu, Library, Catalog, Search, song, null, () => host.IsLoaded && DesktopVisual.IsVisible(host) && ReferenceEquals(host.DataContext, song));
         MusicContentMenus.ApplyStyles(host, menu);
         var visibility = DesktopVisual.ObserveVisibility(host, visible => { if (!visible) menu.Hide(); });
         menu.Closed += (_, _) => { visibility.Dispose(); if (ReferenceEquals(songMenu, menu)) songMenu = null; };
@@ -509,14 +603,15 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
 
     private void Song_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if ((e.Key == VirtualKey.Enter && Library.HasSelection) || (e.Key == VirtualKey.Delete && Library.CanRemoveSelection)) e.Handled = true;
+        bool hasSelection = Library.CanEdit && ActiveSelectedSong is not null;
+        if ((e.Key == VirtualKey.Enter && hasSelection) || (e.Key == VirtualKey.Delete && Library.CanRemoveSelection)) e.Handled = true;
         RunUiAction(() => ExecuteSongKeyAsync(e.Key));
     }
 
     internal async Task<bool> ExecuteSongKeyAsync(VirtualKey key)
     {
         songScrollIntent.Set(key is VirtualKey.Down or VirtualKey.PageDown or VirtualKey.End); if (songScrollIntent.Active) LoadMoreSongsNearEnd();
-        if (key == VirtualKey.Enter && Library.HasSelection) { await Library.PlayContentSelectionAsync(); return true; }
+        if (key == VirtualKey.Enter && Library.CanEdit && ActiveSelectedSong is not null) { await PlayActiveSelectedSongAsync(); return true; }
         if (key == VirtualKey.Delete && Library.CanRemoveSelection) { await Library.RemoveSongAsync(); return true; }
         return false;
     }
@@ -534,8 +629,15 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         finally { loadingMoreSongs = false; songScrollIntent.Clear(); }
     }
 
-    private bool SelectSong(object sender) { if (sender is Button { Tag: SongRow song }) Library.SelectedSong = song; return Library.CanEdit && Library.HasSelection; }
-    private void NextInQueue_Click(object sender, RoutedEventArgs e) { if (SelectSong(sender)) RunUiAction(() => Library.AppendNextAsync()); }
+    private bool SelectSong(object sender) { if (sender is Button { Tag: SongRow song }) SetActiveSelectedSong(song); return Library.CanEdit && ActiveSelectedSong is not null; }
+    private void NextInQueue_Click(object sender, RoutedEventArgs e)
+    {
+        if (!SelectSong(sender) || ActiveSelectedSong is not { } song) return;
+        var queueContext = Search.IsSearchPage && Search.SearchKeyword.Length > 0
+            ? MeowFilm.Capabilities.Library.MusicPlayContextRecord.Empty with { SourceType = "search", SearchKeyword = Search.SearchKeyword }
+            : Catalog.CaptureCatalogFeedbackContext();
+        RunUiAction(() => Library.AppendSongNextAsync(song, queueContext));
+    }
     private void Favorite_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: SongRow song } && SelectSong(sender)) RunUiAction(() => Library.ToggleSongFavoriteAsync(song)); }
     private void SongMore_Click(object sender, RoutedEventArgs e) { if (sender is Button button && SelectSong(sender)) OpenSongMenu(button); }
     private void PreviousPage_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Library.PageAsync(-1));

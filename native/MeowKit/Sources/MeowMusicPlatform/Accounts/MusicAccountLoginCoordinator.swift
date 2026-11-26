@@ -1,7 +1,6 @@
 import Foundation
 import MeowAccounts
 import MeowDebug
-import MeowMusicFeature
 
 extension NativeMusicAccountService {
     public func validate(platform: MusicAccountPlatform) async throws -> MusicAccountStatus {
@@ -130,7 +129,7 @@ extension NativeMusicAccountService {
     }
 }
 
-extension NativeMusicAccountService: MusicAccountSessionsObserving {
+extension NativeMusicAccountService {
     public func accountSessionChanges() -> AsyncStream<MusicAccountPlatform> {
         guard !closed, !Task.isCancelled else { return AsyncStream { $0.finish() } }
         let id = UUID()
@@ -232,7 +231,7 @@ extension NativeMusicAccountService: MusicAccountSessionsObserving {
     }
 }
 
-extension NativeMusicAccountService: MusicAccountsSMSServing, MusicAccountsProfileServing {
+extension NativeMusicAccountService {
     private func prepareSMS(platform: MusicAccountPlatform, id: UUID) async throws -> AccountSessionToken {
         try check()
         let identity = try configured(platform), own = epoch
@@ -316,7 +315,7 @@ extension NativeMusicAccountService: MusicAccountsSMSServing, MusicAccountsProfi
             try checkSMS(attemptID, platform: platform, token: token, own: own)
             let value = try await run(platform) {
                 let value = try await provider.loginSMS(countryCode: countryCode, phone: phone, code: code, attemptID: attemptID)
-                guard try await provider.nativeID(value.credential) == value.nativeID else { throw MusicServiceError.targetChanged }
+                guard await provider.nativeID(value.credential) == value.nativeID else { throw MusicServiceError.targetChanged }
                 return value
             }
             try checkSMS(attemptID, platform: platform, token: token, own: own)

@@ -46,7 +46,7 @@ extension MusicViewModel {
     }
 
     /// Only the explicit "not this song" edit can change a queue member here.
-    private func refreshAfterSourceRejection(_ service: any MusicServing, epoch: UUID, token: UUID,
+    private func refreshAfterSourceRejection(_ service: NativeMusicService, epoch: UUID, token: UUID,
         before: MusicPlaybackState, admission: QueuePlaybackAdmission?) async throws {
         guard let occurrenceID = before.currentId else { throw MusicServiceError.notFound }
         let next = try await service.state()
@@ -70,7 +70,6 @@ extension MusicViewModel {
               value.resourceId == "music:" + attemptID else {
             throw MusicServiceError.invalidResponse
         }
-        try value.validateResolvedSelection(for: selection)
         if let expiry = value.expiresAt, expiry <= Date().timeIntervalSince1970 * 1000 {
             throw MusicServiceError.invalidMediaCandidate
         }
@@ -121,7 +120,7 @@ extension MusicViewModel {
         if candidate == nil { playbackState.phase = .paused }
     }
 
-    func releaseUnacceptedAttempt(_ id: String, service: any MusicServing) async {
+    func releaseUnacceptedAttempt(_ id: String, service: NativeMusicService) async {
         // Cleanup must not inherit a cancelled caller: NativeMusicService checks
         // cancellation on its public port. A revoked service clears its attempts
         // at its own protection fence. This finite exact-ID cleanup is awaited.
@@ -139,29 +138,29 @@ extension MusicViewModel {
     public func choose(_ selection: MusicPlaybackSelection) async {
         await choose(selection, automatic: false)
     }
-    func inspectSources(for ref: MusicReference) async throws -> any MusicSourceInspectionSession {
+    func inspectSources(for ref: MusicReference) async throws -> MusicNativeSourceInspection {
         try check(lifecycle)
-        guard let provider = service as? any MusicResolvedSourcesServing else { throw MusicServiceError.unsupported }
+        let service = try requireService()
         let own = lifecycle
-        let session = try await provider.inspectSources(for: ref)
+        let session = try await service.inspectSources(for: ref)
         do { try check(own); return session }
-        catch { await session.close(); throw error }
+        catch { await session.closeInspection(); throw error }
     }
-    func chooseInspectedSource(_ source: MusicResolvedSource, session: any MusicSourceInspectionSession) async {
-        guard current != nil, service is any MusicSourcePlaybackServing else { return }
+    func chooseInspectedSource(_ source: MusicResolvedSource, session: MusicNativeSourceInspection) async {
+        guard current != nil, service != nil else { return }
         await selectSource(intent: .exact(source.selection))
     }
     /// "Not this song" for a non-primary source of the current occurrence. When
     /// that source is playing, stop it and find a same-tier replacement while
     /// keeping the live position and paused intent.
-    func rejectInspectedSource(_ source: MusicResolvedSource, session: any MusicSourceInspectionSession) async {
+    func rejectInspectedSource(_ source: MusicResolvedSource, session: MusicNativeSourceInspection) async {
         guard let current, let service else { return }
         let own = lifecycle, token = selectionID, before = state
         let admission = recommendations.fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let key = source.selection.sourceKey
         let operation = sourcePlayback.sourceSwitchID
         let playing = nativeAttempt != nil && candidate?.occurrenceId == current.id && lastSelection?.sourceKey == key
-        if playing, service is any MusicSourcePlaybackServing {
+        if playing {
             let quality = candidate?.delivery?.quality ?? lastSelection!.quality
             await replaceExcludedSource(intent: .quality(quality),
                 resumeControl: phase == .paused ? nil : playbackControlRevision) {
@@ -241,7 +240,7 @@ extension MusicViewModel {
     func recoverRemoteAudio(_ fact: MusicPlaybackFact) -> Bool {
         guard fact.kind == .failed, !sourcePlayback.remoteAudioRecoveryTried,
               let previous = candidate, !previous.isCachedAudio, !previous.url.isFileURL,
-              let service, let recovery = service as? any MusicPlaybackRecoveryServing else { return false }
+              let service else { return false }
         sourcePlayback.remoteAudioRecoveryTried = true; terminalAttempt = fact.attemptId; playbackState.isResolving = true
         let epoch = lifecycle, token = selectionID, prior = eventTail
         let admission = recommendations.fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
@@ -261,7 +260,7 @@ extension MusicViewModel {
             do {
                 try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
                 self.resolvingAttempt = attemptID
-                result = try await recovery.recoverPlayback(previousAttemptID: fact.attemptId,
+                result = try await service.recoverPlayback(previousAttemptID: fact.attemptId,
                     attemptID: attemptID, rejectedURL: previous.url, position: fact.position)
                 try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
                 guard let result, result.selection == result.candidate.resolvedSelection else {

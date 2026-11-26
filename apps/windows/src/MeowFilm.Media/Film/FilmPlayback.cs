@@ -50,7 +50,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     private bool muted;
     private NativePlaybackScope? scope;
     private bool hasOutput, buffering, paused, canSeek;
-    private double position, duration, bufferedUntil;
+    private double position, duration, bufferedUntil, rate = 1;
     private int videoWidth, videoHeight;
     private string? lastError;
     private FilmOutputObservation? output;
@@ -96,6 +96,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     public double PositionSeconds => position;
     public double DurationSeconds => duration;
     public double BufferedUntilSeconds => bufferedUntil;
+    public double Rate => rate;
     public int VideoWidth => videoWidth;
     public int VideoHeight => videoHeight;
     public string? LastErrorCode => lastError;
@@ -367,6 +368,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             published = true;
             Set(ref tracks, initialTracks, nameof(Tracks));
             Set(ref chapters, initialChapters, nameof(Chapters));
+            Set(ref rate, 1, nameof(Rate));
             Set(ref scope, session.Scope, nameof(Scope)); Changed(nameof(Identity));
             Set(ref hasOutput, true, nameof(HasOutput)); Set(ref lastError, null, nameof(LastErrorCode));
             Publish(snapshot);
@@ -488,10 +490,15 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         if (rc != 0) throw new PlaybackException(session.ResolveError(rc));
     });
 
-    public Task RateAsync(NativePlaybackScope scope, double rate) => Command(scope, session =>
+    public Task RateAsync(NativePlaybackScope expected, double value) => Dispatch(async () =>
     {
-        if (!double.IsFinite(rate) || rate < .25 || rate > 4) throw new PlaybackException(PlaybackError.InvalidRate);
-        FilmKernelNative.Check(FilmKernelNative.Rate(session.Handle, rate));
+        await Command(expected, session =>
+        {
+            if (!double.IsFinite(value) || value < .25 || value > 4) throw new PlaybackException(PlaybackError.InvalidRate);
+            FilmKernelNative.Check(FilmKernelNative.Rate(session.Handle, value));
+        });
+        if (current is { } active && active.Scope == expected)
+            Set(ref rate, value, nameof(Rate));
     });
 
     public Task AspectAsync(NativePlaybackScope scope, string? aspect) => Command(scope, session =>
@@ -721,6 +728,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         Set(ref position, 0, nameof(PositionSeconds));
         Set(ref duration, 0, nameof(DurationSeconds));
         Set(ref bufferedUntil, 0, nameof(BufferedUntilSeconds));
+        Set(ref rate, 1, nameof(Rate));
         Set(ref videoWidth, 0, nameof(VideoWidth));
         Set(ref videoHeight, 0, nameof(VideoHeight));
         UpdateDebugSnapshot();

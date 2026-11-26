@@ -86,37 +86,28 @@ export async function listenCatServer(runtime, port) {
   try {
     await new Promise((resolve, reject) => {
       let settled = false;
-      const cleanup = () => {
-        try { server.off('error', failed); } catch {}
-      };
-      const finish = (callback, value) => {
+      const failed = error => {
         if (settled) return;
         settled = true;
-        cleanup();
-        callback(value);
+        server.off('error', failed);
+        reject(error);
       };
-      const failed = error => finish(reject, error);
       const ready = () => {
         if (settled) return;
-        try {
-          server.off('error', failed);
-          server.on('error', () => {
-            const owner = ownerRef.deref();
-            try {
-              owner?.onDiagnostic?.({
-                kind: 'ScriptHostError', reason: 'host',
-                operation: 'cat.aggregate', code: 'SERVICE_ERROR',
-              });
-            } catch {}
-          });
-          settled = true;
-          resolve();
-        } catch (error) { failed(error); }
+        settled = true;
+        server.off('error', failed);
+        server.on('error', () => {
+          try {
+            ownerRef.deref()?.onDiagnostic?.({
+              kind: 'ScriptHostError', reason: 'host',
+              operation: 'cat.aggregate', code: 'SERVICE_ERROR',
+            });
+          } catch {}
+        });
+        resolve();
       };
-      try {
-        server.once('error', failed);
-        server.listen(port, '127.0.0.1', ready);
-      } catch (error) { failed(error); }
+      server.once('error', failed);
+      server.listen(port, '127.0.0.1', ready);
     });
   } catch (error) {
     try { await runtime.closeOwnedServer(server); } catch { /* Preserve the listen failure. */ }
@@ -137,14 +128,10 @@ export async function handleCatRequest(runtime, request, response) {
   const scope = new ResourceScope(undefined, runtime.limit('requestTimeoutMs'));
   const abort = () => scope.close(fault('CANCELLED'));
   const responseClosed = () => { if (!response.writableFinished) abort(); };
-  let requestListening = false, responseListening = false;
   const chunks = [];
-  let failure;
+  request.once('aborted', abort);
+  response.once('close', responseClosed);
   try {
-    request.once('aborted', abort);
-    requestListening = true;
-    response.once('close', responseClosed);
-    responseListening = true;
     scope.add(() => {
       if (!request.complete && !request.destroyed) request.destroy();
     });
@@ -158,12 +145,12 @@ export async function handleCatRequest(runtime, request, response) {
     const result = await runtime.invoke({ installationId, siteId, operation, payload }, { signal: scope.signal });
     response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
     response.end(typeof result === 'string' ? result : stringifyJSONValue(result));
-  } catch (error) { failure = error; }
-  chunks.length = 0;
-  try { if (requestListening) request.off('aborted', abort); } catch (error) { failure ??= error; }
-  try { if (responseListening) response.off('close', responseClosed); } catch (error) { failure ??= error; }
-  try { scope.close(); } catch (error) { failure ??= error; }
-  if (failure) throw failure;
+  } finally {
+    chunks.length = 0;
+    request.off('aborted', abort);
+    response.off('close', responseClosed);
+    scope.close();
+  }
 }
 
 async function forwardCatProxy(runtime, request, response, url, parts) {
@@ -206,8 +193,9 @@ async function streamCatProxy(runtime, request, response, { entry, snapshot, pat
   let client, upstream, clearHeaders, controlActive = true;
   const abort = () => scope.close(fault('CANCELLED'));
   const responseClosed = () => { if (!response.writableFinished) abort(); };
-  let requestListening = false, responseListening = false;
   let failure;
+  response.once('close', responseClosed);
+  request.once('aborted', abort);
   try {
     const proxyOrigin = new URL(`http://${request.headers.host ?? `127.0.0.1:${runtime.aggregatePort}`}`).origin;
     const map = value => runtime.mapSnapshotProxy(entry.session, snapshot, value, proxyOrigin);
@@ -218,10 +206,6 @@ async function streamCatProxy(runtime, request, response, { entry, snapshot, pat
     const caller = new URL(request.url, `http://127.0.0.1:${runtime.aggregatePort}`);
     if (headers.host?.toLowerCase() === caller.host.toLowerCase()) deleteHeader(headers, 'host');
     headers['accept-encoding'] = 'identity';
-    response.once('close', responseClosed);
-    responseListening = true;
-    request.once('aborted', abort);
-    requestListening = true;
     if (request.aborted || response.destroyed) abort();
     scope.assertOpen();
     client = (target.protocol === 'https:' ? httpsRequest : httpRequest)(target, {
@@ -234,32 +218,23 @@ async function streamCatProxy(runtime, request, response, { entry, snapshot, pat
     upstream = await control.race(new Promise((resolve, reject) => {
       let settled = false;
       const cleanup = () => {
-        let failure;
-        try { client.off('response', responded); } catch (error) { failure ??= error; }
-        try { client.off('error', failed); } catch (error) { failure ??= error; }
-        try { client.off('close', closed); } catch (error) { failure ??= error; }
-        return failure;
+        client.off('response', responded);
+        client.off('error', failed);
+        client.off('close', closed);
       };
       clearHeaders = cleanup;
       const settle = (success, value) => {
         if (settled) {
-          if (success) {
-            try { value?.destroy?.(); } catch { /* The response has no remaining owner. */ }
-          }
+          if (success) value?.destroy?.();
           return;
         }
         settled = true;
-        const cleanupFailure = cleanup();
-        if (success && (cleanupFailure || scope.signal.aborted)) {
-          try { value?.destroy?.(); } catch (error) {
-            if (!cleanupFailure) reject(error);
-          }
-          reject(cleanupFailure ?? scope.reason ?? fault('CANCELLED'));
+        cleanup();
+        if (success && scope.signal.aborted) {
+          value?.destroy?.();
+          reject(scope.reason ?? fault('CANCELLED'));
         } else if (success) resolve(value);
-        else {
-          if (!value) value = cleanupFailure;
-          reject(value);
-        }
+        else reject(value);
       };
       const responded = value => {
         upstream = value;
@@ -304,12 +279,9 @@ async function streamCatProxy(runtime, request, response, { entry, snapshot, pat
         response, { signal: scope.signal }));
     }
   } catch (error) { failure = scope.reason ?? (controlActive ? control.reason : null) ?? error; }
-  try {
-    const cleanupFailure = clearHeaders?.();
-    failure ??= cleanupFailure;
-  } catch (error) { failure ??= error; }
-  try { if (responseListening) response.off('close', responseClosed); } catch (error) { failure ??= error; }
-  try { if (requestListening) request.off('aborted', abort); } catch (error) { failure ??= error; }
+  clearHeaders?.();
+  response.off('close', responseClosed);
+  request.off('aborted', abort);
   control.close();
   scope.close();
   try { await resources.close(); }
@@ -319,6 +291,6 @@ async function streamCatProxy(runtime, request, response, { entry, snapshot, pat
     runtime.proxyCloseFailure ??= cleanupFailure;
     failure = cleanupFailure;
   }
-  try { client?.off('socket', socketAssigned); } catch (error) { failure ??= error; }
+  client?.off('socket', socketAssigned);
   if (failure) throw failure;
 }

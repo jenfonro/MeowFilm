@@ -41,7 +41,7 @@
 - 自动与手动调用继续核对 installation、generation、site 和录音；HTTP 音频升级 HTTPS，不新增 ATS 豁免，实测音质不由请求推断。
 - `MusicNativeLyrics` 通过共同平台 client 消费规范歌词；通用时间轴和呈现仍在原生，脚本 lyric 的既有回退继续经 `NativeMusicScriptService`。专有格式转换和平台 HTTP 不在 Swift 重复实现。
 - App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与公共运行器；aggregate 的九模块和方法见[运行器装配](../runtime/music-platform.md)。原生官方平台业务借用同一个 runtime，第三方音乐脚本仍按实际调用／检测执行。
-- 公共运行器启动失败会使平台联网请求及脚本不可用，但不改写原生曲库或凭据；关闭／不可恢复退出后本次运行不自动重启。音乐脚本服务关闭只取消并排空自身调用，不向共享运行器重复发送模块关闭。App 退役时同时停止运行器与其借用者，运行器统一关闭模块、listener、工作线程及启动通道，并等待 `node_start` 返回；HTTP 成功回执本身不代表 Node 已退出。风险及独立诊断工具见[运行底座预检](runtime-preflight.md)。
+- 公共运行器启动失败会使平台联网请求及脚本不可用，但不改写原生曲库或凭据；关闭／不可恢复退出后本次运行不自动重启。音乐脚本服务关闭只取消并排空自身调用，不向共享运行器重复发送模块关闭。App 退役时同时停止运行器与其借用者，运行器统一关闭模块、listener、工作线程及启动通道，并等待 `node_start` 返回；HTTP 成功回执本身不代表 Node 已退出。
 
 ## 曲库与网络歌单
 
@@ -156,7 +156,7 @@ library／queue／history／playback／feedback／fmSelections／catalogSource �
 
 目录以固定 `sections/layout` 投影当前 items 与 tabs，不依据成员重新分类。缺少卡片身份、count、预览等字段只影响对应材料；歌曲无法采用不删除父卡，section 错误与已返回内容分别保留，不以根结构或非空全坏条件拒绝普通内容。详情 sourcePositions 只转换实际歌曲对应位置，未使用尾项不参与判断。非法 JSON、通信、账号与实际存储失败仍明确报告。
 
-`MusicServing` 保留原生业务与播放接口；`MusicPlatformClient` 借用 `RuntimeHTTPClient`，平台结果由当前 DTO／字段消费者映射。静态边界、原生编译与 `--debug` 实跑验证需分别取得证据，不代替真实设备运行。
+`NativeMusicService` 提供原生业务与播放实现（由 `MeowMusicFeature` 直接依赖消费）；`MusicPlatformClient` 借用 `RuntimeHTTPClient`，平台结果由当前 DTO／字段消费者映射。静态边界、原生编译与 `--debug` 实跑验证需分别取得证据，不代替真实设备运行。
 
 ## 原生播放反馈事实与生命周期
 
@@ -194,13 +194,11 @@ library／queue／history／playback／feedback／fmSelections／catalogSource �
 
 Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite typed fields、credential lease 与最终撤销。候选认证和外部文件经当前 Node account ports 交接。实际 publication／close 仍等待物理工作，不把页面取消当作写回滚；账号并发收口与真实登录流程需在 `--debug` 与实网运行中分别验证。
 
-## 设置保存回执
+## 设置保存与本地持久化
 
-外观、音乐搜索偏好、音质、官方源、metadata、首页来源、播放反馈、自动同步选择与账号凭据均由对应原生 owner 保存在共享 SQLite typed rows/relations 中，具体保护见[本地存储](storage.md)。这些存储入口不通过运行器，本地设置保存回执不等待歌词读取、账号绑定或后续同步。账号资料补全和真实同步仍是各自 owner 的在线业务；音乐脚本的安装、来源及执行仍归运行器，不迁入这份原生设置。配置与执行的共同边界见[设置存储契约](../common/settings-storage.md)。
+外观、音乐搜索偏好、音质、官方源、metadata、首页来源、播放反馈、自动同步选择与账号凭据均由对应原生 owner 保存在共享 SQLite typed rows/relations 中，具体保护见[本地存储](storage.md)。这些存储入口为进程内 SQLite 事务，不通过运行器，本地设置保存回执不等待歌词读取、账号绑定或后续同步。账号资料补全和真实同步仍是各自 owner 的在线业务；音乐脚本的安装、来源及执行仍归运行器，不迁入这份原生设置。配置与执行的共同边界见[设置存储契约](../common/settings-storage.md)。
 
-`MusicSettingsReceiptOwner` 由稳定原生存储范围持有，公开 `begin/settle/submit/flush`，`unknown` 由 Coordinator 接到现有全局错误呈现。quality、official、metadata、home、feedback、自动同步和脚本设置使用各自字段 key；FM 交回真实设置范围。共同结算及因果规则见[设置回执](../common/music/settings-receipts.md)。
-
-`MusicViewModel.updateSettings` 保留真实提交后的权威状态回读及失败回执；活跃歌曲的歌词刷新经 `beginPlaybackMetadata(refreshSources: true)` 交给既有 `playbackMetadata`，不等待其 `flush`。禁用歌词使旧结果失效；歌词读取、缓存及关闭时的取消／实际排空仍由原 metadata owner 管理，不因保存提前结算而省略。
+`MusicViewModel.updateSettings` 保留真实提交后的权威状态回读；活跃歌曲的歌词刷新经 `beginPlaybackMetadata(refreshSources: true)` 交给既有 `playbackMetadata`，不等待其 `flush`。禁用歌词使旧结果失效；歌词读取、缓存及关闭时的取消／实际排空仍由原 metadata owner 管理，不因保存提前结算而省略。
 
 `saveAutomaticLibrarySync` 在原生 CAS 后返回 `MusicAutomaticLibrarySyncSaveResult`：已提交的 `preferences` 与独立的 `synchronization: Task<Result<MusicLibrarySyncState, MusicServiceError>, Never>`。`MusicLibrarySyncViewModel` 的设置回执与 `busy` 只随本地提交结算，另行观察同步句柄；仅当前页面代次与偏好 revision 仍匹配时发布业务状态／错误并调用原 `onLibraryChanged`。页面离开只停止该观察，不取消已接受的同步，也不向失效页面发布迟到错误。
 

@@ -10,6 +10,9 @@ internal static class FilmRulesStore
     internal static (FilmRuleSet? Rules, StorageRevision Revision) Read(DatabaseSession db)
     {
         var revision = db.Revision(Owner);
+        if (revision == StorageRevision.Empty)
+            return (null, revision);
+
         var rows = db.Query("""
             SELECT group_name,pattern,replacement,flags
             FROM film_rules
@@ -20,12 +23,6 @@ internal static class FilmRulesStore
                 Pattern: row.GetString(1),
                 Replacement: row.GetNullableString(2),
                 Flags: row.GetNullableString(3)));
-
-        if (revision == StorageRevision.Empty)
-        {
-            if (rows.Count > 0) throw new StorageException(StorageError.Corrupt);
-            return (null, revision);
-        }
 
         var episodeClean = new List<string>();
         var episodeRules = new List<FilmMatchRule>();

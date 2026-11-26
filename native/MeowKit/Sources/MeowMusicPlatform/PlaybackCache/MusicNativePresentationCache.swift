@@ -1,7 +1,6 @@
 import Foundation
 import MeowDebug
 import MeowUI
-import MeowMusicFeature
 import MeowStorage
 
 private final class PresentationCacheRevisions: @unchecked Sendable {
@@ -37,7 +36,7 @@ private final class PresentationCacheRevisions: @unchecked Sendable {
 /// URL-indexed original image files and typed lyric lines/words in the evictable cache database.
 /// Aligned across iOS and Windows: 128 MiB shared budget, 30-day TTL, 4 MiB image cap, 1 MiB lyric cap.
 /// Disk I/O always executes outside SQLite write transactions.
-public actor MusicNativePresentationCache: MusicPresentationCaching {
+public actor MusicNativePresentationCache: ArtworkByteCaching {
     public static let lifetime: TimeInterval = 30 * 86_400
     public static let capacityBytes: Int64 = 128 * 1024 * 1024
     public static let maximumImageBytes = 4 * 1024 * 1024
@@ -331,7 +330,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
                             words: words
                         ))
                     }
-                    guard !lines.isEmpty, Self.usableLyrics(lines) else { return nil }
+                    guard !lines.isEmpty else { return nil }
                     return .init(songID: songID, sourceKey: sourceKey, lines: lines)
                 }
             }

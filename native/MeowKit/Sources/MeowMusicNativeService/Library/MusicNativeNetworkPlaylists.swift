@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 enum MusicNativeNetworkPlaylists {
     static func id(platform: String, remoteID: String) -> String {
@@ -27,12 +27,10 @@ enum MusicNativeNetworkPlaylists {
     }
 }
 
-extension NativeMusicService: MusicNetworkPlaylistServing {
+extension NativeMusicService {
     func networkCollectionDTO(_ row: MusicNetworkReferenceRecord) throws -> MusicCollection {
         guard let platform = MusicPublicBrowsePlatform(rawValue: row.platform),
-              !row.remoteID.isEmpty,
-              row.id == MusicNativeNetworkPlaylists.id(platform: platform.rawValue, remoteID: row.remoteID),
-              (0...musicMaxSafeInteger).contains(row.revision) else { throw MusicServiceError.corruptStorage }
+              !row.remoteID.isEmpty else { throw MusicServiceError.corruptStorage }
         return .init(
             id: row.id,
             title: row.name,
@@ -48,18 +46,10 @@ extension NativeMusicService: MusicNetworkPlaylistServing {
                                     intent: MusicQueueAuthorization) throws -> MusicCollection {
         try check(); try intent.check(); try requirePlatform(collection.platform.rawValue)
         let row = try MusicNativeNetworkPlaylists.row(collection)
-        let current = try read().library.networkReferences
-        let matches = current.filter { $0.id == row.id }
-        try musicRequire(matches.count <= 1, .corruptStorage)
-        if let existing = matches.first, existing.present {
-            return try intent.perform { try networkCollectionDTO(existing) }
-        }
         let result = try intent.perform {
             try transaction([.library]) { d -> (MusicCollection, Bool) in
-                try musicRequire(d.library.networkReferences.filter { $0.id == row.id }.count <= 1, .corruptStorage)
                 if let index = d.library.networkReferences.firstIndex(where: { $0.id == row.id }) {
                     var existing = d.library.networkReferences[index]
-                    _ = try networkCollectionDTO(existing)
                     if existing.present { return (try networkCollectionDTO(existing), false) }
                     existing.present = true
                     existing.pending = MusicAccountPlatform(rawValue: existing.platform) != nil
@@ -92,7 +82,6 @@ extension NativeMusicService: MusicNetworkPlaylistServing {
         try musicRequire(requested.networkReference != nil, .invalidRequest)
         let enabled = try intent.perform {
             try transaction([.library]) { d -> Bool in
-                try musicRequire(d.library.networkReferences.filter { $0.id == requested.id }.count <= 1, .corruptStorage)
                 guard let index = d.library.networkReferences.firstIndex(where: { $0.id == requested.id && $0.present }) else {
                     throw MusicServiceError.notFound
                 }

@@ -1,5 +1,8 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.Recommendations;
+using MeowFilm.Media;
 
 namespace MeowFilm.Capabilities;
 
@@ -34,7 +37,6 @@ public sealed partial class MusicQueueController : MusicController
 {
     private readonly MusicPlaybackController playbackController;
     private readonly MusicAccountsController accounts;
-    private readonly MusicCatalogActionState catalogActions;
     private readonly ObservableCollection<MusicQueueSurfaceRow> queueSurfaceRows = [];
     private CancellationTokenSource? queueSurfaceCancellation;
     private Task? queueSurfacePending;
@@ -51,17 +53,67 @@ public sealed partial class MusicQueueController : MusicController
     private bool queueSurfaceOpen;
 
     internal MusicQueueController(MusicRuntimeContext ctx, MusicPlaybackController playbackController,
-        MusicAccountsController accounts, MusicCatalogActionState catalogActions) : base(ctx)
+        MusicAccountsController accounts) : base(ctx)
     {
         this.playbackController = playbackController;
         this.accounts = accounts;
-        this.catalogActions = catalogActions;
         QueueSurfaceRows = new(queueSurfaceRows);
+        application.Library.QueueChanged += OnLibraryQueueChanged;
+        playback.PropertyChanged += OnPlaybackDeviceChanged;
+        playbackController.PropertyChanged += OnPlaybackControllerChanged;
+        accounts.PropertyChanged += OnAccountsPropertyChanged;
         InitializeRecommendations();
     }
 
-    internal event Func<CancellationToken, Task>? PlaylistsChanged;
-    internal event Action<Exception>? RecommendationActionError;
+    private void OnLibraryQueueChanged(MusicRecommendationQueueChange change)
+    {
+        if (ctx.Dispatcher.IsClosing) return;
+        _ = ctx.Dispatcher.EnqueueAsync(() =>
+        {
+            if (!stopping && !disposed) InvalidateQueueSurface();
+        });
+    }
+
+    private void OnPlaybackDeviceChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (stopping || disposed) return;
+        if (e.PropertyName is not (nameof(NativeAudioPlayback.PositionSeconds) or nameof(NativeAudioPlayback.Volume) or nameof(NativeAudioPlayback.IsBuffering)))
+        {
+            ObserveRecommendationPlayback();
+            NotifyRecommendationPlaybackChanged();
+        }
+    }
+
+    private void OnPlaybackControllerChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (stopping || disposed) return;
+        switch (e.PropertyName)
+        {
+            case nameof(MusicPlaybackController.CurrentTrackIdentity):
+            case nameof(MusicPlaybackController.PlaybackPresentationKey):
+                RefreshQueueSurfaceCurrent();
+                Changed(nameof(HasCurrentRecommendationIdentity));
+                Changed(nameof(PlaybackSourceActionKey));
+                NotifyRecommendationPlaybackChanged();
+                ObserveRecommendationPlayback();
+                break;
+            case nameof(MusicPlaybackController.Mode):
+                NotifyModeChanged();
+                break;
+            case nameof(MusicPlaybackController.QueueSaved):
+                NotifyPlaybackModeAvailability();
+                break;
+            case nameof(MusicPlaybackController.CanPlay):
+                NotifyRecommendationPlaybackChanged();
+                break;
+        }
+    }
+
+    private void OnAccountsPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (!stopping && !disposed && e.PropertyName == nameof(MusicAccountsController.Accounts))
+            RecommendationBindings();
+    }
 
     public ReadOnlyObservableCollection<MusicQueueSurfaceRow> QueueSurfaceRows { get; }
     public string QueueSurfaceCountText => queueSurfaceTotal.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -175,7 +227,7 @@ public sealed partial class MusicQueueController : MusicController
                         queueSurfaceActiveReloadMutation = mutation;
                         try
                         {
-                            var reply = await application.GetQueueAsync(0, 100, request.Token);
+                            var reply = await application.Library.GetQueueAsync(0, 100, request.Token);
                             request.Token.ThrowIfCancellationRequested();
                             if (stopping || generation != queueSurfaceGeneration || !queueSurfaceOpen) return;
                             // A newer queue generation arrived while this read was physical.
@@ -205,7 +257,7 @@ public sealed partial class MusicQueueController : MusicController
                         var offset = queueSurfaceRows.Count;
                         var expectedTotal = queueSurfaceTotal;
                         var expectedVersion = queueSurfaceVersion;
-                        var reply = await application.GetQueueAsync(offset, 100, request.Token);
+                        var reply = await application.Library.GetQueueAsync(offset, 100, request.Token);
                         request.Token.ThrowIfCancellationRequested();
                         if (stopping || generation != queueSurfaceGeneration || !queueSurfaceOpen) return;
                         var total = reply.Total;
@@ -341,11 +393,11 @@ public sealed partial class MusicQueueController : MusicController
     {
         if (!queueSurfaceRows.Contains(row) || string.IsNullOrEmpty(row.EntryId)) return Task.CompletedTask;
         playbackController.TrackMusicRecovery(playbackController.RetireMusicRecovery());
-        catalogActions.Invalidate();
+        ctx.InvalidateCatalogAction();
         playbackController.CancelOnline();
         return RunPlaybackActionAsync(async generation =>
         {
-            await playbackController.QueueCallAsync(token => application.SelectQueueEntryAsync(row.EntryId, ct: token));
+            await playbackController.QueueCallAsync(token => application.Library.SelectQueueEntryAsync(row.EntryId, cancellationToken: token));
             await playbackController.ReadQueue(lifetime.Token);
             if (generation != ctx.PlaybackActionGeneration) return;
             await playbackController.StartCurrent(lifetime.Token, admission: () => generation == ctx.PlaybackActionGeneration);
@@ -359,7 +411,7 @@ public sealed partial class MusicQueueController : MusicController
         return RunAsync(async () =>
         {
             var playing = playback.OwnerId == Id && playback.IsPlaying;
-            var reply = await playbackController.QueueCallAsync(token => application.RemoveQueueEntryAsync(row.EntryId, token));
+            var reply = await playbackController.QueueCallAsync(token => application.Library.RemoveQueueEntryAsync(row.EntryId, token));
             var removedCurrent = reply.WasCurrent;
             if (removedCurrent) await playbackController.StopOwnedPlayback();
             await playbackController.ReadQueue(lifetime.Token);
@@ -374,7 +426,7 @@ public sealed partial class MusicQueueController : MusicController
         return RunAsync(async () =>
         {
             if (!await ConfirmAsync("清空播放列表？", "播放列表", lifetime.Token)) return;
-            await playbackController.QueueCallAsync(token => application.ClearQueueAsync(token), clearsSearchRecommendation: true);
+            await playbackController.QueueCallAsync(token => application.Library.ClearQueueAsync(token), clearsSearchRecommendation: true);
             await playbackController.StopOwnedPlayback();
             await playbackController.ReadQueue(lifetime.Token);
             InvalidateQueueSurface();
@@ -391,7 +443,7 @@ public sealed partial class MusicQueueController : MusicController
             int offset = 0, total;
             do
             {
-                var page = await application.GetQueueAsync(offset, 100, lifetime.Token);
+                var page = await application.Library.GetQueueAsync(offset, 100, lifetime.Token);
                 var version = page.Version;
                 if (queueVersion is not null && queueVersion != version)
                     throw new MusicOperationException("REVISION_CONFLICT");
@@ -401,14 +453,14 @@ public sealed partial class MusicQueueController : MusicController
                 offset = songs.Count;
             } while (offset < total);
 
-            var favorite = await application.GetCollectionDetailAsync("favorites", 0, 1, lifetime.Token);
+            var favorite = await application.Library.GetCollectionDetailAsync("favorites", 0, 1, lifetime.Token);
             var revision = favorite.Collection.Revision;
             foreach (var chunk in songs.Chunk(1000))
             {
-                var reply = await application.AddSongsToCollectionAsync("favorites", revision, chunk, lifetime.Token);
+                var reply = await application.Library.AddSongsToCollectionAsync("favorites", revision, chunk, lifetime.Token);
                 revision = reply.Revision;
             }
-            if (PlaylistsChanged is { } changed) await changed(lifetime.Token);
+            await ctx.RefreshLibraryAfterMutationAsync(ctx.LoadGeneration, reloadPage: false);
         });
     }
 

@@ -81,7 +81,7 @@ extension PlaybackEngine {
             // First-frame preview immediately displays and confirms actual AVSampleBufferDisplayLayer enqueue.
             if needFirstFrame {
                 var retryCount = 0
-                while !interruptBox.isAborted && currentVideoSerialSnapshot() == curSerial {
+                while !interruptBox.isAborted && currentVideoSerial == curSerial {
                     pthread_mutex_lock(&stateMutex)
                     if firstFramePreviewDone {
                         pthread_mutex_unlock(&stateMutex)
@@ -212,25 +212,10 @@ extension PlaybackEngine {
     // MARK: - MasterClock & Frame Queue Helpers
 
     func waitOnStateCond(seconds: Double, expectedVideoSerial: Int) {
-        let clamped = max(0.0005, min(seconds, 0.25))
-        var tv = timeval()
-        gettimeofday(&tv, nil)
-        let addNsec = Int64(clamped * 1_000_000_000)
-        var sec = Int(tv.tv_sec) + Int(addNsec / 1_000_000_000)
-        var nsec = Int(tv.tv_usec) * 1000 + Int(addNsec % 1_000_000_000)
-        if nsec >= 1_000_000_000 {
-            sec += 1
-            nsec -= 1_000_000_000
-        }
-        var ts = timespec(tv_sec: sec, tv_nsec: nsec)
-        pthread_mutex_lock(&stateMutex)
-        if !interruptBox.isAborted && videoSerial == expectedVideoSerial {
-            pthread_cond_timedwait(&stateCond, &stateMutex, &ts)
-        }
-        pthread_mutex_unlock(&stateMutex)
+        waitOnStateCond(seconds: seconds) { videoSerial == expectedVideoSerial }
     }
 
-    func waitOnStateCondForAudio(seconds: Double, expectedAudioSerial: Int) {
+    func waitOnStateCond(seconds: Double, while predicate: () -> Bool) {
         let clamped = max(0.0005, min(seconds, 0.25))
         var tv = timeval()
         gettimeofday(&tv, nil)
@@ -243,7 +228,7 @@ extension PlaybackEngine {
         }
         var ts = timespec(tv_sec: sec, tv_nsec: nsec)
         pthread_mutex_lock(&stateMutex)
-        if !interruptBox.isAborted && audioSerial == expectedAudioSerial {
+        if !interruptBox.isAborted && predicate() {
             pthread_cond_timedwait(&stateCond, &stateMutex, &ts)
         }
         pthread_mutex_unlock(&stateMutex)
@@ -285,10 +270,10 @@ extension PlaybackEngine {
     func pushDecodedFrame(_ frame: DecodedVideoFrame) {
         pthread_mutex_lock(&frameMutex)
         defer { pthread_mutex_unlock(&frameMutex) }
-        while !interruptBox.isAborted && frameQueue.count >= maxVideoFrames && currentVideoSerialSnapshot() == frame.serial {
+        while !interruptBox.isAborted && frameQueue.count >= maxVideoFrames && currentVideoSerial == frame.serial {
             pthread_cond_wait(&frameNotFull, &frameMutex)
         }
-        guard !interruptBox.isAborted, currentVideoSerialSnapshot() == frame.serial else { return }
+        guard !interruptBox.isAborted, currentVideoSerial == frame.serial else { return }
         frameQueue.append(frame)
         pthread_cond_signal(&frameNotEmpty)
     }
@@ -308,7 +293,7 @@ extension PlaybackEngine {
                 frameQueue.removeFirst()
                 pthread_cond_signal(&frameNotFull)
             }
-            if !frameQueue.isEmpty || videoDecodeEOF || currentVideoSerialSnapshot() != expectedSerial {
+            if !frameQueue.isEmpty || videoDecodeEOF || currentVideoSerial != expectedSerial {
                 break
             }
             pthread_mutex_lock(&stateMutex)
@@ -331,7 +316,7 @@ extension PlaybackEngine {
             }
             pthread_cond_wait(&frameNotEmpty, &frameMutex)
         }
-        if interruptBox.isAborted || currentVideoSerialSnapshot() != expectedSerial {
+        if interruptBox.isAborted || currentVideoSerial != expectedSerial {
             pthread_mutex_unlock(&frameMutex)
             reachedEOF = false
             return nil

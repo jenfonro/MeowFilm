@@ -33,13 +33,13 @@ extension MeowfilmAssembly {
                           request: @escaping @Sendable () async throws -> FilmPlaybackRequest) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
         if filmMedia == nil {
-            let media = try MeowfilmFilmMedia(playback: playback, preferences: playerPreferences, willCommit: { [weak self] in
+            let media = try FilmPlaybackMedia(playback: playback, preferences: playerPreferences, willCommit: { [weak self] in
                 self?.music?.mediaHandoffCompletion()
             })
             media.restoreUI = restoreFilmPlaybackUI
             filmMedia = media
         }
-        let binding = MeowfilmFilmMedia.Session(owner: filmMedia!)
+        let binding = FilmPlaybackMedia.Session(owner: filmMedia!)
         let model = FilmPlaybackModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
         }, media: binding, searchContext: searchContext, playerPreferences: playerPreferences,

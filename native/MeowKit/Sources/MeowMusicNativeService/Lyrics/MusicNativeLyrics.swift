@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Native generic text timing, from iWebPlus b900c259 lyric-timing.js.
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 
 enum MusicNativeLyricsParser {
     struct Match {

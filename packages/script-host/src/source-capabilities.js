@@ -285,12 +285,6 @@ export function createNodeSourceCapabilities({
   onProfileChange,
 } = {}) {
   storage ??= memoryStorage(readStorage);
-  requireValue(typeof network === 'function');
-  requireValue(storage && ['get', 'set', 'delete', 'releaseProfiles']
-    .every(name => typeof storage[name] === 'function'));
-  requireValue(web === undefined || typeof web === 'function');
-  requireValue(onDiagnostic === undefined || typeof onDiagnostic === 'function');
-  requireValue(onProfileChange === undefined || typeof onProfileChange === 'function');
   const cookies = new ScopedCookieJar();
   const virtual = new Map();
   const mutations = new Map();
@@ -440,38 +434,22 @@ export function createNodeSourceCapabilities({
             if (activeSignal.aborted) throw safeError(activeSignal.reason, 'CANCELLED');
             const envelope = result && typeof result === 'object' && Object.hasOwn(result, 'value') &&
               Object.hasOwn(result, 'url') && Object.hasOwn(result, 'headers');
-            if (envelope) requireValue(typeof result.url === 'string' && result.headers &&
-              typeof result.headers === 'object' && !Array.isArray(result.headers), 'INVALID_RESPONSE');
             const changes = [];
             if (result && typeof result === 'object' && result.headers) {
               const headers = responseHeaders(result.headers);
               if (headers['set-cookie']?.length && (result.url || url)) {
-                let targetUrl;
-                try { targetUrl = validateURL(result.url || url); }
-                catch { throw fault('INVALID_RESPONSE'); }
-                changes.push({ url: targetUrl, values: headers['set-cookie'] });
+                changes.push({ url: validateURL(result.url || url), values: headers['set-cookie'] });
               }
             }
-            if (envelope && Object.hasOwn(result, 'cookieChanges')) {
-              requireValue(Array.isArray(result.cookieChanges), 'INVALID_RESPONSE');
+            if (envelope && Array.isArray(result.cookieChanges)) {
               for (const change of result.cookieChanges) {
-                requireValue(change && typeof change === 'object' && !Array.isArray(change) &&
-                  typeof change.url === 'string' && typeof change.setCookie === 'string', 'INVALID_RESPONSE');
-                let origin;
-                try { origin = validateURL(change.url); }
-                catch { throw fault('INVALID_RESPONSE'); }
-                changes.push({ url: origin, values: [change.setCookie] });
+                changes.push({ url: validateURL(change.url), values: [change.setCookie] });
               }
-            }
-            if (envelope) {
-              try { validateURL(result.url); }
-              catch { throw fault('INVALID_RESPONSE'); }
             }
             if (changes.length) await mutate(httpProfile, activeSignal, () => {
               for (const change of changes) cookies.set(httpProfile, change.url, change.values);
             });
-            if (envelope) return result.value;
-            return result;
+            return envelope ? result.value : result;
           }
           case 'virtual.register': {
             const key = JSON.stringify([input.profile, input.route]);

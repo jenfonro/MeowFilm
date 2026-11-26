@@ -29,9 +29,9 @@
 - 写入在同一 owner 的磁盘串行边界内读取当前账号行、核对预期账号及 owner revision 并 CAS；安全保存确认后才向共同 Node 发布当前授权。
 - 原生持久化归口 `MeowFilm.Capabilities/Music/Accounts/Storage/`：`MusicAccountRepository` 直接读写强类型 `windows_music_accounts`（含登出后保留单调 `generation` 的可空凭据列与 `CHECK` 约束），`AccountDetailsStore` 直接读写 `windows_music_account_details` 与 `windows_music_account_audio_levels`，不再经 JSON 文档中转。
 - 真实候选认证成功后由账号 CAS 保存凭据并发布会话；资料／权益为独立展示观察，不作为普通平台请求或登录的额外证明。
-- 冲突返回 `STORAGE_CONFLICT`；提交回执不可信时返回 `COMMIT_UNKNOWN`。两者都不自动重试、不重放登录或覆盖另一 writer。
-- 重新观察持久状态必须创建或使用新的明确读取操作；失败 owner 不通过“丢弃 pending”恢复为可写状态。
-- 用户取消只取消尚未进入原子提交点的工作；已确认提交不能由取消推断回滚。
+- 冲突返回 `STORAGE_CONFLICT`；事务失败原子回滚，不自动重试、不重放登录或覆盖另一 writer。
+- 重新观察持久状态必须创建或使用新的明确读取操作。
+- 用户取消只取消尚未进入原子提交点的工作。
 
 ## 账号详情
 
@@ -52,4 +52,4 @@
 
 文件格式和冲突策略见[共同账号文件契约](../common/music/account-transfer.md)。JSON 是用户显式选择的交换格式，不是账号存储格式；传输不复制本地 scope、generation 或详情缓存。
 
-文件导入的 owner 计划保存准备时账号值 fingerprint 与授权 epoch。隔离候选验证失败不会推进 epoch、写入账号或撤销现有 lease。提交在原存储队列中重新读取当前账号，以完整账号基线及数据库 revision CAS 防止同 generation 内容变更或另一 writer 被覆盖。成功读回后才发布原有通知；失败已知冲突保留旧授权，未知写入回执保留 Uncertain 并要求明确读取核对。取消／关闭会排空已准入写入，不以取消推断回滚，不建立跨平台事务或重放机制。
+文件导入的 owner 计划保存准备时账号值 fingerprint 与授权 epoch。隔离候选验证失败不会推进 epoch、写入账号或撤销现有 lease。提交在原存储队列中重新读取当前账号，以完整账号基线及数据库 revision CAS 防止同 generation 内容变更或另一 writer 被覆盖。提交成功后直接发布会话与通知；失败已知冲突原子回滚并保留旧授权。取消／关闭会排空已准入写入，不建立跨平台事务或重放机制。

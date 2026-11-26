@@ -35,14 +35,6 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
         transfer.exported = { [weak self] in self?.saveFile($0) }
         transfer.result = { [weak self] in self?.showTransferResult($0) }
 
-        observe(owner.accessChanges) { [weak self] in
-            guard let self, owner.isClosed else { return }
-            clearQueuedFeedback()
-            state.reconcileAccess()
-            transfer.reconcileAccess()
-            dismissPresentedOverlays()
-            render()
-        }
         observe(owner.accountChanges) { [weak self] platform in
             guard let self else { return }
             state.accountSessionChanged(platform)

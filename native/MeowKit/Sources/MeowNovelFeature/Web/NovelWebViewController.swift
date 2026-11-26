@@ -40,7 +40,16 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
             try await withCheckedThrowingContinuation { continuation in
                 completion = { continuation.resume(with: $0) }
                 modalPresentationStyle = .pageSheet
-                let accepted = host.presentPageModal(self, animated: true)
+                let accepted: Bool
+                if let page = host as? PageViewController {
+                    accepted = page.presentPageModal(self, animated: true)
+                } else if host.presentedViewController == nil, !host.isBeingPresented, !host.isBeingDismissed,
+                          host.viewIfLoaded?.window != nil {
+                    host.present(self, animated: true)
+                    accepted = presentingViewController != nil || host.presentedViewController === self
+                } else {
+                    accepted = false
+                }
                 presentationController?.delegate = self
                 if !accepted {
                     finish(.failure(CancellationError()))

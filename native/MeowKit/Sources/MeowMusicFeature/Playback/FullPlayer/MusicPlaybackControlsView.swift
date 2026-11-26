@@ -63,7 +63,6 @@ final class MusicPlaybackControlsView: UIView {
         let canReturn: Bool
         let loading: Bool
         let canRetry: Bool
-        let needsReadback: Bool
         let errorID: UUID?
         let available: Bool
     }
@@ -168,7 +167,6 @@ final class MusicPlaybackControlsView: UIView {
         subscriptions = [
             content.playbackChanges.sink { [weak self] in self?.updatePlayback() },
             content.queueChanges.sink { [weak self] in self?.updateMode() },
-            content.accessChanges.sink { [weak self] in self?.updatePlayback() },
             content.metadataChanges.sink { [weak self] in self?.updateMetadata() },
             content.favoriteChanges.sink { [weak self] in self?.updateFavorite() },
             content.appearanceChanges.sink { [weak self] in self?.applyTheme() },
@@ -423,7 +421,6 @@ final class MusicPlaybackControlsView: UIView {
             canReturn: similar?.canRestoreQueue == true,
             loading: radio?.loading == true || similar?.status == .loading || recommendations?.status == .loading,
             canRetry: similar?.canRetry == true || recommendations?.canRetry == true,
-            needsReadback: similar?.error == .commitUnconfirmed || recommendations?.error == .commitUnconfirmed || radio?.error == .commitUnconfirmed,
             errorID: similar?.errorID ?? recommendations?.errorID ?? radio?.errorID,
             available: !model.isClosed && model.current != nil && !model.isChangingSimilarMode && !model.isChangingQueueRecommendations)
     }
@@ -472,7 +469,7 @@ final class MusicPlaybackControlsView: UIView {
                     self.content.setQueueRecommendationContinue(true, snapshot: recommendations.id, expected: state.fence)
                 }
             })
-        } else if !state.activeSource && !state.canRetry && !state.needsReadback && !state.loading {
+        } else if !state.activeSource && !state.canRetry && !state.loading {
             if state.canRecommend {
                 actions.append(UIAction(title: "推荐模式", image: specialImage(.recommendations)) { [weak self] _ in
                     guard let self, self.admitsModeAction(state) else { return }

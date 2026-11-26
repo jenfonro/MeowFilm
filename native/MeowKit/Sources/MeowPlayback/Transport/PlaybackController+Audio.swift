@@ -35,7 +35,7 @@ extension PlaybackController {
         revokeVideoAdmission()
         replacementAdmission = UUID()
         replacementOwner = nil
-        lifetime.cancelPreparedAudio()
+        cancelPreparedAudio()
         failedReplacementAutoplay = false
         // Invalidate callbacks *before* removing/cancelling the old item.
         let token = state.begin(resource: resource, owner: owner, autoplay: autoplay, network: network)
@@ -143,13 +143,13 @@ extension PlaybackController {
         session.onConfigurationChange = { [weak self, weak media] in
             guard let self, let media, self.audioMedia === media,
                   self.state.accepts(generation) else { return }
-            self.lifetime.configChangeTask?.cancel()
+            self.configChangeTask?.cancel()
             // Coalesce bursty CoreAudio route/configuration changes before rebuilding the graph.
-            self.lifetime.configChangeTask = Task { @MainActor [weak self, weak media] in
+            self.configChangeTask = Task { @MainActor [weak self, weak media] in
                 do { try await Task.sleep(nanoseconds: 100_000_000) } catch { return }
                 guard !Task.isCancelled, let self, let media,
                       self.audioMedia === media, self.state.accepts(generation) else { return }
-                self.lifetime.configChangeTask = nil
+                self.configChangeTask = nil
                 DebugRuntime.log(.musicPlayback, sub: "playback.controller", event: "config_change_rebuild", level: .info, data: .object([
                     "isInterrupted": .bool(self.state.isInterrupted),
                     "shouldPlay": .bool(self.state.shouldPlay)
@@ -165,11 +165,14 @@ extension PlaybackController {
     private func prepared(resource: PlaybackResource, replacing: PlayAttempt?, owner: String,
                           autoplay: Bool) -> PlaybackPreparedReplacement {
         let media = PlaybackAudioMedia(resource: resource)
-        lifetime.preparedAudio[ObjectIdentifier(media)] = media
-        let lifetime = self.lifetime
+        preparedAudio[ObjectIdentifier(media)] = media
         return PlaybackPreparedReplacement(resource: resource, replacing: replacing, owner: owner,
             admission: replacementAdmission, autoplay: autoplay, media: media,
-            retire: { lifetime.retireAudio($0) })
+            retire: { [weak self] media in
+                if let self { return self.retireAudio(media) }
+                media.cancel()
+                return Task { try await media.close() }
+            })
     }
 
     /// The old item remains audible and commandable throughout readiness and seek.
@@ -266,7 +269,7 @@ extension PlaybackController {
         configureControls(owner: prepared.owner)
         guard state.accepts(token) else { throw NativePlaybackError.preparationFailed }
         prepared.committed = true
-        lifetime.preparedAudio[ObjectIdentifier(prepared.media)] = nil
+        preparedAudio[ObjectIdentifier(prepared.media)] = nil
         audioMedia = prepared.media
         DebugRuntime.log(.musicPlayback, sub: "playback.controller", event: "handoff_commit", level: .info, data: .object([
             "resourceId": .string(resource.id),

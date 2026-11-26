@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Identity/order semantics adapted from music-core (Apache-2.0 iWebPlus origins).
 import Foundation
-import MeowMusicFeature
+import MeowMusicPlatform
 import MeowStorage
 
 enum MusicModel {
     static let sites = ["wy", "tx", "kg", "kw", "mg"]
     static let qualityOrder = ["master", "spatial", "enhanced", "hires", "lossless", "high", "standard"]
     static let spatialOrder = ["dolby", "dts_x", "sony360", "sky", "vivid", "qq_atmos", "viper_atmos"]
-    private static let secretField = try! NSRegularExpression(
+    static let secretField = try! NSRegularExpression(
         pattern: "cookie|token|password|secret|credential|authorization|api[-_]?key",
         options: [.caseInsensitive])
     /// Platform account and playback-grant field names, compared without case
@@ -81,7 +81,7 @@ enum MusicModel {
         return try sourceKey(platform: value.platform, songmid: songmid, hash: hash, albumAudioID: albumAudioID)
     }
 
-    private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
+    static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
         expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
     }
 
@@ -207,12 +207,9 @@ enum MusicModel {
         )
     }
 
-    static func sources(_ song: MusicSongRecord) throws -> [MusicNativeSource] {
-        var seen = Set<String>()
-        return try song.sources.map { row in
-            let key = try sourceKey(row)
-            try musicRequire(key == row.sourceKey && seen.insert(key).inserted, .nativeIDConflict)
-            return .init(
+    static func sources(_ song: MusicSongRecord) -> [MusicNativeSource] {
+        song.sources.map { row in
+            .init(
                 sourceKey: row.sourceKey,
                 platform: row.infoSource.isEmpty ? row.platform : row.infoSource,
                 nativeId: row.resolvedSongmid
@@ -220,15 +217,15 @@ enum MusicModel {
         }
     }
 
-    static func track(_ song: MusicSongRecord, _ ref: MusicReference, sourcePosition: Int? = nil) throws -> MusicRemoteTrack {
-        return .init(
+    static func track(_ song: MusicSongRecord, _ ref: MusicReference, sourcePosition: Int? = nil) -> MusicRemoteTrack {
+        .init(
             ref: ref,
             songId: song.songID,
             title: song.title,
             artist: song.artist,
             album: song.album,
             duration: song.effectiveDuration,
-            sources: try sources(song),
+            sources: sources(song),
             artwork: artworkURL(song.coverURL),
             artistNames: song.artistNames.isEmpty ? nil : song.artistNames,
             sourcePosition: sourcePosition

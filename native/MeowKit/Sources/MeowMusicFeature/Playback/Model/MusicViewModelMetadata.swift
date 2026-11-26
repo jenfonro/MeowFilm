@@ -9,7 +9,7 @@ import MeowStorage
 extension MusicViewModel {
     func observeSongRepository() {
         songRepositoryObservation?.cancel(); songRepositoryObservation = nil
-        guard !isClosed, let repository = service as? any MusicSongRepositoryReading else { return }
+        guard !isClosed, let repository = service else { return }
         let access = lifecycle
         songRepositoryObservation = Task { [weak self] in
             let changes = await repository.songChanges()
@@ -20,7 +20,7 @@ extension MusicViewModel {
             }
         }
     }
-    func refreshRepositoryProjections(_ repository: any MusicSongRepositoryReading, access: UUID, changed: Set<String>? = nil) async {
+    func refreshRepositoryProjections(_ repository: NativeMusicService, access: UUID, changed: Set<String>? = nil) async {
         guard !Task.isCancelled, !isClosed, lifecycle == access else { return }
         let projection = UUID()
         let referenced = Set(queue.map { $0.track.songId } + playedSongs.map { $0.track.songId })
@@ -55,10 +55,10 @@ extension MusicViewModel {
             metadataState.artworkURL = value.artwork; metadataState.track = value.track
         }
     }
-    public func setPresentationCache(_ cache: (any MusicPresentationCaching)?) {
+    public func setPresentationCache(_ cache: MusicNativePresentationCache?) {
         playbackMetadata.setDisplayCache(cache)
         #if os(iOS)
-        if let cache { artworkImages.configure(cache: cache, selector: service as? any MusicArtworkSelecting) }
+        if let cache { artworkImages.configure(cache: cache, selector: service) }
         #endif
     }
     public func artworkFailed(_ url: URL?) { playbackMetadata.artworkFailed(url) }

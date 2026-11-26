@@ -95,7 +95,6 @@ public final class MusicPlayerContentModel {
     private let seekUpdates = PassthroughSubject<Void, Never>()
     private let favoriteUpdates = PassthroughSubject<Void, Never>()
     private let dockUpdates = PassthroughSubject<Void, Never>()
-    private let accessUpdates = PassthroughSubject<Void, Never>()
 
     var playbackChanges: AnyPublisher<Void, Never> { playbackUpdates.eraseToAnyPublisher() }
     var queueChanges: AnyPublisher<Void, Never> { queueUpdates.eraseToAnyPublisher() }
@@ -107,7 +106,6 @@ public final class MusicPlayerContentModel {
     var seekChanges: AnyPublisher<Void, Never> { seekUpdates.eraseToAnyPublisher() }
     var favoriteChanges: AnyPublisher<Void, Never> { favoriteUpdates.eraseToAnyPublisher() }
     var dockChanges: AnyPublisher<Void, Never> { dockUpdates.eraseToAnyPublisher() }
-    var accessChanges: AnyPublisher<Void, Never> { accessUpdates.eraseToAnyPublisher() }
     var dockExpanded: Bool { mini.expanded }
     var artwork: UIImage? {
         artworkIdentity?.url.flatMap { images[$0] } ??
@@ -362,7 +360,6 @@ public final class MusicPlayerContentModel {
         }
         accessGeneration = model.searchAccessGeneration
         reconcilePlayback()
-        accessUpdates.send()
     }
 
     private func reconcilePlayback() {

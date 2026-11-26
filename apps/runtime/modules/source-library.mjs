@@ -31,10 +31,9 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
   const native = configurationOwner === 'native';
   const disk = dataRoot === undefined ? null : new SourceStorage(dataRoot, native);
   const records = new Map(), states = new Map(), images = new Map(), streams = new Set();
-  const sourceLeases = new Map();
   const operations = new InstallationOperations();
   const memoryReaderValues = disk ? null : new Map();
-  let privateRecords = new Map(), nativeConfiguration = new Map(), nativeRevision = 0, nativeSnapshotHash;
+  let privateRecords = new Map(), nativeConfiguration = new Map(), nativeRevision = 0;
   let readFailure, imageBytes = 0;
 
   const require = (value, code = 'INVALID_REQUEST') => { if (!value) throw fail(code); };
@@ -384,21 +383,8 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
   async function applyNative(params, signal) {
     await access(signal);
     const next = validateNativeSnapshot(params);
-    const signature = hash(JSON.stringify([...next.values()].map(item =>
-      configurationKeys.map(key => item[key]))));
     require(params.revision >= nativeRevision, 'STALE_SOURCE');
-    require(params.revision !== nativeRevision || signature === nativeSnapshotHash, 'SOURCE_INTEGRITY');
-    const leases = new Map();
-    for (const item of next.values()) {
-      const signature = hash(JSON.stringify(configurationKeys.filter(key => key !== 'revision')
-        .map(key => item[key])));
-      const old = sourceLeases.get(item.installationId);
-      require(!old || item.revision >= old.revision, 'STALE_SOURCE');
-      require(!old || item.revision !== old.revision || signature === old.signature, 'SOURCE_INTEGRITY');
-      leases.set(item.installationId, { revision: item.revision, signature });
-    }
-    nativeRevision = params.revision; nativeSnapshotHash = signature; nativeConfiguration = next;
-    for (const [id, lease] of leases) sourceLeases.set(id, lease);
+    nativeRevision = params.revision; nativeConfiguration = next;
     // Interrupt the captured initialization before waiting for library management.
     for (const id of states.keys()) {
       if (sameConfiguration(records.get(id), next.get(id))) continue;

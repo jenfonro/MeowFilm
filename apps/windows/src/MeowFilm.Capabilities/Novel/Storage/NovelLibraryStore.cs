@@ -440,26 +440,16 @@ internal static class NovelLibraryStore
         }
         var result = new Dictionary<string, StorageValue>(grouped.Count, StringComparer.Ordinal);
         foreach (var (bookId, rows) in grouped)
-        {
-            var decoded = TypedValueNodes.Decode(rows);
-            if (decoded is null || decoded.Kind != StorageValueKind.Object)
-                throw new StorageException(StorageError.Corrupt);
-            result[bookId] = decoded;
-        }
+            if (TypedValueNodes.Decode(rows) is { Kind: StorageValueKind.Object } decoded)
+                result[bookId] = decoded;
         return result;
     }
 
     private static NovelEntryRecord ReadEntry(Microsoft.Data.Sqlite.SqliteDataReader row, StorageValue? extras)
     {
-        int? chapterCount = row.GetNullableInt32(5);
-        string? contentSignature = row.GetNullableString(6);
-        long? bookRevision = row.GetNullableInt64(8);
-        if (chapterCount is null || contentSignature is null || bookRevision is null)
-            throw new StorageException(StorageError.Corrupt);
-
         var book = new NovelBookRecord(
             row.GetString(7),
-            bookRevision.Value,
+            row.GetNullableInt64(8) ?? 1,
             row.GetString(9),
             row.GetString(10),
             row.GetString(11),
@@ -475,19 +465,16 @@ internal static class NovelLibraryStore
 
         NovelAnchor? anchor = null;
         long? readAtMs = null;
-        var aUrl = row.GetNullableString(16);
-        var aTitle = row.GetNullableString(17);
-        var aIdx = row.GetNullableInt32(18);
-        var aBlk = row.GetNullableInt32(19);
-        var aOff = row.GetNullableInt32(20);
-        var aRatio = row.GetNullableDouble(21);
-        var rawReadAt = row.GetNullableInt64(22);
-        if (rawReadAt is not null || aUrl is not null)
+        if (row.GetNullableString(16) is { Length: > 0 } aUrl && row.GetNullableInt64(22) is > 0 and var rawReadAt)
         {
-            if (string.IsNullOrEmpty(aUrl) || aTitle is null || aIdx is null || aBlk is null || aOff is null || aRatio is null || rawReadAt is not > 0)
-                throw new StorageException(StorageError.Corrupt);
-            anchor = new NovelAnchor(aUrl, aTitle, aIdx.Value, aBlk.Value, aOff.Value, aRatio.Value);
-            readAtMs = rawReadAt.Value;
+            anchor = new NovelAnchor(
+                aUrl,
+                row.GetNullableString(17) ?? "",
+                row.GetNullableInt32(18) ?? 0,
+                row.GetNullableInt32(19) ?? 0,
+                row.GetNullableInt32(20) ?? 0,
+                row.GetNullableDouble(21) ?? 0);
+            readAtMs = rawReadAt;
         }
 
         return new NovelEntryRecord(
@@ -499,7 +486,7 @@ internal static class NovelLibraryStore
             pinnedAtMs,
             readAtMs,
             anchor,
-            chapterCount.Value,
-            contentSignature);
+            row.GetNullableInt32(5) ?? 0,
+            row.GetNullableString(6) ?? "");
     }
 }

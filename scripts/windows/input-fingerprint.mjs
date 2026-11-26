@@ -19,7 +19,6 @@ export function isWindowsBuildInput(path) {
     || path.startsWith('native/JavaScript/')
     || licenseFiles.some(name => path === `LICENSES/${name}`)
     || path === 'scripts/script-host-native.json'
-    || (path.startsWith('tests/') && !path.startsWith('tests/ios-'))
   );
 }
 

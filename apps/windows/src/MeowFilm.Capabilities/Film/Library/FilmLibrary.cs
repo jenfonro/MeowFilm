@@ -102,8 +102,6 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
             record.GlobalEpisode,
             source,
             members);
-        try { target.Validate(); }
-        catch (FilmPlaybackException) { throw new StorageException(StorageError.Corrupt); }
 
         return new FilmCardItem(record.ItemId, record.Title, record.Poster, record.Score)
         {

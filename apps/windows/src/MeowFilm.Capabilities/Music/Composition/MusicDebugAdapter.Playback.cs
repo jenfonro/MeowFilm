@@ -329,9 +329,6 @@ internal sealed partial class MusicDebugAdapter
             case "recommendation.retry":
                 await queue.RetryRecommendationAsync();
                 return new { command, executed = true };
-            case "recommendation.reconcile":
-                await queue.ReconcileRecommendationAsync();
-                return new { command, executed = true };
             default:
                 throw DebugApiException.InvalidArgument($"Unsupported queue action '{command}'.");
         }
@@ -427,10 +424,6 @@ internal sealed partial class MusicDebugAdapter
             case "retryrecommendationbutton":
             case "重试推荐":
                 await capability.Queue.RetryRecommendationAsync();
-                return new { invoked = true, button = key };
-            case "reconcile_recommendation":
-            case "核对保存结果":
-                await capability.Queue.ReconcileRecommendationAsync();
                 return new { invoked = true, button = key };
             case "close":
             case "播放队列":

@@ -7,7 +7,7 @@ import MeowDebug
 @MainActor public final class MusicAutomaticLibrarySync {
     public static let interval: TimeInterval = 5 * 60
     public static let localMutationDebounce: TimeInterval = 1.5
-    private let service: any MusicAutomaticLibrarySyncing
+    private let service: NativeMusicService
     private let refresh: @MainActor () async -> Void
     private nonisolated(unsafe) var events: Task<Void, Never>?
     private nonisolated(unsafe) var timer: Task<Void, Never>?
@@ -20,7 +20,7 @@ import MeowDebug
     private var active = false
     private var pendingMutation = false
 
-    public init(service: any MusicAutomaticLibrarySyncing,
+    public init(service: NativeMusicService,
                 onLibraryChanged: @escaping @MainActor () async -> Void) {
         self.service = service; refresh = onLibraryChanged
     }

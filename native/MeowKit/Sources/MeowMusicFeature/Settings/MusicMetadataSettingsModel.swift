@@ -1,26 +1,21 @@
 import Foundation
 import Combine
 
-/// One physical request at a time, even if a provider ignores cancellation.
-/// Re-entry coalesces to one authoritative read, never a replayed settings write.
 @MainActor
 final class MusicMetadataSettingsModel: ObservableObject {
     @Published private(set) var value: MusicMetadataPreferences?
     @Published private(set) var error: String?
     @Published private(set) var busy = false
-    private let service: any MusicMetadataPreferencesServing
-    private let receipts: MusicSettingsReceiptOwner
+    private let service: NativeMusicService
     private let onChanged: @MainActor (MusicMetadataPreferences) -> Void
     private var active = false
     private var epoch = UUID()
     private var work: Task<Void, Never>?
     private var reloadRequested = false
-    private var writing = false
 
-    init(service: any MusicMetadataPreferencesServing,
-         receipts: MusicSettingsReceiptOwner,
+    init(service: NativeMusicService,
          onChanged: @escaping @MainActor (MusicMetadataPreferences) -> Void = { _ in }) {
-        self.service = service; self.receipts = receipts; self.onChanged = onChanged
+        self.service = service; self.onChanged = onChanged
     }
 
     func setActive(_ active: Bool) {
@@ -30,20 +25,15 @@ final class MusicMetadataSettingsModel: ObservableObject {
     }
 
     func cancel() {
-        epoch = UUID(); if !writing { work?.cancel() }; reloadRequested = false
+        epoch = UUID(); work?.cancel(); reloadRequested = false
         value = nil; error = nil; busy = false
-        // Keep the slot until actual completion; repeated scene/account changes
-        // cannot accumulate detached reads or writes.
     }
 
     func reload() {
         guard active else { return }
         epoch = UUID(); value = nil; error = nil
-        if work != nil {
-            if !writing { work?.cancel() }; reloadRequested = true; busy = true
-        } else {
-            start(nil)
-        }
+        if work != nil { work?.cancel(); reloadRequested = true; busy = true }
+        else { start(nil) }
     }
 
     func setEnabled(_ platform: MusicPublicBrowsePlatform, _ enabled: Bool) {
@@ -63,62 +53,40 @@ final class MusicMetadataSettingsModel: ObservableObject {
     private func start(_ change: MusicMetadataPreferencesChange?) {
         guard active, work == nil else { return }
         busy = true; error = nil
-        let own = epoch
-        writing = change != nil
-        let submitted = change.map { change in
-            receipts.submit(settings: [
-                change.platforms == nil ? nil : "metadata/platforms",
-                change.enabledPlatforms == nil ? nil : "metadata/enabledPlatforms"
-            ].compactMap { $0 }, operation: "保存歌词与封面设置") { [service] in
-                try await service.updateMetadataPreferences(change)
-            }
-        }
+        let own = epoch, isWrite = change != nil
         work = Task { [weak self, service] in
             var fresh: MusicMetadataPreferences?
             var failure: MusicServiceError?
             do {
                 try Task.checkCancellation()
-                if let submitted { fresh = try await submitted.value }
-                else { fresh = try await service.metadataPreferences() }
+                if let change {
+                    fresh = try await service.updateMetadataPreferences(change)
+                } else {
+                    fresh = try await service.metadataPreferences()
+                }
             } catch {
                 let problem = MusicServiceError.sanitized(error)
                 failure = problem
-                if change != nil && self?.active == true && self?.epoch == own && !Task.isCancelled &&
-                    [MusicServiceError.staleRevision, .storageConflict, .commitUnconfirmed].contains(problem) {
-                    // A concurrent quality/mode writer shares this revision.
-                    // Read once; never retry or infer rollback of the old patch.
-                    do { fresh = try await service.metadataPreferences() }
-                    catch { failure = MusicServiceError.sanitized(error) }
+                if isWrite, [MusicServiceError.staleRevision, .storageConflict].contains(problem) {
+                    fresh = try? await service.metadataPreferences()
                 }
             }
-            // The parent owns metadata invalidation, not the settings page.
-            // A submitted save still refreshes that owner after page departure.
-            if submitted != nil, let fresh {
-                self?.onChanged(fresh)
-            }
-            self?.finish(fresh, failure: failure, epoch: own, isWrite: submitted != nil)
+            if isWrite, let fresh { self?.onChanged(fresh) }
+            self?.finish(fresh, failure: failure, epoch: own, isWrite: isWrite)
         }
     }
 
     private func finish(_ fresh: MusicMetadataPreferences?, failure: MusicServiceError?, epoch own: UUID, isWrite: Bool) {
-        work = nil; writing = false
+        work = nil
         if own == epoch, active, !Task.isCancelled {
             busy = false
             let changed = fresh != nil && value != fresh
-            if let fresh {
-                value = fresh
-            } else if !isWrite {
-                value = nil
-            }
-            error = failure == .commitUnconfirmed ? nil : failure?.localizedDescription
-            // Synchronous publication lets the parent revoke its metadata
-            // session before launching another async consumer.
+            if let fresh { value = fresh } else if !isWrite { value = nil }
+            error = failure?.localizedDescription
             if !isWrite, let fresh, changed { onChanged(fresh) }
         }
-        if reloadRequested, active {
-            reloadRequested = false; start(nil)
-        }
+        if reloadRequested, active { reloadRequested = false; start(nil) }
     }
 
-    deinit { if !writing { work?.cancel() } }
+    deinit { work?.cancel() }
 }

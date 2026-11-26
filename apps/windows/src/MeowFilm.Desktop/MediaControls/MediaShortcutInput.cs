@@ -21,7 +21,7 @@ internal static class MediaShortcutInput
 
     internal static bool AllowsLocal(FrameworkElement root, object? target)
     {
-        if (HasPopup(root) || DesktopModalHost.HasOpenModal(root)) return false;
+        if (HasPopup(root) || HasModal(root)) return false;
         for (var node = target as DependencyObject; node is not null; node = VisualTreeHelper.GetParent(node))
         {
             if (Protected(node)) return false;
@@ -36,7 +36,7 @@ internal static class MediaShortcutInput
         // A background root's retained XAML focus is not the current input target.
         if (!MediaShortcutNative.OwnsWindow(hwnd, foreground)) return false;
         if (foreground != hwnd || MediaShortcutNative.HasMenuOrChildFocus(hwnd, root) ||
-            HasPopup(root) || DesktopModalHost.HasOpenModal(root)) return true;
+            HasPopup(root) || HasModal(root)) return true;
         bool editor = false;
         for (var node = DesktopVisual.Focused(root); node is not null; node = VisualTreeHelper.GetParent(node))
         {
@@ -45,6 +45,10 @@ internal static class MediaShortcutInput
         }
         return false;
     }
+
+    private static bool HasModal(FrameworkElement root) =>
+        DesktopWindow.GetWindow(root) is ShellWindow { IsAnyModalOpen: true } ||
+        DesktopModalHost.Find(root)?.IsOpen == true;
 
     private static bool HasPopup(FrameworkElement root) => root.XamlRoot is { } xamlRoot &&
         VisualTreeHelper.GetOpenPopupsForXamlRoot(xamlRoot).Any(popup => popup.IsOpen && popup.Child is not ToolTip);

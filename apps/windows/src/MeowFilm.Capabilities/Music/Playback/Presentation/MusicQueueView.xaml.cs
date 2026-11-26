@@ -104,5 +104,4 @@ public partial class MusicQueueView : UserControl
     private async void Recommendation_Click(object sender, RoutedEventArgs e)
     { if (sender is Button { Tag: MusicRecommendationCandidate candidate }) await Queue.ChooseRecommendationAsync(candidate); }
     private async void RetryRecommendation_Click(object sender, RoutedEventArgs e) => await Queue.RetryRecommendationAsync();
-    private async void ReconcileRecommendation_Click(object sender, RoutedEventArgs e) => await Queue.ReconcileRecommendationAsync();
 }

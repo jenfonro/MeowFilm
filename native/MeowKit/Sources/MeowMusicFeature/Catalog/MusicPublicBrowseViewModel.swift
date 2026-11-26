@@ -25,11 +25,6 @@ public enum MusicPublicBrowseRequest: Sendable, Hashable {
     }
 }
 
-public struct MusicPublicBrowseActionIntent: Sendable {
-    let id: UUID
-    let page: UUID
-}
-
 /// Owns page tasks only, not a library, account session, source selection or player.
 @MainActor public final class MusicPublicBrowseViewModel: ObservableObject {
     @Published public internal(set) var sections: [MusicPublicBrowseSection] = []
@@ -88,7 +83,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         return !Calendar.current.isDate(contentDay, inSameDayAs: Date())
     }
 
-    let service: any MusicPublicBrowsing
+    let service: NativeMusicService
     @Published public internal(set) var request: MusicPublicBrowseRequest
     var pageEpoch = UUID(), actionEpoch = UUID(), loadEpoch = UUID()
     var homeNeedsRefresh = true
@@ -132,7 +127,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     var tabTask: Task<[MusicPublicBrowseItem], Error>?
     var actionTask: Task<Void, Error>?
     var revocationTask: Task<Void, Never>?
-    var issuedIntent: UUID?
     var songObservation: Task<Void, Never>?
     var songProjectionID = UUID()
     enum ArtworkReadState {
@@ -142,8 +136,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     var artworkDemand: Set<MusicPublicBrowseItem.CoverReference> = []
     var artworkEpoch = UUID()
     var artworkTask: Task<Void, Never>?
-    let queuePage: (@MainActor (MusicRemoteQueueSource, String?) async throws -> MusicBrowsePage)?
-    let releaseSource: @MainActor (MusicRemoteQueueSource) -> Void
+    weak var owner: MusicViewModel?
 
     struct Loaded: Sendable {
         var page: MusicPublicBrowsePage
@@ -156,16 +149,19 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         var homeSource: MusicHomeSourceSelection?
     }
 
-    public init(service: any MusicPublicBrowsing, request: MusicPublicBrowseRequest,
-                queuePage: (@MainActor (MusicRemoteQueueSource, String?) async throws -> MusicBrowsePage)? = nil,
-                releaseSource: (@MainActor (MusicRemoteQueueSource) -> Void)? = nil) {
-        self.service = service; self.request = request
-        self.queuePage = queuePage; self.releaseSource = releaseSource ?? Self.releaseDefaultSource
+    public init(service: NativeMusicService, request: MusicPublicBrowseRequest, owner: MusicViewModel? = nil) {
+        self.service = service; self.request = request; self.owner = owner
     }
 
-    // Keep asynchronous cleanup out of a nested default-argument closure.
-    // Revocation is synchronous; the task owns only the source, never the page.
-    private nonisolated static func releaseDefaultSource(_ source: MusicRemoteQueueSource) {
+    func remotePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
+        if let owner { return try await owner.remoteQueuePage(source, cursor: cursor) }
+        let page = try await service.remoteQueuePage(source, cursor: cursor)
+        try source.authorization.check()
+        return page
+    }
+
+    func release(_ source: MusicRemoteQueueSource) {
+        if let owner { owner.releaseRemoteQueueSource(source); return }
         source.revoke()
         Task { [source] in await source.close() }
     }
@@ -233,7 +229,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     func invalidate(clear: Bool) {
         retireArtwork()
         pageEpoch = UUID(); actionEpoch = UUID(); loadEpoch = UUID()
-        issuedIntent = nil
         homeTask?.work.cancel(); homeTask = nil
         task?.cancel(); task = nil; actionTask?.cancel(); actionTask = nil
         tabTask?.cancel(); tabTask = nil
@@ -244,7 +239,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         failedPage = nil; failedRequest = nil
         if clear {
             loadedPages = [:]
-            if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
+            if let remoteSource { release(remoteSource) }; remoteSource = nil
             sections = []; filters = []; selectedFilter = ""; collection = nil; total = nil
             nextCursor = nil; currentCursor = nil; back = []; loaded = false; pageNumber = 1
             cursorOffsets = ["": 0]; trackOffset = 0
@@ -318,10 +313,4 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         actionTask?.cancel()
         revocationTask?.cancel()
     }
-}
-
-@MainActor public extension MusicViewModel {
-    /// Same NativeMusicService instance exposed through an existing public port;
-    /// no new service/account/writer and no visibility change to private state.
-    var publicBrowser: (any MusicPublicBrowsing)? { accountBrowser as? any MusicPublicBrowsing }
 }

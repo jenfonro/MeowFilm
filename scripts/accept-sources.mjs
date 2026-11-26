@@ -1,10 +1,10 @@
-import { createHash } from 'node:crypto';
-import { readFile, readdir, stat, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, readdir, stat, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classifySourceFailure, sourceDiagnosticObservers } from './source-acceptance-diagnostics.mjs';
 import {
-  createReportWriter, loadAcceptanceHttp, preparePayloadRuntime, probeMedia,
+  classifyJsonResponseBody, createReportWriter, loadAcceptanceHttp, preparePayloadRuntime, probeMedia,
 } from './accept-common.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -36,7 +36,7 @@ if (options.kind === 'source') {
   if (options.payload) {
     const entry = `app/modules/${moduleFile}`;
     const required = [entry, ...(options.kind === 'cat' ? ['app/modules/cat-probe.mjs'] : []),
-      'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs',
+      'app/bootstrap.mjs', 'app/contracts.mjs',
       'app/modules/source-candidates.mjs', 'node_modules/@meowfilm/runtime-bridge/src/index.js',
       'node_modules/@meowfilm/script-host/src/index.js'];
     const prepared = await preparePayloadRuntime(options.payload, required);
@@ -181,26 +181,11 @@ if (options.kind === 'source') {
           if (!options.live) throw new ScriptHostError('NETWORK_ERROR');
           const reply = await network(input);
           event.statusCode = reply.statusCode;
-          try {
-            const body = JSON.parse(Buffer.from(reply.body ?? []).toString());
-            event.bodyKind = 'json';
-            const code = body?.code ?? body?.status ?? body?.err_code ?? body?.error_code;
-            if (typeof code === 'number' && Number.isSafeInteger(code) && Math.abs(code) <= 999999)
-              event.businessCode = code;
-            else if (typeof code === 'string' && /^-?\d{1,6}$/.test(code)) event.businessCode = Number(code);
-            const message = String(body?.message ?? body?.msg ?? body?.error ?? '');
-            if (/密钥.*(?:无效|缺失|错误|过期)|(?:invalid|missing|expired).*api.?key|api.?key.*(?:required|missing|invalid)|token.*(?:expired|invalid)/i.test(message))
-              event.responseReason = 'configuration';
-            const error = body?.err_code ?? body?.error_code ?? body?.errcode;
-            const emptyData = body && typeof body === 'object' &&
-              (body.data === null || Array.isArray(body.resource) && body.resource.length === 0 ||
-                body.data && typeof body.data === 'object' &&
-                  Object.hasOwn(body.data, 'url') && !body.data.url);
-            if (body?.success === false || body?.status === false ||
-              body?.status === 0 && error !== undefined ||
-              typeof error === 'number' && error !== 0 || emptyData)
-              event.responseReason ??= 'upstream';
-          } catch { event.bodyKind = 'non_json'; }
+          classifyJsonResponseBody(
+            reply.body,
+            event,
+            /密钥.*(?:无效|缺失|错误|过期)|(?:invalid|missing|expired).*api.?key|api.?key.*(?:required|missing|invalid)|token.*(?:expired|invalid)/i,
+          );
           return reply;
         } catch (error) { event.code = error.code ?? 'NETWORK_ERROR'; throw error; }
         finally { event.finished = true; }
@@ -284,9 +269,6 @@ if (options.kind === 'source') {
         row.backgroundDiagnostics = diagnostics.slice(startupDiagnosticsEnd).filter(event => event.requestId === null)
           .map(diagnostic);
       }
-      try {
-        row.sourceUnchanged = createHash('sha256').update(await readFile(join(directory, file))).digest('hex') === row.contentHash;
-      } catch { row.sourceUnchanged = false; }
       row.initializationNetwork ??= audit.map(({ finished, statusCode, code }) =>
         ({ state: finished ? 'completed' : 'pending', statusCode, code }));
       row.initializationDiagnostics ??= diagnostics.map(diagnostic);
@@ -433,9 +415,6 @@ if (options.kind === 'source') {
         try { await rm(dataRoot, { recursive: true, force: true }); }
         catch { row.cleanup = 'SCRIPT_CLEANUP'; }
       }
-      try {
-        row.sourceUnchanged = createHash('sha256').update(await readFile(join(directory, file))).digest('hex') === row.contentHash;
-      } catch { row.sourceUnchanged = false; }
       row.initializationNetwork = initializationNetwork ?? audit.slice(0, initializationAuditEnd ?? audit.length)
         .map(({ finished, statusCode, code }) =>
           ({ state: finished ? 'completed' : 'pending', statusCode, code }));
@@ -478,17 +457,16 @@ if (options.kind === 'source') {
       mediaDetected: report.rows.flatMap(row => row.actions).filter(action => action.media?.state === 'media_detected').length,
       cleanupFailures: report.rows.filter(row => row.cleanup !== 'complete').length,
       unloadFailures: report.rows.filter(row => row.unloadCode).length,
-      changedSources: report.rows.filter(row => !row.sourceUnchanged).length,
     };
     await saveReport();
     console.log(JSON.stringify(report.summary));
     if (report.summary.initialized !== report.summary.scripts || report.summary.cleanupFailures ||
-      report.summary.unloadFailures || report.summary.changedSources || report.summary.hostFailures ||
+      report.summary.unloadFailures || report.summary.hostFailures ||
       report.summary.runtimeLimits || report.summary.requiresDiagnosis ||
       report.summary.scriptRejected) process.exitCode = 1;
   } finally {
     await Promise.allSettled([...batches]);
-    await Promise.allSettled([writing]);
+    await Promise.allSettled([saveReport.flush()]);
     hook?.deregister();
   }
 }

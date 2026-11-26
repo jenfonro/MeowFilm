@@ -2,7 +2,7 @@ import Foundation
 import MeowDebug
 import MeowRuntime
 
-public struct DoubanFilmSource: FilmCategorySource {
+public struct DoubanFilmSource: Sendable {
     public let descriptor = FilmSourceDescriptor(id: "douban", title: "豆瓣")
     public let categories = FilmCategory.allCases
     private let connection: @Sendable () async throws -> RuntimeHTTPClient

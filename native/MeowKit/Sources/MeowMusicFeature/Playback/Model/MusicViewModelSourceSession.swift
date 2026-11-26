@@ -15,13 +15,13 @@ extension MusicViewModel {
     }
     public func rejectCurrentSource() async {
         guard canRejectCurrentSource, let current, let selection = lastSelection,
-              let provider = service as? any MusicSourceExclusionServing else { return }
+              let service else { return }
         let control = playbackControlRevision
         // Autoplay already carries play intent before its first native fact.
         let shouldResume = phase == .preparing || phase == .playing || phase == .buffering
         let quality = candidate?.delivery?.quality ?? selection.quality
         await replaceExcludedSource(intent: .quality(quality), resumeControl: shouldResume ? control : nil) {
-            try await provider.excludeSource(for: current.track.ref, provider: selection.installationId, platform: selection.siteId)
+            try await service.excludeSource(for: current.track.ref, provider: selection.installationId, platform: selection.siteId)
         }
     }
     func replaceExcludedSource(intent: MusicSourceIntent, resumeControl: UUID?,
@@ -68,7 +68,7 @@ extension MusicViewModel {
         let selection = selectionID
         await feedbackConsumer.flushRetirements()
         guard selection == selectionID else { return }
-        guard !isClosing, let current, let service, let provider = service as? any MusicSourcePlaybackServing else { return }
+        guard !isClosing, let current, let service else { return }
         let own = lifecycle
         let admission = admission ?? recommendations.fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         do {
@@ -122,7 +122,7 @@ extension MusicViewModel {
             _ = await oldMatch?.result
             if let oldMedia, case .success(let value) = await oldMedia.result { value.cancel() }
             try checkRequest()
-            let session = try await provider.sourceSession(occurrenceID: current.id, expectedQueueRevision: state.revision)
+            let session = try await service.sourceSession(occurrenceID: current.id, expectedQueueRevision: state.revision)
             try checkRequest()
             if !recovering { await session.beginSelection(); try checkRequest() }
             while true {
@@ -140,7 +140,6 @@ extension MusicViewModel {
                       result.candidate.resolvedSelection == result.selection else {
                     throw MusicServiceError.invalidResponse
                 }
-                try result.candidate.validateResolvedSelection(for: result.selection)
                 func rejectMediaFailure(_ error: Error) async throws {
                     try checkRequest()
                     if MusicServiceError.sanitized(error) == .cancelled { throw error }
@@ -184,9 +183,6 @@ extension MusicViewModel {
                     media = try await withTaskCancellationHandler { try await mediaTask.value } onCancel: { mediaTask.cancel() }
                     try checkRequest()
                     mediaWithoutDonor = previousNative == nil
-                    guard MusicMediaDuration.matches(expected: current.track.duration, actual: media?.duration) else {
-                        throw MusicServiceError.invalidMediaCandidate
-                    }
                 }
                 let initialAutomatic: Bool
                 if case .automatic = intent { initialAutomatic = !recovering && !wrongSource && !wasTerminal }
@@ -207,7 +203,7 @@ extension MusicViewModel {
                 try checkRequest()
                 do {
                     try await rejectFailedDonor()
-                    try await provider.activateSource(attemptID: result.candidate.attemptId)
+                    try await service.activateSource(attemptID: result.candidate.attemptId)
                 } catch {
                     // Preparation and fact draining can outlive the URL. This
                     // is still the same candidate's media admission, not exhaustion.
@@ -241,8 +237,7 @@ extension MusicViewModel {
                             if donorFailure == nil, sourcePlayback.pendingSourceFailure?.id == operation { continue }
                             try result.candidate.fileAuthorization?.check()
                             try result.candidate.playbackAuthorization?.check()
-                            guard MusicMediaDuration.matches(expected: current.track.duration, actual: media.duration),
-                                  result.candidate.expiresAt.map({ $0 > Date().timeIntervalSince1970 * 1000 }) ?? true else {
+                            guard result.candidate.expiresAt.map({ $0 > Date().timeIntervalSince1970 * 1000 }) ?? true else {
                                 throw MusicServiceError.invalidMediaCandidate
                             }
                             let oldIntent = sourcePlayback.sourceIntent
@@ -263,7 +258,7 @@ extension MusicViewModel {
                             candidate = result.candidate; lastSelection = result.selection; nativeAttempt = nil
                             terminalAttempt = nil; lastProgressWrite = nil; pendingNativeResourceID = result.candidate.resourceId
                             if recovering { sourcePlayback.sourceRecoveryTask = nil }
-                            sourcePlayback.sourceCommit = (result.candidate.attemptId, nil, false)
+                            sourcePlayback.sourceCommit = (result.candidate.attemptId, nil)
                             do {
                                 let commit = {
                                     if let admission { return try admission.perform { try self.playback.commitReplacement(media) } }
@@ -287,7 +282,7 @@ extension MusicViewModel {
                                 }
                                 committed = true; capturePrimaryPlayback(); beginPlaybackMetadata(refreshSources: true)
                                 if let failure = committedFailure?.failure {
-                                    _ = recoverSourceAudio(failure, invalidDuration: committedFailure?.invalidDuration ?? false)
+                                    _ = recoverSourceAudio(failure)
                                 }
                                 break
                             } catch {
@@ -351,7 +346,7 @@ extension MusicViewModel {
                 if previousNative == nil { playbackState.phase = recovering && failure != .cancelled ? .failed : .paused }
             }
         }
-        if !committed, let prepared { await provider.discardSource(attemptID: prepared.candidate.attemptId) }
+        if !committed, let prepared { await service.discardSource(attemptID: prepared.candidate.attemptId) }
         if !committed, sourcePlayback.sourceSwitchID == operation, lifecycle == own, self.current?.id == current.id,
            let failure = sourcePlayback.pendingSourceFailure, failure.id == operation {
             sourcePlayback.pendingSourceFailure = nil
@@ -363,7 +358,7 @@ extension MusicViewModel {
             } else {
                 // Only after B has exhausted/failed can A's committed intent
                 // enter its single recovery flow.
-                _ = recoverSourceAudio(failure.fact, invalidDuration: failure.invalidDuration)
+                _ = recoverSourceAudio(failure.fact)
             }
         }
     }

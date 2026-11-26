@@ -1,7 +1,7 @@
 import Foundation
 import Dispatch
 import MeowContracts
-import MeowMusicFeature
+import MeowMusicPlatform
 
 extension NativeMusicService {
     private func waitForSimilarRestoration(_ task: Task<MusicServiceError?, Error>, own: UUID) async throws -> MusicServiceError? {
@@ -47,8 +47,6 @@ extension NativeMusicService {
         }
         let d = try read()
         guard let saved = d.queue.similar else { similarMode.restorationState = .restored; return }
-        try d.requireQueue()
-        try MusicNativeSimilarData.validateSession(saved, serial: d.queue.serial, songs: d.queueSongs())
         let restoration = UUID(), own = epoch
         similarMode.restoring = restoration
         let task = Task<MusicServiceError?, Error> { [self] in
@@ -115,14 +113,11 @@ extension NativeMusicService {
         } catch {
             if let acquired { releaseSimilarLease(acquired) }
             let failure = MusicServiceError.sanitized(error)
-            if failure == .commitUnconfirmed { throw failure }
             try check(own)
             guard similarMode.restoring == restoration else { throw MusicServiceError.cancelled }
             if failure.isAuthenticationFailure || [.staleAccess, .notFound].contains(failure) {
-                // Preserve persisted returnQueue so exitSimilarMode() can still recover
-                // the original queue offline or after account/auth expiry.
                 if saved.returnQueue == nil {
-                    try similarQueueTransaction([.queue]) { draft in
+                    try transaction([.queue]) { draft in
                         if draft.queue.similar == saved { draft.queue.similar = nil }
                     }
                 }

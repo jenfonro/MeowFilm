@@ -2,8 +2,7 @@
 
 ## 所有权
 
-- `MusicLyricApplication` 负责一次歌词查询的来源选择、合并请求、缓存、账号代次和关闭。
-- `NativeMusicLyrics` 是共同 Node 歌词操作的薄适配，只消费通用原文、翻译和音译；平台请求、解密及字段转换归共同 Node owner，见[音乐平台运行器契约](../runtime/music-platform.md)。
+- `MusicLyricApplication` 负责一次歌词查询的来源选择、合并请求、账号代次和关闭，并直接经 `MusicPlatformClient` 发 `lyrics` 业务操作消费通用原文、翻译和音译；平台请求、解密及字段转换归共同 Node owner，见[音乐平台运行器契约](../runtime/music-platform.md)。
 - `MusicLibraryOwner` 拥有本地歌词和歌词／封面平台策略；可恢复歌词及公共图片字节由共享 `MusicPresentationCache` 持久保存，不嵌入歌曲仓库或队列。
 - `MusicCapability` 的歌词 presentation 维护当前歌曲的唯一歌词集合／读取、显示行、手动预览、滚动状态和用户操作；完整播放器和桌面歌词都是消费者，不创建第二播放器或查询 owner。
 

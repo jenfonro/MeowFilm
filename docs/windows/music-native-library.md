@@ -11,43 +11,11 @@
 - 普通业务不经 Node 读写该数据库。
 - 同一 App 内不得再装配第二个歌曲 writer；不探测、读取、迁移或删除旧音乐文档。
 
-## 公开边界
+### 公开边界
 
-```csharp
-MusicLibraryOwner(MusicLibraryDatabase store, string scope = "local")
+`MusicLibraryOwner` 提供强类型曲库、集合、队列、历史、设置与推荐队列事务方法（如 `ListCollectionsAsync`、`GetCollectionDetailAsync`、`CreatePlaylistAsync`、`ReplaceQueueAsync`、`AppendQueueAsync`、`PrepareShutdownAsync`、`AbortAsync`、`DisposeAsync`）；可信进程内事务直接抛出固定 `MusicLibraryException.Code`，不返回存储正文、凭据或内部异常文本。
 
-Task<JsonElement> ExecuteAsync(
-    string method,
-    object? parameters = null,
-    CancellationToken cancellationToken = default);
-
-Task<JsonElement> CreatePlaylistAsync(
-    string name,
-    IReadOnlyList<JsonElement> songs,
-    CancellationToken cancellationToken = default);
-
-Task<JsonElement> ReplaceQueueAsync(
-    IReadOnlyList<JsonElement> songs,
-    int index,
-    JsonElement? context,
-    long expectedVersion,
-    CancellationToken cancellationToken = default);
-
-Task<JsonElement> AppendQueueAsync(
-    IReadOnlyList<JsonElement> songs,
-    JsonElement? context,
-    long expectedVersion,
-    CancellationToken cancellationToken = default);
-
-Task ReconcileAsync(CancellationToken cancellationToken = default);
-Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
-Task AbortAsync(CancellationToken cancellationToken = default);
-ValueTask DisposeAsync();
-```
-
-业务命令返回 `{ok:true,...}` 或 `{ok:false,code}`。可信的进程内事务端口直接抛出固定 `MusicLibraryException.Code`，不返回存储正文、凭据或内部异常文本。
-
-`AppendQueueAsync` 是完整歌单的进程内 next 入口，返回 `{ok:true,currentId,version,mode}`，不返回全量 entryIds。它在唯一串行边界核对 `expectedVersion`，创建独立 occurrence 并将整段按输入顺序插在当前曲之后，一次 CAS、一次版本递增；当前曲、模式及旧优先队列保留，新段优先于旧 priority。空队列选中首曲且 priority 为空，不调用媒体播放。失败不分批落盘；CAS 准入前取消不写入，准入后报告真实结果，未知写入使用既有 reconcile 机制，不重放。
+`AppendQueueAsync` 在唯一串行写边界核对 `expectedVersion`，创建独立 occurrence 并将整段按输入顺序插在当前曲之后，一次原子事务、一次版本递增；当前曲、模式及旧优先队列保留，新段优先于旧 priority。空队列选中首曲且 priority 为空，不调用媒体播放。失败原子回滚、不分批落盘。
 
 普通 `music.queue.append` 接受 `songs/context/next`，保持完整 `entryIds` 回执，不使用调用方传入的 `expectedVersion`。普通与完整入口、返回结果、控制 area 和歌曲记录均不设人为字节或歌曲数量上限，空输入不允许。队列当前 schema 为 1，entry 只存 `id/songId/context`，读取时由唯一歌曲仓库投影资料。
 
@@ -78,7 +46,7 @@ ValueTask DisposeAsync();
 - 未选坏记录不阻断无关操作；该记录的 UUID、来源键或本地文件身份被再次选中时明确失败，不另建 owner 或重绑来源。封面策略只应用本次集合成员；显式全库策略变更由其消费者读取全部歌曲。
 - 本代次已验证且不会删除的歌曲关系无需在小型控制提交时重复查询，新增关系仍核对真实记录；队列加载／导航与引用校验不会因消费边界收窄而取消。
 
-未知提交保留精确 Before／After 回执；只读对账为 After 时结算本次来源观察代次，为 Before 时恢复命令前随机导航及失败状态，不重放原操作。直接歌曲／来源读取与关闭、准备关闭在同一同步读门结算；owner 关闭不依靠释放借用数据库来撤销读取。
+直接歌曲／来源读取与关闭、准备关闭在同一同步读门结算；owner 关闭不依靠释放借用数据库来撤销读取。
 
 当前控制 area：
 
@@ -124,9 +92,8 @@ playback-settings
 - 缺少该 area 时，`music.settings.get` 返回上述缺省 `settings`，不制造 area 或写入数据库。
 - `music.settings.save` 必须携带 `ifRevision` 和 `lyrics`，未消费请求字段不影响当前动作；成功保存推进一次 revision，旧 revision 返回 `REVISION_CONFLICT`。当前动作不消费全局音源选择，已有同名扩展不赋予该设置音源控制权。
 - 已存在该 area 时在实际读取／保存处校验必需字段：schema 必须是数值 1（`1.0`／`1e0` 同值可读），revision 为合法安全整数、lyrics 为布尔值；未消费的额外请求字段不作为拒绝条件，也不持久化扩展槽。未知 schema、重复属性及实际使用的坏字段明确失败，原记录不覆写。
-- 读取和重启不写入；保存通过 owner gate 和 generation／receipt CAS 写入实际控制变更。未知提交由显式 reconcile 核对实际结果，不重放写入。
-- 在线设置保存未知提交后，后续命令封闭，使用显式 `ReconcileAsync` 读回 Before／After generation／receipt。结算不重放写入，也不替换 pending；第三状态保持冲突。
-- 相关持久化、CAS 与未知提交行为通过正常构建产物的 `--debug` 模式结合 `/debug/v1/storage/query` 与分类日志实跑核对（见[Debug 模式实现说明](debug-mode.md)）。
+- 读取和重启不写入；保存通过 owner gate 和 `ifRevision` CAS 在同一原子 SQLite WAL 事务中写入实际控制变更。
+- 相关持久化与 CAS 行为通过正常构建产物的 `--debug` 模式结合 `/debug/v1/storage/query` 与分类日志实跑核对（见[Debug 模式实现说明](debug-mode.md)）。
 
 ## 浏览数据源设置当前格式
 
@@ -143,7 +110,6 @@ playback-settings
 - `music.catalogSource.settings.get` 返回 `settings`；缺少该 area 时返回上述缺省值，读取不写盘。
 - `music.catalogSource.settings.save` 消费 `ifRevision` 和 `platform`，未消费请求字段不持久化；平台仅允许 `wy/kg`；revision 不符返回 `REVISION_CONFLICT`，同值保存不写盘，改变平台只推进本设置的 revision。
 - 该偏好只控制首页与频道，不改详情资源平台、账号、搜索偏好、音源启停或在线设置；唯一 writer 仍是本 owner。
-- 未知 CAS 由本职责的权威 get 核对 Before／After generation／receipt 结算，不重放保存，也不替其他职责结算。
 
 ## 官方音源设置当前格式
 
@@ -161,7 +127,7 @@ playback-settings
 - 缺少该 area 时，`music.officialSources.settings.get` 返回上述 revision 0、三平台全开的缺省 `settings`，不为读取创建或写入文档。
 - `music.officialSources.settings.save` 必须携带 `ifRevision` 和 `enabled`；`ifRevision` 与当前 revision 不符时返回 `REVISION_CONFLICT`，成功保存只推进本设置的 revision。
 - 该设置独立于 `online-settings`、`native-quality-policy` 和 `native-metadata-policy`，不复用它们的启停字段或改写音质、歌词／封面设置。
-- 缺省读取、独立启停与全关、重启恢复及同职责未知 CAS 结算通过正常构建产物的 `--debug` 模式实跑核对（见[Debug 模式实现说明](debug-mode.md)）。
+- 缺省读取、独立启停与全关及重启恢复通过正常构建产物的 `--debug` 模式实跑核对（见[Debug 模式实现说明](debug-mode.md)）。
 
 ## 曲库当前格式
 
@@ -285,9 +251,9 @@ music.history.recordPlayed
 
 原生持续推荐在同一 owner 内使用私有 `music.queue.recommendation.*` 事务，application 普通调用不可用。`enter` 通过 `capture` 明确是否捕获原队列 checkpoint，并可保留实际当前 seed occurrence；心动首批完整入队。`append` 核对 `expectedVersion` 并复用现有队列尾部追加算法，私有回执包含全部新增 `entryIds`，不改变完整目录 next 入口的公开响应。它可携带新批次内的 `selectIndex`，在同一次 SQL 事务 中追加整批并选择指定 occurrence；不携带时保留当前选择、已有 next priority 和队列 source，不把候选入队冒充进入推荐。随后实际选择活会话推荐 occurrence 时，由协调器的只读 provenance 查询提供 source，唯一队列 writer 在选择 CAS 中提交；无活会话时不会从旧 context 复活来源。原列表来源仍保存在 checkpoint 或原 occurrence context。完整批次保留全部 occurrence，不按字节或数量截断。
 
-私有 `restore` 接受 `nonce/expectedVersion/checkpoint`，心动与主动单曲推荐传 `retainCurrent=true`。owner 从实际队列取当前 occurrence，在 checkpoint 原 currentId 之后插入并选中；同 occurrence 已存在时不重复，空 checkpoint 保留当前曲，同录音不同 occurrence 不合并。原条目 context、队列 source 及导航状态来自 checkpoint；选中的 occurrence 从 next priority 移除。恢复与合并共用一次 generation／receipt CAS，不另行 append 或分次落盘。相似、FM 和搜索自动推荐不捕获恢复 checkpoint。`playback-settings.mode` 只有 1／2／3，独立于 checkpoint，不在进入或恢复时改写。
+私有 `restore` 接受 `expectedVersion/checkpoint`，心动与主动单曲推荐传 `retainCurrent=true`。owner 从实际队列取当前 occurrence，在 checkpoint 原 currentId 之后插入并选中；同 occurrence 已存在时不重复，空 checkpoint 保留当前曲，同录音不同 occurrence 不合并。原条目 context、队列 source 及导航状态来自 checkpoint；选中的 occurrence 从 next priority 移除。恢复与合并共用一次原子 SQLite 事务，不另行 append 或分次落盘。相似、FM 和搜索自动推荐不捕获恢复 checkpoint。`playback-settings.mode` 只有 1／2／3，独立于 checkpoint，不在进入或恢复时改写。
 
-Windows 推荐会话与返回点（checkpoint）已由 `MusicRecommendationStore` 持久化至永久库 5 张表 `windows_music_recommendation_{checkpoints,checkpoint_entries,checkpoint_lists,sessions,session_lists}`，支持冷启动恢复与离线保护 `returnQueue`；逐曲反馈 live proof 与在途请求不跨进程持久化。丢失 ACK 只通过 nonce reconcile 读取真实结果，不重放 append／select／restore；成功恢复才消费 checkpoint，确认未应用保留 checkpoint 供新 nonce 重试。恢复原队列、取消或退役按[推荐生命周期](music-recommendations.md)管理 checkpoint。
+Windows 推荐会话与返回点（checkpoint）已由 `MusicRecommendationStore` 持久化至永久库 5 张表 `windows_music_recommendation_{checkpoints,checkpoint_entries,checkpoint_lists,sessions,session_lists}`，支持冷启动恢复与离线保护 `returnQueue`；逐曲反馈 live proof 与在途请求不跨进程持久化。成功恢复后消费 checkpoint；恢复原队列、取消或退役按[推荐生命周期](music-recommendations.md)管理 checkpoint。
 
 设置和歌词：
 
@@ -318,10 +284,7 @@ music.online.song
 
 ## 事务、取消与关闭
 
-- 所有持久写入在同一 owner gate 内，以 generation／receipt 在同一 SQL 事务核对并写实际变更集；零变化不提交。
-- 事务准入后不把取消解释为回滚；丢失写入回执时保留本轮候选与受影响歌曲的 before 版本，不提前展示未确认资料，阻止后续写。
-- `appearance`、`metadata`、`quality`、桌面歌词设置、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际控制与 generation／receipt，核对该次 before／after revision；该读取会结算同职责未知结果，不重放业务命令。桌面歌词通过 `music.lyrics.desktop.settings.get`，浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
-- 其他职责以及跨职责命令继续由显式 `ReconcileAsync` 协调；recommendation 使用其 nonce reconcile。一个职责的 current read 不得替另一个职责结算未知写入。
-- 第三状态保持 `STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
-- `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；退役单向完成，新业务由新 owner 接纳，不重放写入。
-- `AbortAsync` 终止内存生命周期，不宣称未知持久写已经回滚。
+- 所有持久写入在同一 owner gate 内，按 `expectedRevision`／`expectedVersion` 在同一本地 SQLite WAL 事务核对并写实际变更集；零变化不提交，事务失败原子回滚。
+- 事务进入原子提交点后等待真实结算；状态冲突返回 `REVISION_CONFLICT`／`STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
+- `PrepareShutdownAsync` 封闭新业务并排空已准入事务；退役单向完成，新业务由新 owner 接纳。
+- `AbortAsync` 终止内存生命周期并排空底层任务。

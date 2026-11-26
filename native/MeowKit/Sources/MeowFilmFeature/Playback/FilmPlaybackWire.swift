@@ -269,25 +269,12 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
     }
 
     init(record: FilmPreferencesRecord) throws {
-        let rules = try record.ruleOrder.map { text -> FilmPreferenceDimension in
-            guard let value = FilmPreferenceDimension(rawValue: text) else {
-                throw FilmPlaybackError(code: "INVALID_PREFERENCES")
-            }
-            return value
-        }
-        let pans = try record.panOrder.map { text -> FilmPanProvider in
-            guard let value = FilmPanProvider(rawValue: text) else {
-                throw FilmPlaybackError(code: "INVALID_PREFERENCES")
-            }
-            return value
-        }
-        guard Set(rules).count == rules.count, Set(pans).count == pans.count,
-              let provider = FilmMetadataProvider(rawValue: record.metadataViewProvider) else {
-            throw FilmPlaybackError(code: "INVALID_PREFERENCES")
-        }
+        let rules = record.ruleOrder.compactMap(FilmPreferenceDimension.init(rawValue:))
+        let pans = record.panOrder.compactMap(FilmPanProvider.init(rawValue:))
+        let provider = FilmMetadataProvider(rawValue: record.metadataViewProvider) ?? .tmdb
         self.init(
-            ruleOrder: rules,
-            panOrder: pans,
+            ruleOrder: rules.isEmpty ? Self.defaults.ruleOrder : rules,
+            panOrder: pans.isEmpty ? Self.defaults.panOrder : pans,
             keywords: record.keywords,
             siteCleanKeywords: record.siteCleanKeywords,
             iosAutoPrepare: record.iosAutoPrepare,
@@ -633,9 +620,6 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         let metadataSourceID = try fields["metadataSourceId"].flatMap { $0 == .null ? nil : $0 }.map { value in
             guard let id = value.filmText, !id.isEmpty else { throw FilmPlaybackError.invalidResponse }
             return id
-        }
-        if let metadataSourceID, !metadataSources.contains(where: { $0.id == metadataSourceID }) {
-            throw FilmPlaybackError.invalidResponse
         }
         self.metadataSources = metadataSources
         self.metadataSourceID = metadataSourceID

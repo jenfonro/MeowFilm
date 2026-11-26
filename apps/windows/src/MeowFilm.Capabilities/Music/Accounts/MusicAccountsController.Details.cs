@@ -14,7 +14,7 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
     private readonly MusicLibrarySyncPlatformRow sync;
 
     internal MusicPlatformSettingsRow(MusicAccountsController owner, MusicFeedbackPlatformRow feedback,
-        string platform, string name, MusicNativeApplication source)
+        string platform, string name, MusicAccountOwner source)
     {
         this.owner = owner;
         Platform = platform;
@@ -137,14 +137,13 @@ public sealed partial class MusicAccountsController
         foreach (var platform in AccountRules.Platforms)
         {
             var feedback = settings.FeedbackPlatforms.Single(row => row.Platform == platform);
-            PlatformSettings.Add(new(this, feedback, platform, MusicPlatformInfo.DisplayName(platform), application));
+            PlatformSettings.Add(new(this, feedback, platform, MusicPlatformInfo.DisplayName(platform), application.Accounts));
         }
-        application.AccountDetailsInvalidated += AccountDetailsInvalidated;
     }
 
     internal MusicPlatformAccount? AccountDetailsSelection(string platform)
     {
-        if (stopping || disposed || accountSaveUncertain ||
+        if (stopping || disposed ||
             AccountBusy && accountOperationPlatform == platform) return null;
         var account = Accounts.FirstOrDefault(row => row.Platform == platform);
         return account?.State is "saved" or "verified" ? account : null;
@@ -152,22 +151,12 @@ public sealed partial class MusicAccountsController
 
     internal void AccountDetailsObserved(MusicAccountDetails details)
     {
-        if (stopping || disposed || accountSaveUncertain ||
+        if (stopping || disposed ||
             AccountBusy && accountOperationPlatform == details.Platform) return;
         var account = Accounts.FirstOrDefault(row => row.Platform == details.Platform);
         if (account is null || account.Generation > details.Generation) return;
         UpdateAccount(new(account.Platform, account.Name, details.State,
             details.Profile?.DisplayName ?? "", details.Profile?.UserId ?? "", details.Generation));
-    }
-
-    private void AccountDetailsInvalidated(string platform)
-    {
-        if (ctx.Dispatcher.IsClosing) return;
-        _ = ctx.Dispatcher.EnqueueAsync(() =>
-        {
-            if (!stopping && !disposed)
-                PlatformSettings.FirstOrDefault(row => row.Platform == platform)?.InvalidateDetails();
-        });
     }
 
     private void AccountDetailsBindings() => RefreshPlatformSettings();
@@ -239,7 +228,8 @@ public sealed partial class MusicAccountsController
 
     internal async ValueTask DisposeAccountDetailsAsync()
     {
-        application.AccountDetailsInvalidated -= AccountDetailsInvalidated;
+        application.Accounts.SessionChanged -= OnAccountSessionChanged;
+        settings.PropertyChanged -= OnSettingsChanged;
         foreach (var row in PlatformSettings) await row.DisposeAsync();
         PlatformSettings.Clear();
     }

@@ -67,21 +67,16 @@ extension MusicViewModel {
     }
     public func historyDetail(id: String) async throws -> MusicHistoryDetail {
         let epoch = try enter()
-        guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
-        let detail = try await provider.historyDetail(id: id)
+        let detail = try await requireService().historyDetail(id: id)
         try check(epoch); return detail
     }
     public func removeHistory(detail: MusicHistoryDetail) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
         do {
-            guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
-            try await provider.removeHistory(detail: detail)
+            try await requireService().removeHistory(detail: detail)
             try await refreshHistory(.playlists, epoch: epoch)
         } catch {
-            if MusicServiceError.sanitized(error) == .commitUnconfirmed {
-                _ = try? beginHistoryRead(.playlists, epoch: epoch)
-            }
             report(error, epoch: epoch, operation: "删除播放历史", kind: .library)
         }
     }
@@ -89,14 +84,11 @@ extension MusicViewModel {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
         do {
-            guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
+            let service = try requireService()
             if category == .songs { await flushPlaybackFacts(); try check(epoch) }
-            try await provider.clearHistory(category)
+            try await service.clearHistory(category)
             try await refreshHistory(category, epoch: epoch)
         } catch {
-            if MusicServiceError.sanitized(error) == .commitUnconfirmed {
-                _ = try? beginHistoryRead(category, epoch: epoch)
-            }
             report(error, epoch: epoch, operation: category == .songs ? "清空已播歌曲" : "清空已播歌单", kind: .library)
         }
     }
@@ -143,14 +135,14 @@ extension MusicViewModel {
             guard navigationID == navigation, selectionID == token else { throw MusicServiceError.cancelled }
         }
         do {
-            guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
+            let service = try requireService()
             await flushPlaybackFacts(); try checkRequest()
-            let service = try requireService(), before = try await service.state()
+            let before = try await service.state()
             try checkRequest()
-            let restored = try await provider.restoreHistory(detail: detail, startIndex: startIndex,
+            let restored = try await service.restoreHistory(detail: detail, startIndex: startIndex,
                                                             expectedRevision: before.revision)
             try checkRequest()
-            try await (service as? any MusicSimilarModeServing)?.cancelSimilarMode()
+            try await service.cancelSimilarMode()
             try checkRequest(); stopFM(); invalidateSelection(stopMedia: true, reason: .ui); token = selectionID
             playbackState.state = restored; notices.queueNotice = nil
             try await refreshQueue(service, epoch: epoch, selection: token)

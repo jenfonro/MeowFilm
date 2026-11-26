@@ -17,13 +17,8 @@ public sealed partial class MusicLibraryOwner
         return true;
     }
 
-    private static MusicDesktopLyricsRecord DesktopLyricSettings(MusicLibrarySession doc)
-    {
-        var value = doc.ReadDesktopLyrics() ?? DefaultDesktopLyrics;
-        try { ValidateDesktopLyricSettings(value); }
-        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
-        return value;
-    }
+    private static MusicDesktopLyricsRecord DesktopLyricSettings(MusicLibrarySession doc) =>
+        doc.ReadDesktopLyrics() ?? DefaultDesktopLyrics;
 
     private static void ValidateDesktopLyricSettings(MusicDesktopLyricsRecord value)
     {
@@ -41,23 +36,20 @@ public sealed partial class MusicLibraryOwner
     }
 
     public Task<MusicDesktopLyricsRecord> GetDesktopLyricsAsync(CancellationToken cancellationToken = default) =>
-        RunLibraryReadAsync(doc =>
-        {
-            MusicRules.Require(pending is null, "PENDING_WRITE");
-            return DesktopLyricSettings(doc);
-        }, cancellationToken, authoritativeFor: PendingOwner.DesktopLyrics);
+        RunLibraryReadAsync(DesktopLyricSettings, cancellationToken);
 
-    public Task<MusicDesktopLyricsRecord> SaveDesktopLyricsAsync(
+    public async Task<MusicDesktopLyricsRecord> SaveDesktopLyricsAsync(
         long ifRevision,
         string layout,
         string normalColor,
         string highlightColor,
         MusicDesktopLyricsGeometryRecord? geometry = null,
         bool includeGeometry = false,
-        CancellationToken cancellationToken = default) =>
-        RunLibraryWriteAsync(PendingOwner.DesktopLyrics, doc =>
+        CancellationToken cancellationToken = default)
+    {
+        bool mutated = false;
+        var result = await RunLibraryWriteAsync(doc =>
         {
-            MusicRules.Require(pending is null, "PENDING_WRITE");
             var saved = DesktopLyricSettings(doc);
             MusicRules.Require(ifRevision == saved.Revision, "REVISION_CONFLICT");
 
@@ -86,5 +78,8 @@ public sealed partial class MusicLibraryOwner
             ValidateDesktopLyricSettings(next);
             doc.SetDesktopLyrics(next);
             return (next, true);
-        }, cancellationToken);
+        }, cancellationToken, onCommitted: () => mutated = true).ConfigureAwait(false);
+        if (mutated) InvokeSafe(DesktopLyricsChanged, result);
+        return result;
+    }
 }

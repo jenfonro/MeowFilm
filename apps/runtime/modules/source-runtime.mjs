@@ -24,11 +24,10 @@ import { contracts } from '../contracts.mjs';
 
 const sourceRuntimeContract = contracts.source.contract;
 const protocols = new Set(['legado', 'qysg', 'cat']);
-const codes = contracts.source.codes;
 
 class Failure extends Error {
   constructor(code) {
-    super(codes.has(code) ? code : 'SOURCE_FAILURE');
+    super(typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'SOURCE_FAILURE');
     this.code = this.message;
   }
 }

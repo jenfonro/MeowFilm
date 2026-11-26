@@ -14,48 +14,20 @@ function hostName(input) {
   return value;
 }
 
-function ipv4Bytes(input) {
-  if (isIP(input) !== 4) return null;
-  const bytes = input.split('.').map(Number);
-  return bytes.length === 4 && bytes.every(value => Number.isInteger(value) && value >= 0 && value <= 255)
-    ? bytes : null;
-}
-
-function ipv6Bytes(input) {
-  if (isIP(input) !== 6) return null;
-  let value = input.toLowerCase(), tail = [];
-  const dot = value.lastIndexOf(':');
-  if (value.includes('.')) {
-    const bytes = ipv4Bytes(value.slice(dot + 1));
-    if (!bytes) return null;
-    tail = [(bytes[0] << 8) | bytes[1], (bytes[2] << 8) | bytes[3]];
-    value = value.slice(0, dot) + ':v4';
-  }
-  const halves = value.split('::');
-  if (halves.length > 2) return null;
-  const parse = part => part ? part.split(':').filter(Boolean).map(item => {
-    if (item === 'v4') return tail;
-    if (!/^[a-f0-9]{1,4}$/.test(item)) return null;
-    return parseInt(item, 16);
-  }).flat() : [];
-  const left = parse(halves[0]), right = parse(halves[1] ?? '');
-  if (!left || !right || left.some(item => item === null) || right.some(item => item === null)) return null;
-  const missing = 8 - left.length - right.length;
-  if (missing < 0 || halves.length === 1 && missing !== 0) return null;
-  const words = [...left, ...Array(missing).fill(0), ...right];
-  if (words.length !== 8) return null;
-  return words.flatMap(word => [word >> 8, word & 255]);
-}
-
 export function isLoopbackHost(input) {
   let value;
   try { value = hostName(input); } catch { return false; }
   if (localNames.has(value) || value.endsWith('.localhost')) return true;
-  const v4 = ipv4Bytes(value);
-  if (v4) return v4[0] === 127 || v4.every(byte => byte === 0);
-  const v6 = ipv6Bytes(value);
-  return Boolean(v6 && (v6.every(byte => byte === 0) ||
-    v6.slice(0, 15).every(byte => byte === 0) && v6[15] === 1));
+  const kind = isIP(value);
+  if (kind === 4) return value.startsWith('127.') || value === '0.0.0.0';
+  if (kind === 6) {
+    try {
+      const canonical = new URL(`http://[${value}]`).hostname;
+      return canonical === '[::1]' || canonical === '[::]' ||
+        /^\[::ffff:(?:7f[0-9a-f]{2}:[0-9a-f]{1,4}|0:0)\]$/i.test(canonical);
+    } catch { return false; }
+  }
+  return false;
 }
 
 export function dnsFacade() {

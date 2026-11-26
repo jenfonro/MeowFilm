@@ -7,14 +7,13 @@
 ```text
 MusicNativeApplication
 MusicRecommendationCoordinator
-MusicRecommendationQueuePort
 MusicLibraryOwner
 MusicCapability
 ```
 
-- `MusicRecommendationCoordinator` 拥有推荐会话、请求代次、继续条件、反馈来源和未知提交状态。
-- `MusicRecommendationQueuePort` 是覆盖唯一 `MusicLibraryOwner` 的队列准入 lane，不是第二个存储 owner。
-- 固定平台目录通过共同 Node 读取推荐批次；推荐会话、唯一队列 lane 和媒体编排仍由原生拥有，LX 脚本和页面绑定不参与。
+- `MusicRecommendationCoordinator` 拥有推荐会话、请求代次、继续条件和反馈来源。
+- `MusicLibraryOwner` 是唯一队列存储 owner，推荐队列切换与追加直接在其串行写边界按 `expectedVersion` CAS 原子执行。
+- 固定平台目录通过共同 Node 读取推荐批次；推荐会话、唯一队列 owner 和媒体编排仍由原生拥有，LX 脚本和页面绑定不参与。
 - 推荐会话与返回点（checkpoint）已由 `MusicRecommendationStore` 持久化至永久库 5 张表 `windows_music_recommendation_{checkpoints,checkpoint_entries,checkpoint_lists,sessions,session_lists}`，支持冷启动恢复与离线保护 `returnQueue`；逐曲反馈 live proof 与在途请求状态仍仅属于当前进程。
 
 ## 当前命令与类型
@@ -22,7 +21,7 @@ MusicCapability
 产品行为以[播放来源、队列与自动续播](../common/music/playback-sessions.md)为准；本文件记录 Windows 协调器的类型、事务与生命周期。
 
 ```text
-music.recommendations.start / get / choose / continue / retry / return / cancel / reconcile
+music.recommendations.start / get / choose / continue / retry / return / cancel
 ```
 
 `start` 的本端参数：
@@ -73,11 +72,11 @@ sourceType heartbeatPlaylistId mode submode ruleId tabTagId
 
 `MusicFmPreferences`（位于 `MeowFilm.Capabilities/Music/Recommendations/Storage/`）直接通过强类型 SQL 按 `account_id` 读写 `windows_music_fm_preferences`（`account_id`、`mode`、`submode`、`rule_id`、`tab_tag_id`）。不存凭据、队列或活会话，不进入曲库同步。
 
-首页不指定 mode 的 FM start 在账号首次观察后读取该账号选择；无记录使用 default。只有账号 lease 和已提交 FM 配置仍属当前来源时才保存；切换失败、取消、旧响应不能覆盖。未知提交须显式 reconcile，确认成功后才保存真实配置。
+首页不指定 mode 的 FM start 在账号首次观察后读取该账号选择；无记录使用 default。只有账号 lease 和已提交 FM 配置仍属当前来源时才保存；切换失败、取消、旧响应不能覆盖。
 
-## 唯一队列 lane
+## 唯一队列写边界
 
-所有会改变队列或当前选择的入口必须经过同一个 `MusicRecommendationQueuePort`：
+所有会改变队列或当前选择的入口均经由唯一 `MusicLibraryOwner` 的串行写边界按 `expectedVersion` CAS 执行：
 
 ```text
 music.queue.select / next / previous / step
@@ -88,7 +87,7 @@ music.catalog.playlist.commit action=play|next
 
 网络歌单收藏使用 `music.catalog.playlist.save`，由同一个 library owner 保存远端引用，不先 prepare／读取成员，也不替换队列或退休当前推荐。
 
-`music.queue.recommendation.*` 是协调器与 library owner 的私有事务协议；普通 application 调用必须返回 `CAPABILITY_UNAVAILABLE`。私有协议只处理当前推荐批次的 capture、enter、append、select、restore、discard 和 reconcile，不暴露给页面。
+`music.queue.recommendation.*` 是协调器与 library owner 的私有事务协议；私有协议只处理当前推荐批次的 capture、enter、append、select、restore 和 discard，不暴露给页面。
 
 ## 请求与会话生命周期
 
@@ -122,19 +121,6 @@ Task PrepareRecommendationsAsync(CancellationToken ct = default);
 - 反馈只属于当前活会话中实际入队的 occurrence，不从持久 queue context 恢复算法会话。
 - `MusicRecommendationFeedback.FeedbackSource` 只随 live proof 传递，不启用反馈 consent、不增加历史采集；准确 native recording、live occurrence 和账号代次仍由反馈消费者验证。
 - 账号失效撤销整份活会话 proof；停止播放仅针对该会话实际入队且当前正在选择的 occurrence。只读预览或自动追加保留的原列表当前曲不因此被停止。
-
-## 未知提交
-
-队列 CAS 返回 `COMMIT_UNKNOWN` 或无法确认的冲突时：
-
-- 唯一 library owner 只保留当前未确认操作的 nonce 和 before／after 指纹，不累计历史回执。
-- 协调器将对应会话加入 `reconcileIds`，封闭新的推荐读取和写入。
-- 仅允许 get、cancel 和显式 reconcile。
-- reconcile 只读取当前持久文档判断该 nonce 是否生效，不重放 enter、append、select 或 restore。
-- 心动 restore 的成功及丢 ACK 后显式核对均不派发媒体 selection，也不改写播放／暂停意图；确认未应用时保留 checkpoint 和当前推荐曲，允许再次返回。返回流程在确认已应用后消费 checkpoint、退休会话并清空推荐 proof。
-- 全部未知项结算后才恢复推荐准入。
-
-未确认的 pending 只通过对应 owner 的 reconcile 结算。已提交但队列读回失败时保留协调状态，且不把成功提交后的回读失败改记为 `COMMIT_UNKNOWN`。owner 只保留最近一次推荐结果回执，由下一次推荐提交覆盖；replay 和 reconcile 仍按 nonce 读取该回执。
 
 返回原队列所需 checkpoint 由恢复、discard 或关闭释放，不设字节或数量门槛。
 

@@ -1,4 +1,3 @@
-using System.Text;
 using MeowFilm.Platform.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -29,20 +28,7 @@ internal sealed record AudioFileInfoRecord(
     long? SampleRate,
     long? BitDepth,
     long? Channels,
-    long? Bitrate)
-{
-    internal int EstimateBytes()
-    {
-        int bytes = 320;
-        bytes += Utf8Len(Kind) + Utf8Len(Platform) + Utf8Len(SongId) + Utf8Len(SourceKey) + Utf8Len(Scope);
-        bytes += Utf8Len(InstallationId) + Utf8Len(ProviderName) + Utf8Len(Quality) + Utf8Len(RequestedQuality);
-        bytes += Utf8Len(ActualQuality) + Utf8Len(QualityPolicySignature) + Utf8Len(QualityCacheSignature);
-        bytes += Utf8Len(Delivery) + Utf8Len(QualityEvidence) + Utf8Len(Codec);
-        return bytes;
-    }
-
-    private static int Utf8Len(string? s) => s is null ? 0 : Encoding.UTF8.GetByteCount(s);
-}
+    long? Bitrate);
 
 internal sealed record AudioFileCacheRecord(
     string ResourceKey,
@@ -51,12 +37,7 @@ internal sealed record AudioFileCacheRecord(
     string Signature,
     long ConfirmedAt,
     double? Duration,
-    AudioFileInfoRecord Info)
-{
-    internal int EstimateBytes() =>
-        160 + Encoding.UTF8.GetByteCount(ResourceKey) + Encoding.UTF8.GetByteCount(FileName) +
-        Encoding.UTF8.GetByteCount(Signature) + Info.EstimateBytes();
-}
+    AudioFileInfoRecord Info);
 
 internal static class AudioFileCacheStore
 {

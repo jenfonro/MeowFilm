@@ -1,4 +1,3 @@
-using System.Text;
 using MeowFilm.Platform.Storage;
 using Microsoft.Data.Sqlite;
 using static MeowFilm.Capabilities.Library.MusicStorageModelHelpers;
@@ -55,16 +54,6 @@ public sealed record MusicSongSourceRecord(
         NullableDoubleEqual(Duration, other.Duration) &&
         Img == other.Img &&
         QualityKnown == other.QualityKnown;
-
-    internal int EstimateBytes()
-    {
-        int bytes = 128 + Utf8Len(SourceKey) + Utf8Len(Platform) + Utf8Len(InfoSource) +
-            Utf8Len(SongMid) + Utf8Len(Mid) + Utf8Len(NativeId) + Utf8Len(Hash) +
-            Utf8Len(Name) + Utf8Len(Singer) + Utf8Len(AlbumName) + Utf8Len(Img);
-        foreach (string a in ArtistNames) bytes += 8 + Utf8Len(a);
-        if (WireExtras is not null) bytes += EstimateStorageValueBytes(WireExtras);
-        return bytes;
-    }
 }
 
 public sealed record MusicSongRecord(
@@ -103,15 +92,6 @@ public sealed record MusicSongRecord(
         LocalFileId == other.LocalFileId &&
         ArtworkSourceKey == other.ArtworkSourceKey &&
         ArtworkSourceImage == other.ArtworkSourceImage;
-
-    internal int EstimateBytes()
-    {
-        int bytes = 128 + Utf8Len(SongId) + Utf8Len(Title) + Utf8Len(Artist) + Utf8Len(Album) +
-            Utf8Len(CoverUrl) + Utf8Len(LocalFileId) + Utf8Len(ArtworkSourceKey) + Utf8Len(ArtworkSourceImage);
-        foreach (string a in ArtistNames) bytes += 8 + Utf8Len(a);
-        foreach (var s in Sources) bytes += s.EstimateBytes();
-        return bytes;
-    }
 }
 
 public sealed record MusicQueueSourceRecord(
@@ -518,8 +498,6 @@ public sealed record MusicLibrarySyncStateRecord(
 
 internal static class MusicStorageModelHelpers
 {
-    internal static int Utf8Len(string? s) => s is null ? 0 : Encoding.UTF8.GetByteCount(s);
-
     internal static bool NullableDoubleEqual(double? a, double? b) =>
         a is null ? b is null : b is { } bv && BitConverter.DoubleToInt64Bits(a.Value) == BitConverter.DoubleToInt64Bits(bv);
 
@@ -530,40 +508,5 @@ internal static class MusicStorageModelHelpers
         int i = 0;
         while (i < limit && comparer.Equals(previous[i], next[i])) i++;
         return i;
-    }
-
-    internal static int EstimateStorageValueBytes(StorageValue? value) =>
-        value is null ? 4 : value.EstimateBytes();
-
-    internal static int EstimateCommitBytes(MusicLibraryCommit commit)
-    {
-        int bytes = 256;
-        foreach (var song in commit.Songs) bytes = checked(bytes + song.Record.EstimateBytes());
-        if (commit.Library is { Next: var lib })
-        {
-            bytes = checked(bytes + 256 + lib.Accounts.Count * 64 + lib.NetworkPlaylists.Length * 256);
-            foreach (var col in lib.Collections)
-                bytes = checked(bytes + 128 + col.Order.Length * 40 + col.Bindings.Length * 192 + col.Intents.Count * 96);
-        }
-        if (commit.Queue is { Next: var q })
-            bytes = checked(bytes + 256 + q.Entries.Length * 128 + q.Priority.Length * 32);
-        foreach (var pl in commit.HistoryPlaylists)
-            if (pl.Next is { } next)
-                bytes = checked(bytes + 256 + next.Entries.Length * 128 + (next.Priority.Length + next.History.Length) * 32);
-        foreach (var day in commit.HistoryDays)
-            if (day.Next is { } next)
-                bytes = checked(bytes + 128 + next.Songs.Length * 96);
-        foreach (var lyr in commit.LocalLyrics)
-            if (lyr.Next is { } next)
-                bytes = checked(bytes + 128 + next.Lines.Length * 96);
-        if (commit.LibrarySync is { Next: var sync })
-            bytes = checked(bytes + 512 + sync.Issues.Length * 64);
-        foreach (var cp in commit.RecommendationCheckpoints)
-            if (cp.Next is { } nextCp)
-                bytes = checked(bytes + 256 + nextCp.Queue.Entries.Length * 128 +
-                    (nextCp.Queue.Priority.Length + nextCp.History.Length + nextCp.Failed.Length) * 32);
-        if (commit.RecommendationSession is { HasValue: true, Value: { } recSession })
-            bytes = checked(bytes + 512 + (recSession.SourceIds.Length + recSession.Attempted.Length) * 32);
-        return bytes;
     }
 }

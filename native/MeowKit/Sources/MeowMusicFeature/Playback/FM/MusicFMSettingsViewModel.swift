@@ -4,14 +4,13 @@ import Combine
 
 @MainActor
 final class MusicFMSettingsViewModel: ObservableObject {
-    @Published private var request: (id: UUID, access: UUID, choice: String)?
+    @Published private(set) var pendingChoice: String?
     @Published private(set) var error: String?
     @Published private(set) var selectionCompleted = false
     @Published private(set) var selection: MusicHomeAction?
     private let owner: MusicViewModel
     private let requireActiveFM: Bool
     private var generation: UUID?
-    private var available = false
     private var closed = false
     private var work: Task<Void, Never>?
     private var workID: UUID?
@@ -24,15 +23,13 @@ final class MusicFMSettingsViewModel: ObservableObject {
         selection = owner.activeHomeFM
     }
 
-    var pendingChoice: String? { request?.choice }
     var hasAccess: Bool {
-        !closed && available && generation == owner.searchAccessGeneration && !owner.isClosed
+        !closed && generation == owner.searchAccessGeneration && !owner.isClosed
     }
 
-    func setAccess(available: Bool, generation: UUID) {
-        guard !closed, self.available != available || self.generation != generation else { return }
-        self.available = available
-        self.generation = generation
+    func syncAccess() {
+        guard !closed, !owner.isClosed, generation != owner.searchAccessGeneration else { return }
+        generation = owner.searchAccessGeneration
         invalidate()
         readSelection()
     }
@@ -41,15 +38,11 @@ final class MusicFMSettingsViewModel: ObservableObject {
         guard hasAccess, work == nil, !requireActiveFM || owner.isFMActive,
               !owner.isFMActive || !choice.matches(selection) || lastFailure != nil else { return }
         let id = UUID(), access = owner.searchAccessGeneration
-        request = (id, access, choice.id)
-        workID = id
-        error = nil
-        lastFailure = nil
-        selectionCompleted = false
+        pendingChoice = choice.id
+        workID = id; error = nil; lastFailure = nil; selectionCompleted = false
         work = Task { [weak self] in
             guard let self else { return }
             defer { finish(id) }
-            guard current(id, access: access) else { return }
             do {
                 try await owner.playHomeAction(choice.action, title: choice.title, forceReload: true)
                 guard current(id, access: access) else { return }
@@ -61,8 +54,7 @@ final class MusicFMSettingsViewModel: ObservableObject {
                 let failure = MusicServiceError.sanitized(error)
                 guard failure != .cancelled else { return }
                 lastFailure = failure.localizedDescription
-                if failure != .commitUnconfirmed { self.error = failure.localizedDescription }
-                else { reloadRequested = true }
+                self.error = failure.localizedDescription
             }
         }
     }
@@ -70,10 +62,7 @@ final class MusicFMSettingsViewModel: ObservableObject {
     private func readSelection() {
         guard hasAccess else { return }
         guard work == nil else { reloadRequested = true; return }
-        guard let service = owner.service as? any MusicFMPlaybackServing else {
-            selection = owner.activeHomeFM
-            return
-        }
+        guard let service = owner.service else { selection = owner.activeHomeFM; return }
         let id = UUID(), access = owner.searchAccessGeneration
         workID = id
         work = Task { [weak self] in
@@ -93,38 +82,22 @@ final class MusicFMSettingsViewModel: ObservableObject {
 
     private func finish(_ id: UUID) {
         guard workID == id else { return }
-        request = nil; work = nil; workID = nil
-        if reloadRequested {
-            reloadRequested = false
-            readSelection()
-        }
+        pendingChoice = nil; work = nil; workID = nil
+        if reloadRequested { reloadRequested = false; readSelection() }
     }
 
-    func dismissError(_ value: String) {
-        if error == value { error = nil }
-    }
-
+    func dismissError(_ value: String) { if error == value { error = nil } }
     func acknowledgeSelection() { selectionCompleted = false }
-
-    func close() {
-        guard !closed else { return }
-        closed = true
-        invalidate()
-    }
+    func close() { guard !closed else { return }; closed = true; invalidate() }
 
     private func current(_ id: UUID, access: UUID) -> Bool {
-        hasAccess && !Task.isCancelled && request?.id == id && request?.access == access &&
+        hasAccess && !Task.isCancelled && workID == id &&
             owner.searchAccessGeneration == access && (!requireActiveFM || owner.isFMActive)
     }
 
     private func invalidate() {
-        request = nil
-        work?.cancel()
-        reloadRequested = false
-        error = nil
-        lastFailure = nil
-        selectionCompleted = false
-        selection = nil
+        pendingChoice = nil; work?.cancel(); reloadRequested = false
+        error = nil; lastFailure = nil; selectionCompleted = false; selection = nil
     }
 
     deinit { work?.cancel() }

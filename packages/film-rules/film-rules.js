@@ -326,8 +326,6 @@
   }
 
   function process(request, rules) {
-    request = { ...request, text: ruleText(request.text),
-      ...(request.section === 'search' ? { query: ruleText(request.query) } : {}) };
     const input = String(request.text || '').trim();
     const result = {
       section: request.section, type: '', text: '', inputText: input, processedText: input,
@@ -340,31 +338,6 @@
       case 'search': return processSearch(request, rules, result);
       default: throw new Error('Unknown film rule section');
     }
-  }
-
-  function ruleText(value) {
-    if (!Array.isArray(value)) return value;
-    if (value.some(unit => !Number.isInteger(unit) || unit < 0 || unit > 65535)) {
-      throw new Error('Invalid film rule text');
-    }
-    return value.map(unit => String.fromCharCode(unit)).join('');
-  }
-
-  function wireText(value) {
-    if (typeof value === 'string') {
-      for (let index = 0; index < value.length; index++) {
-        const unit = value.charCodeAt(index);
-        if (unit >= 0xd800 && unit <= 0xdbff) {
-          const next = value.charCodeAt(index + 1);
-          if (next >= 0xdc00 && next <= 0xdfff) { index++; continue; }
-        } else if (unit < 0xdc00 || unit > 0xdfff) continue;
-        return Array.from({ length: value.length }, (_, i) => value.charCodeAt(i));
-      }
-    } else if (Array.isArray(value)) return value.map(wireText);
-    else if (value && typeof value === 'object') {
-      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, wireText(item)]));
-    }
-    return value;
   }
 
   globalThis.meowfilmProcess = function (request) {
@@ -380,8 +353,8 @@
         const parsed = normalizePatternInput(request.pattern);
         return parsed ? (parsed.flags ? `/${parsed.pattern}/${parsed.flags}` : parsed.pattern) : '';
       }
-      case 'process': return process(request.request, request.rules);
-      case 'preview': return wireText(process(request.request, request.rules));
+      case 'process':
+      case 'preview': return process(request.request, request.rules);
       default: throw new Error('Unknown film rule operation');
     }
   };

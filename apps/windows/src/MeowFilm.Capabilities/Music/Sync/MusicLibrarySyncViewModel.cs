@@ -38,7 +38,6 @@ public sealed class MusicLibrarySyncPlatformRow(string platform, string label) :
 public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDisposable
 {
     private readonly MusicLibrarySyncService service;
-    private readonly MusicSettingReceiptTracker receipts;
     private readonly Func<string, CancellationToken, Task<bool>>? confirmResetAccount;
     private readonly Func<bool> isClosed;
     private CancellationTokenSource? visibility;
@@ -50,12 +49,10 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
 
     internal MusicLibrarySyncViewModel(
         MusicLibrarySyncService service,
-        MusicSettingReceiptTracker receipts,
         Func<string, CancellationToken, Task<bool>>? confirmResetAccount = null,
         Func<bool>? isClosed = null)
     {
         this.service = service ?? throw new ArgumentNullException(nameof(service));
-        this.receipts = receipts ?? throw new ArgumentNullException(nameof(receipts));
         this.confirmResetAccount = confirmResetAccount;
         this.isClosed = isClosed ?? (() => false);
     }
@@ -84,7 +81,7 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
 
     public Task RefreshStatusAsync() => ExecuteWorkAsync(
         token => isClosed() ? Task.FromResult(MusicLibrarySyncResult.Failed("CLOSED")) : service.GetStateAsync(token),
-        receiptKey: null,
+        clearRebind: false,
         matchesReadback: null,
         rebindPlatformCandidate: null,
         retryAfterRebind: null,
@@ -102,7 +99,7 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
             token => isClosed()
                 ? Task.FromResult(MusicLibrarySyncResult.Failed("CLOSED"))
                 : service.SetPlatformAsync(platform, favorites, playlists, revision, confirm: true, token),
-            receiptKey: "library-sync:" + platform,
+            clearRebind: true,
             matchesReadback: () => row.Favorites == favorites && row.Playlists == playlists,
             rebindPlatformCandidate: platform,
             retryAfterRebind: token => service.SetPlatformAsync(platform, favorites, playlists, revision, confirm: true, token),
@@ -117,7 +114,7 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
             token => isClosed()
                 ? Task.FromResult(MusicLibrarySyncResult.Failed("CLOSED"))
                 : service.ConfirmAsync(tokenToConfirm, revision, confirm: true, token),
-            receiptKey: "library-sync:confirm",
+            clearRebind: true,
             matchesReadback: null,
             rebindPlatformCandidate: null,
             retryAfterRebind: null,
@@ -133,7 +130,7 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
             token => isClosed()
                 ? Task.FromResult(MusicLibrarySyncResult.Failed("CLOSED"))
                 : service.ResetAccountAsync(platform, revision, confirm: true, token),
-            receiptKey: "library-sync:" + platform,
+            clearRebind: true,
             matchesReadback: () => !row.Favorites && !row.Playlists,
             rebindPlatformCandidate: null,
             retryAfterRebind: null,
@@ -142,7 +139,7 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
 
     private Task ExecuteWorkAsync(
         Func<CancellationToken, Task<MusicLibrarySyncResult>> action,
-        string? receiptKey,
+        bool clearRebind,
         Func<bool>? matchesReadback,
         string? rebindPlatformCandidate,
         Func<CancellationToken, Task<MusicLibrarySyncResult>>? retryAfterRebind,
@@ -157,7 +154,6 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
 
         async Task Work()
         {
-            long submission = receiptKey is null ? 0 : receipts.NextSubmission();
             try
             {
                 var result = await action(token);
@@ -177,11 +173,7 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
                         var resetResult = await service.ResetAccountAsync(rebindPlatformCandidate, revision, confirm: true, token);
                         if (ticket != epoch || token.IsCancellationRequested) return;
                         Apply(resetResult);
-                        if (!resetResult.Ok)
-                        {
-                            RecordReceiptIfNeeded(receiptKey, submission, resetResult.Code == "COMMIT_UNKNOWN", confirmed: false);
-                            return;
-                        }
+                        if (!resetResult.Ok) return;
                         SetRebindPlatform("");
                         if (retryAfterRebind is not null)
                         {
@@ -190,7 +182,6 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
                         }
                         else
                         {
-                            RecordReceiptIfNeeded(receiptKey, submission, isCommitUnknown: false, confirmed: true);
                             return;
                         }
                     }
@@ -201,29 +192,19 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
                 }
 
                 Apply(result);
-                bool saved = result.Ok;
-                if (saved)
+                if (result.Ok)
                 {
-                    if (receiptKey is not null) SetRebindPlatform("");
-                    RecordReceiptIfNeeded(receiptKey, submission, isCommitUnknown: false, confirmed: true);
+                    if (clearRebind) SetRebindPlatform("");
                 }
                 else
                 {
-                    bool commitUnknown = result.Code == "COMMIT_UNKNOWN";
                     string error = Status;
                     var latest = await service.GetStateAsync(token);
                     if (ticket != epoch || token.IsCancellationRequested) return;
                     Apply(latest);
-                    saved = latest.Ok && matchesReadback is not null && matchesReadback();
-                    if (saved)
+                    if (!(latest.Ok && matchesReadback is not null && matchesReadback()))
                     {
-                        RecordReceiptIfNeeded(receiptKey, submission, isCommitUnknown: false, confirmed: true);
-                    }
-                    else
-                    {
-                        if (commitUnknown)
-                            RecordReceiptIfNeeded(receiptKey, submission, isCommitUnknown: true, confirmed: false);
-                        Status = commitUnknown ? "保存结果未确认，请重新读取" : error;
+                        Status = error;
                         return;
                     }
                 }
@@ -261,15 +242,6 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
                 }
             }
         }
-    }
-
-    private void RecordReceiptIfNeeded(string? receiptKey, long submission, bool isCommitUnknown, bool confirmed)
-    {
-        if (receiptKey is null) return;
-        if (confirmed)
-            receipts.Record(receiptKey, "平台同步", submission, confirmed: true);
-        else if (isCommitUnknown)
-            receipts.Record(receiptKey, "平台同步", submission, confirmed: false);
     }
 
     private void SetRebindPlatform(string platform)
@@ -325,8 +297,6 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
             "STALE_SESSION" or "SYNC_SUPERSEDED" => "同步已失效",
             "CANCELLED" => "",
             "SYNC_BUSY" => "正在同步",
-            "COMMIT_UNKNOWN" => "保存结果未确认，请重新读取",
-            "PENDING_WRITE" => "同步设置保存失败",
             "CREATE_UNCONFIRMED" or "WRITE_UNCONFIRMED" or "DELETE_UNCONFIRMED" => "远端写入未确认",
             "REMOTE_ORDER_UNSUPPORTED" => "远端排序不支持",
             "SYNC_CLOUD_TRANSPORT_REQUIRED" => "酷狗同步不可用",

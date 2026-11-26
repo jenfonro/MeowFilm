@@ -91,7 +91,7 @@ internal sealed partial class ShellDebugAdapter
         }).ToArray();
 
         object? activeDialog = BuildActiveDialogStateOnUi();
-        var notices = shell.OwnedNotices.Snapshot();
+        var notices = Array.Empty<object>();
         var size = shell.AppWindow.Size;
         double scale = shell.Root.XamlRoot?.RasterizationScale ?? 1.0;
         var regions = shell.NativeCaption?.InspectRegions() ?? ([], []);

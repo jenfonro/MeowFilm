@@ -42,8 +42,7 @@ public sealed record MusicVipPageSnapshot(
     string AccountError = "",
     string SignError = "",
     string BannerError = "",
-    bool SignConfirmed = false,
-    bool SignUnconfirmed = false)
+    bool SignConfirmed = false)
 {
     public bool SignedToday => SignConfirmed || Sign?.SignedToday == true;
 }

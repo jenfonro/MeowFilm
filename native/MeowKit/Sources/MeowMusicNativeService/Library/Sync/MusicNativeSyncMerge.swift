@@ -3,7 +3,7 @@
 // anchor merging; platform snapshots never directly replace the local library.
 import Foundation
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 
 extension NativeMusicService {
     func syncProtectPull(_ round: inout MusicNativeSyncRound) throws -> Bool {
@@ -39,7 +39,7 @@ extension NativeMusicService {
                 }
                 memberKeysByCollection[remote.id] = pairs
             }
-            let ownersBySourceKey: [String: String] = remoteSourceKeys.isEmpty ? [:] : try repositoryReader.sourceOwners(keys: remoteSourceKeys)
+            let ownersBySourceKey: [String: String] = remoteSourceKeys.isEmpty ? [:] : try database.sourceOwners(keys: remoteSourceKeys)
             for (c, b) in knownBindings {
                 guard let remote = snapshot.collections.first(where: { $0.id == b.remoteID }) else { continue }
                 let oldMap = Dictionary(uniqueKeysWithValues: b.map.map { ($0.remoteEntryID, $0.songID) })

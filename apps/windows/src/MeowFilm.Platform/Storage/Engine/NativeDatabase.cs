@@ -13,13 +13,6 @@ public readonly record struct StorageRevision(long Revision)
     public static StorageRevision Empty { get; } = new(0);
 }
 
-/// <summary>Raised only after SQLite transaction.Commit() was invoked and failed, leaving commit durability uncertain.</summary>
-public sealed class TransactionCommitUnknownException : Exception
-{
-    public StorageError Error { get; }
-    public TransactionCommitUnknownException(StorageError error) : base(error.ToString()) => Error = error;
-}
-
 /// <summary>
 /// WAL-separated native SQLite engine: dedicated write lane and dedicated read-only lane,
 /// each with a bounded prepared-statement LRU cache. Supports dual roles (Data vs Cache).
@@ -32,7 +25,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     public const string DataFileName = "meowfilm-data.sqlite3";
     public const string CacheFileName = "meowfilm-cache.sqlite3";
     private const int MaximumPendingOperations = 128;
-    private const int MaximumPendingBytes = 32 * 1024 * 1024;
     private const int PreparedStatementCacheCapacity = 256;
     private readonly Channel<Operation> writeOperations = Channel.CreateBounded<Operation>(new BoundedChannelOptions(MaximumPendingOperations)
     {
@@ -56,7 +48,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private bool readLaneStarted;
     private int writeLaneThreadId;
     private int readLaneThreadId;
-    private long pendingBytes;
     private int activeOperations;
     private TaskCompletionSource drained = CompletedDrain();
     private int commits;
@@ -68,7 +59,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private string FileName => role == DatabaseRole.Cache ? CacheFileName : DataFileName;
     private int ExpectedApplicationId => role == DatabaseRole.Cache ? CacheApplicationId : DataApplicationId;
     private string SynchronousMode => role == DatabaseRole.Cache ? "NORMAL" : "FULL";
-    private long ExpectedSynchronousLevel => role == DatabaseRole.Cache ? 1L : 2L;
     private string InitializeLockName => role == DatabaseRole.Cache ? "cache-initialize.lock" : "data-initialize.lock";
     private string MaintenanceLockName => role == DatabaseRole.Cache ? "cache-maintenance.lock" : "data-maintenance.lock";
     public string DatabasePath => Path.Combine(productRoot, "storage-v1", FileName);
@@ -114,20 +104,18 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         }, token);
 
     /// <summary>Cancellation applies to admission, not to an accepted transaction or its commit.</summary>
-    public Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default, int retainedBytes = 0, Action<Action>? commit = null) =>
+    public Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default, Action<Action>? commit = null) =>
         EnqueueWrite(session =>
         {
             var started = DebugLog.IsEnabled ? Stopwatch.GetTimestamp() : 0L;
             int beforeChanges = SQLitePCL.raw.sqlite3_total_changes(session.Connection.Handle);
             using var transaction = session.Connection.BeginTransaction();
-            bool commitAttempted = false;
             bool committed = false;
             try
             {
                 var result = write(new(session.Connection, transaction, session.StatementCache));
                 void Commit()
                 {
-                    commitAttempted = true;
                     transaction.Commit();
                     committed = true;
                 }
@@ -138,30 +126,23 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 if (started != 0)
                 {
                     DebugLog.Trace(DebugCategories.Storage, "sqlite", "tx.commit",
-                        new { commitCount = commits, retainedBytes },
+                        new { commitCount = commits },
                         durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                 }
                 return result;
             }
             catch (Exception ex)
             {
+                try { transaction.Rollback(); } catch { }
                 if (started != 0)
                 {
                     DebugLog.Warn(DebugCategories.Storage, "sqlite", "tx.error",
-                        new { retainedBytes, commitAttempted, committed }, error: ex,
+                        new { committed }, error: ex,
                         durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-                }
-                if (commitAttempted && !committed)
-                {
-                    var translated = Translate(ex);
-                    var error = translated is StorageException storeError
-                        ? storeError.Error
-                        : StorageError.Storage;
-                    throw new TransactionCommitUnknownException(error);
                 }
                 throw;
             }
-        }, token, retainedBytes);
+        }, token);
 
     public async Task<object> ExecuteReadOnlyQueryAsync(string sql, JsonElement? parameters, int maxRows, CancellationToken cancellationToken)
     {
@@ -346,13 +327,12 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         return tcs;
     }
 
-    private abstract class Operation(int bytes)
+    private abstract class Operation
     {
-        internal int Bytes { get; } = bytes;
         internal abstract void Execute(DatabaseSession session);
         internal abstract void Fail(Exception error);
     }
-    private sealed class Operation<T>(Func<DatabaseSession, T> action, int bytes) : Operation(bytes)
+    private sealed class Operation<T>(Func<DatabaseSession, T> action) : Operation
     {
         internal TaskCompletionSource<T> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal override void Execute(DatabaseSession session)
@@ -363,39 +343,22 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         }
         internal override void Fail(Exception error) => Result.TrySetException(Translate(error));
     }
-    private Task<T> EnqueueWrite<T>(Func<DatabaseSession, T> action, CancellationToken token, int bytes)
-    {
-        token.ThrowIfCancellationRequested();
-        if (bytes < 0) throw new StorageException(StorageError.Limit);
-        var operation = new Operation<T>(action, bytes);
-        lock (admission)
-        {
-            token.ThrowIfCancellationRequested();
-            if (openError is not null) return Task.FromException<T>(openError);
-            if (closing) throw new StorageException(StorageError.Closed);
-            if (pendingBytes != 0 && pendingBytes > MaximumPendingBytes - (long)bytes) throw new StorageException(StorageError.Limit);
-            pendingBytes += bytes;
-            if (!writeOperations.Writer.TryWrite(operation))
-            {
-                pendingBytes -= bytes;
-                throw new StorageException(StorageError.Limit);
-            }
-            if (activeOperations++ == 0)
-                drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        }
-        return operation.Result.Task;
-    }
+    private Task<T> EnqueueWrite<T>(Func<DatabaseSession, T> action, CancellationToken token) =>
+        Enqueue(writeOperations, action, token);
 
-    private Task<T> EnqueueRead<T>(Func<DatabaseSession, T> action, CancellationToken token)
+    private Task<T> EnqueueRead<T>(Func<DatabaseSession, T> action, CancellationToken token) =>
+        Enqueue(readOperations, action, token);
+
+    private Task<T> Enqueue<T>(Channel<Operation> channel, Func<DatabaseSession, T> action, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var operation = new Operation<T>(action, 0);
+        var operation = new Operation<T>(action);
         lock (admission)
         {
             token.ThrowIfCancellationRequested();
             if (openError is not null) return Task.FromException<T>(openError);
             if (closing) throw new StorageException(StorageError.Closed);
-            if (!readOperations.Writer.TryWrite(operation)) throw new StorageException(StorageError.Limit);
+            if (!channel.Writer.TryWrite(operation)) throw new StorageException(StorageError.Limit);
             if (activeOperations++ == 0)
                 drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
@@ -432,7 +395,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                     {
                         lock (admission)
                         {
-                            pendingBytes -= operation.Bytes;
                             if (--activeOperations == 0) drained.TrySetResult();
                         }
                     }
@@ -464,7 +426,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 operation.Fail(failure ?? new StorageException(StorageError.Closed));
                 lock (admission)
                 {
-                    pendingBytes -= operation.Bytes;
                     if (--activeOperations == 0) drained.TrySetResult();
                 }
             }
@@ -607,16 +568,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             else if (identity != ExpectedApplicationId || version != FormatVersion)
                 throw new StorageException(StorageError.UnsupportedVersion);
             StorageSchema.Verify(session, schema);
-            string mode = session.Scalar<string>("PRAGMA journal_mode=WAL")!;
-            if (mode != "wal" ||
-                session.Scalar<long>("PRAGMA synchronous") != ExpectedSynchronousLevel ||
-                session.Scalar<long>("PRAGMA foreign_keys") != 1 ||
-                session.Scalar<long>("PRAGMA trusted_schema") != 0 ||
-                session.Scalar<long>("PRAGMA wal_autocheckpoint") != 0 ||
-                session.Scalar<long>("PRAGMA auto_vacuum") != 2 ||
-                session.Scalar<long>("PRAGMA temp_store") != 2 ||
-                session.Scalar<long>("PRAGMA cache_size") != -16384 ||
-                session.Scalar<long>("PRAGMA busy_timeout") != 5000)
+            if (session.Scalar<string>("PRAGMA journal_mode=WAL") != "wal")
                 throw new StorageException(StorageError.Storage);
             // Attach this long-lived connection to the WAL before another process
             // can become its only shared-memory participant and exit.
@@ -637,10 +589,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             readSession.ExecuteScript(
                 "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
                 "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
-            if (readSession.Scalar<string>("PRAGMA journal_mode") != "wal" ||
-                readSession.Scalar<long>("PRAGMA auto_vacuum") != 2 ||
-                readSession.Scalar<long>("PRAGMA query_only") != 1)
-                throw new StorageException(StorageError.Storage);
             _ = readSession.Scalar<long>("SELECT count(*) FROM storage_identity");
             readStatements = new PreparedStatementCache(readConnection, PreparedStatementCacheCapacity);
             var readThread = new Thread(RunReadLane) { IsBackground = true, Name = $"meowfilm native {role.ToString().ToLowerInvariant()} db read" };

@@ -158,11 +158,7 @@ public final class MusicQueueViewController: MusicPageViewController,
         current.mode.addAction(UIAction { [weak self] _ in self?.cycleMode() }, for: .touchUpInside)
         current.retry.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            if self.model.similarMode?.error == .commitUnconfirmed ||
-                self.model.queueRecommendations?.error == .commitUnconfirmed ||
-                self.model.fmPlayback?.error == .commitUnconfirmed {
-                self.readbackRecommendations()
-            } else if let snapshot = self.model.similarMode, snapshot.canRetry {
+            if let snapshot = self.model.similarMode, snapshot.canRetry {
                 self.runSimilar(snapshot) { await self.model.retrySimilarMode(snapshotID: snapshot.id) }
             } else if let snapshot = self.model.queueRecommendations, snapshot.canRetry {
                 self.runQueueRecommendation(snapshot) { await self.model.retryQueueRecommendations(snapshotID: snapshot.id) }
@@ -560,22 +556,6 @@ public final class MusicQueueViewController: MusicPageViewController,
                   intent.admits(revision: self.model.state.revision, ids: self.model.queue.map(\.id),
                                 permitted: self.isPageActive && !self.model.isClosed) else { return }
             await operation()
-        }
-    }
-
-    private func readbackRecommendations() {
-        guard let intent = captureQueueIntent() else { return }
-        let account = model.searchAccessGeneration, command = model.recommendations.recommendationCommandID
-        let similarID = model.similarMode?.id, recommendationID = model.queueRecommendations?.id, fmID = model.fmPlayback?.id
-        let errorID = model.similarMode?.errorID ?? model.queueRecommendations?.errorID ?? model.fmPlayback?.errorID
-        runPageTask { [weak self] in
-            guard let self, self.selected == "current", self.model.searchAccessGeneration == account,
-                  self.model.recommendations.recommendationCommandID == command, self.model.similarMode?.id == similarID,
-                  self.model.queueRecommendations?.id == recommendationID, self.model.fmPlayback?.id == fmID,
-                  (self.model.similarMode?.errorID ?? self.model.queueRecommendations?.errorID ?? self.model.fmPlayback?.errorID) == errorID,
-                  intent.admits(revision: self.model.state.revision, ids: self.model.queue.map(\.id),
-                                permitted: self.isPageActive && !self.model.isClosed) else { return }
-            await self.model.loadSimilarMode()
         }
     }
 

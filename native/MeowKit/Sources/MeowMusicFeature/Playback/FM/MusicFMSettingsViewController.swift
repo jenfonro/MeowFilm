@@ -151,10 +151,7 @@ public final class MusicFMSettingsViewController: PageViewController {
 
     private func syncAccess() {
         guard isPageActive else { return }
-        model.setAccess(
-            available: !owner.isClosed,
-            generation: owner.searchAccessGeneration
-        )
+        model.syncAccess()
         render()
     }
 

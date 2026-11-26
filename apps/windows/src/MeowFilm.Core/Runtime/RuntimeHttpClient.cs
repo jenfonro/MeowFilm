@@ -60,7 +60,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         {
             if (method is null || !method.StartsWith(contract.Prefix, StringComparison.Ordinal)) continue;
             var operation = method[contract.Prefix.Length..];
-            if (!RuntimeHttpProtocol.ValidOperation(operation)) break;
+            if (string.IsNullOrEmpty(operation)) break;
             return SendJsonAsync($"/v1/{id}/{operation}", parameters ?? new { }, contract, timeout, cancellationToken);
         }
         throw new BridgeException("METHOD_UNAVAILABLE");
@@ -106,8 +106,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
             var bytes = await ReadImageBodyAsync(response, token).ConfigureAwait(false);
             if (response.StatusCode != HttpStatusCode.OK)
             {
-                if ((int)response.StatusCode is not (400 or 401 or 403 or 404 or 413 or 415 or 502) ||
-                    response.Content.Headers.ContentType?.ToString() != "application/json")
+                if (!string.Equals(response.Content.Headers.ContentType?.MediaType, "application/json", StringComparison.OrdinalIgnoreCase))
                     throw new BridgeException("INVALID_RESPONSE");
                 var spec = RuntimeHttpProtocol.Modules[provider];
                 var failure = RuntimeHttpProtocol.ValidateEnvelope(bytes, spec.Name);
@@ -144,8 +143,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         }
         return ExchangeAsync(client, method, path, body, raw, async (response, token) =>
         {
-            if (response.Content.Headers.ContentType?.ToString() != "application/json"
-                || (int)response.StatusCode is not (200 or 400 or 401 or 403 or 404 or 413 or 415))
+            if (!string.Equals(response.Content.Headers.ContentType?.MediaType, "application/json", StringComparison.OrdinalIgnoreCase))
             {
                 if (debug)
                 {

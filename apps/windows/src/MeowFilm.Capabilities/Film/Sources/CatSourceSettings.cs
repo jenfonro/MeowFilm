@@ -16,7 +16,7 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
     internal const string StorageOwner = "film.cat-sources.v1";
 
     internal async Task<IReadOnlyList<CatSourceConfiguration>> ReadAsync(CancellationToken token) =>
-        ValidateAll((await CatSourceSettingsStore.ReadOrEmptyAsync(database, token).ConfigureAwait(false)).Scripts);
+        (await CatSourceSettingsStore.ReadOrEmptyAsync(database, token).ConfigureAwait(false)).Scripts;
 
     internal async Task<IReadOnlyDictionary<string, bool>> ReadPanInterceptionAsync(CancellationToken token)
     {
@@ -63,7 +63,6 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
         string? nextUrl = type == "network" ? url : null;
         bool changed = row.SourceType != type ||
             (type == "network" ? row.SourceUrl != nextUrl : row.LocalPath != path || row.LocalHash != hash);
-        if (row.InputRevision is < 1 or > BridgeCodec.MaximumSafeInteger) throw new FilmSourceException("INVALID_DOCUMENT");
         return row with
         {
             Name = name,
@@ -88,9 +87,8 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
         var saved = await CatSourceSettingsStore.UpdateAsync(database, current =>
         {
             var rows = current.Scripts;
-            var selected = rows.Where(row => row.InstallationId == installationId).ToArray();
-            if (selected.Length > 1) throw new FilmSourceException("INVALID_DOCUMENT");
-            var next = edit(selected.Length == 0 ? null : selected[0]);
+            var selected = rows.FirstOrDefault(row => row.InstallationId == installationId);
+            var next = edit(selected);
             if (next is not null)
             {
                 if (next.InstallationId != installationId) throw new FilmSourceException("INVALID_DOCUMENT");
@@ -102,10 +100,10 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
                 if (row.InstallationId != installationId) scripts.Add(row);
                 else if (next is not null) scripts.Add(next);
             }
-            if (selected.Length == 0 && next is not null) scripts.Add(next);
+            if (selected is null && next is not null) scripts.Add(next);
             return current with { Scripts = scripts };
         }, token).ConfigureAwait(false);
-        return ValidateAll(saved.Scripts);
+        return saved.Scripts;
     }
 
     internal static async Task<(string Path, string Hash)> SelectLocalAsync(string path, CancellationToken token)
@@ -122,30 +120,6 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
                 !Uri.TryCreate(url, UriKind.Absolute, out var endpoint) || endpoint.Scheme is not ("http" or "https")) ||
             type == "local" && url is not null)
             throw new FilmSourceException("INVALID_ARGUMENT");
-    }
-
-    private static CatSourceConfiguration[] ValidateAll(IReadOnlyList<CatSourceConfiguration> rows)
-    {
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        var scripts = new List<CatSourceConfiguration>(rows.Count);
-        foreach (var row in rows)
-        {
-            try
-            {
-                if (!seen.Add(row.InstallationId ?? "") ||
-                    row.SourceType != "local" && (row.LocalPath is not null || row.LocalHash is not null))
-                    throw new FilmSourceException("INVALID_DOCUMENT");
-                Validate(row);
-                scripts.Add(row);
-            }
-            catch (FilmSourceException error)
-            {
-                DebugLog.Warn(DebugCategories.FilmCatalog, "sources.settings", "cat.config.invalid",
-                    new { installationId = row.InstallationId, sourceType = row.SourceType, code = error.Code }, error: error);
-                throw new FilmSourceException("INVALID_DOCUMENT");
-            }
-        }
-        return scripts.ToArray();
     }
 
     private static bool ValidIdentity(string id) => Regex.IsMatch(id, @"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z");

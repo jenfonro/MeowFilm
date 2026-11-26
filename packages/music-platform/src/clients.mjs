@@ -69,7 +69,6 @@ const chinaDay = time => Math.floor((time + 8 * 3600000) / 86400000);
 export function createClientContexts({ dataRoot, transport }) {
   const store = createAnonymousClientStore(dataRoot);
   let state, loading, uncertain = false, writes = Promise.resolve();
-  const selected = new Set();
   const flights = new Map(), lifetime = new AbortController();
   function ready() {
     if (state && !uncertain) return Promise.resolve();
@@ -87,7 +86,7 @@ export function createClientContexts({ dataRoot, transport }) {
         try { await store.initialize(current); }
         catch (error) { uncertain = true; fail(commitCode(error)); }
       }
-      state = current; selected.clear(); uncertain = false;
+      state = current; uncertain = false;
     }).finally(() => { loading = undefined; });
     loading.catch(() => {});
     return loading;
@@ -103,16 +102,7 @@ export function createClientContexts({ dataRoot, transport }) {
     if (!state || uncertain) fail('STORAGE_ERROR');
     return state;
   }
-  function get(platform) {
-    const current = load()[platform];
-    if (platform === 'kw' || platform === 'mg') return current;
-    if (!selected.has(platform)) {
-      try { state = { ...state, [platform]: anonymousClient(platform, current, 'CORRUPT_STORAGE') }; }
-      catch { fail('CORRUPT_STORAGE'); }
-      selected.add(platform);
-    }
-    return state[platform];
-  }
+  const get = platform => load()[platform];
   function save(platform, proposed) {
     const work = writes.then(async () => {
       await ready(); lifetime.signal.throwIfAborted();

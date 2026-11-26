@@ -11,29 +11,21 @@ internal readonly record struct MusicFmSelection(string Mode, string Submode, st
 internal sealed class MusicFmPreferences(IStorageDatabase database)
 {
     internal Task<MusicFmSelection> ReadAsync(string accountId, CancellationToken token) => database.ReadAsync(db =>
-    {
-        if (!db.TryQuerySingle("""
+        db.TryQuerySingle("""
             SELECT mode,submode,rule_id,tab_tag_id
             FROM windows_music_fm_preferences
             WHERE account_id=$id
             """,
-            row => (
-                Mode: row.GetNullableString(0),
-                Submode: row.GetNullableString(1),
-                RuleId: row.GetNullableString(2),
-                TabTagId: row.GetNullableString(3)),
+            row => new MusicFmSelection(row.GetString(0), row.GetString(1), row.GetString(2), row.GetString(3)),
             out var value,
-            ("$id", accountId)))
-        {
-            return MusicFmSelection.Default;
-        }
-        Validate(value.Mode, value.Submode, value.RuleId, value.TabTagId);
-        return new MusicFmSelection(value.Mode!, value.Submode!, value.RuleId!, value.TabTagId!);
-    }, token);
+            ("$id", accountId))
+            ? value : MusicFmSelection.Default, token);
 
     internal async Task SaveAsync(string accountId, MusicFmSelection selection, Func<bool> current, CancellationToken token)
     {
-        Validate(selection.Mode, selection.Submode, selection.RuleId, selection.TabTagId);
+        RecommendationJson.Require(selection.Mode is "default" or "familiar" or "explore" or "puzzle" or "scene" &&
+            selection.Submode is not null && selection.RuleId is not null && selection.TabTagId is not null,
+            "CORRUPT_STORAGE");
         if (!current()) return;
         await database.WriteAsync(db =>
         {
@@ -53,14 +45,6 @@ internal sealed class MusicFmPreferences(IStorageDatabase database)
                 ("$ruleId", selection.RuleId),
                 ("$tabTagId", selection.TabTagId));
             return true;
-        }, token, 256, commit: commit => { if (!current()) throw new OperationCanceledException(token); commit(); }).ConfigureAwait(false);
-    }
-
-    private static void Validate(string? mode, string? submode, string? ruleId, string? tabTagId)
-    {
-        RecommendationJson.Require(mode is "default" or "familiar" or "explore" or "puzzle" or "scene",
-            "CORRUPT_STORAGE");
-        RecommendationJson.Require(submode is not null && ruleId is not null && tabTagId is not null,
-            "CORRUPT_STORAGE");
+        }, token, commit: commit => { if (!current()) throw new OperationCanceledException(token); commit(); }).ConfigureAwait(false);
     }
 }

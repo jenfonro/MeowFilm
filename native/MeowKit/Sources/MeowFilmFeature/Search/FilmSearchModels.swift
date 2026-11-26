@@ -54,18 +54,7 @@ public struct FilmSearchCard: Equatable, Sendable {
     }
     public var members: [RuntimeValue] { value.catField("aggregateItems")?.catArray ?? [] }
     func text(_ field: String) -> String {
-        guard let value = value.catField(field), value != .null else { return "" }
-        if let text = value.catText { return text }
-        // Code-unit arrays stay intact in value; replacement is display-only.
-        do {
-            let data = try RuntimeJSON.encode(value)
-            let decoded = try JSONDecoder().decode(FilmRuleText.self, from: data)
-            return decoded.displayString
-        } catch {
-            DebugRuntime.logError(.search, sub: "card", event: "decode.text.failed", error: error,
-                                  data: .object(["field": .string(field)]))
-            return ""
-        }
+        value.catField(field)?.catText ?? ""
     }
     public func filmItem(imageURL: (String) -> URL?) -> FilmItem {
         FilmItem(sourceID: sourceKind == "tmdb" ? "tmdb" : text("siteKey"),

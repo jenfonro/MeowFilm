@@ -308,9 +308,7 @@ public sealed partial class FilmSourceService
             catch
             {
                 initialized = false;
-                var (actualState, actualRev) = await FilmSourceStore.ReadAsync(database, CancellationToken.None).ConfigureAwait(false);
-                if (actualRev == storageRevision || !FilmSourceStore.StateEquals(actualState, candidate)) throw;
-                after = actualRev;
+                throw;
             }
         }
         document = candidate;

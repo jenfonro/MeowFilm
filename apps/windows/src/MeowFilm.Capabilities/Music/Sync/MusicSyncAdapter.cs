@@ -37,7 +37,7 @@ internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writ
     internal string[] Keys => keys ??= Members.Select(m => m.Key).ToArray();
     internal string[] Ids => ids ??= Members.Select(m => m.Id).ToArray();
 
-    internal string Signature => signature ??= MusicRules.CanonicalDigest(MusicNodeSongCodec.BuildObject(w =>
+    internal string Signature => signature ??= MusicNodeSongCodec.HashJsonObject(w =>
     {
         w.WriteString("id", Id);
         w.WriteString("name", Name);
@@ -58,7 +58,7 @@ internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writ
         w.WritePropertyName("locator");
         if (Locator.ValueKind != JsonValueKind.Undefined) Locator.WriteTo(w);
         else { w.WriteStartObject(); w.WriteEndObject(); }
-    }));
+    });
 
     internal JsonElement ToWireElement() => MusicNodeSongCodec.BuildObject(w =>
     {

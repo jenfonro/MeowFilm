@@ -65,7 +65,7 @@ aggregate 装配还将该 owner 的账号变更连接到 Cat 管理同步：保�
 
 重读时仅撤销 revision 或凭据材料发生变化的账号，不因坏兄弟中止健康账号；坏根／读取失败则撤销依赖该文档的进行中操作，并等待后续有效通知恢复。CAS 冲突仍重读最新文档、向原请求返回 `STALE_ACCOUNT`，不自动重试覆盖。原生 capability 传递当前业务值和 revision；数据库使用 typed fields，不经 JSON 文档 clone 作为持久边界。
 
-`settings.set/clear` HTTP 接口仍保留，但实际写入也必须经过 supplied store；它们不绕过原生 CAS。iOS／Windows 普通页面直接调用原生 owner，运行器通过私密 `pan.accounts` 单 provider CAS 写回扫码及刷新所得凭据。新凭据持久化成功才发布 confirmed／refreshed；手动换号、清除或其他块内容变化导致provider 的 account／row revision 冲突时，旧请求不能覆盖新值。共同规则见[原生设置契约](../common/settings-storage.md#owner-与并发写入)，iOS 私密能力见[运行底座](../ios/runtime-preflight.md#原生设置私密通道)，Windows 接线见[原生设置](../windows/native-settings.md#网盘凭据回写)。
+`settings.set/clear` HTTP 接口仍保留，但实际写入也必须经过 supplied store；它们不绕过原生 CAS。iOS／Windows 普通页面直接调用原生 owner，运行器通过私密 `pan.accounts` 单 provider CAS 写回扫码及刷新所得凭据。新凭据持久化成功才发布 confirmed／refreshed；手动换号、清除或其他块内容变化导致provider 的 account／row revision 冲突时，旧请求不能覆盖新值。共同规则见[原生设置契约](../common/settings-storage.md#owner-与并发写入)，iOS 私密能力见[存储](../ios/storage.md)，Windows 接线见[原生设置](../windows/native-settings.md#网盘凭据回写)。
 
 ## 分享与播放
 

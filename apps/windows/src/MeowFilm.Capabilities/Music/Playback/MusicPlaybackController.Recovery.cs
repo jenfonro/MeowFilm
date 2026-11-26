@@ -82,11 +82,14 @@ public sealed partial class MusicPlaybackController
         !state.RecoveryDisabled && code != PlaybackError.AudioDeviceUnavailable &&
         (!state.Attempted && RefreshableMusicError(code) || CanChangeFailedSource(state, code));
 
+    private static string? MediaOrMusicCode(Exception error) =>
+        error is PlaybackException native ? native.Code : ErrorCode(error);
+
     private static bool RetryablePreparation(string code) => RefreshableMusicError(code) || UnavailableSourceCandidate(code) ||
         code is PlaybackError.OpenFailed or PlaybackError.PlaybackFailed or PlaybackError.HttpFormatUnsupported or PlaybackError.ReadFailed;
 
     private static bool UnusablePlaybackFile(Exception error) =>
-        (error is PlaybackException native ? native.Code : error is MusicOperationException music ? music.Code : null) is
+        MediaOrMusicCode(error) is
             "CACHE_MISS" or PlaybackError.OpenFailed or PlaybackError.ReadFailed or PlaybackError.ReadTruncated or
             PlaybackError.ReadChanged or PlaybackError.ReadFormatUnsupported;
 
@@ -249,7 +252,7 @@ public sealed partial class MusicPlaybackController
             AcceptOfficialSong(song, state.Media.Target);
             UpdateSourceChoicesIfOpen();
             UpdateFeedbackSelection();
-            SourcesUpdatedForLyrics?.Invoke();
+            ctx.UpdateLyricSources();
             playbackInstallation = state.Media.Target!.Installation;
             openedEntry = song.EntryId; recorded = false;
             try
@@ -304,13 +307,12 @@ public sealed partial class MusicPlaybackController
                     AcceptOfficialSong(song, state.Media.Target);
                     UpdateFeedbackSelection();
                     UpdateSourceChoicesIfOpen();
-                    SourcesUpdatedForLyrics?.Invoke();
+                    ctx.UpdateLyricSources();
                 }
             }
-            catch (Exception error) when (error is PlaybackException native && RecoverableMusicError(state, native.Code) ||
-                error is MusicOperationException operation && RecoverableMusicError(state, operation.Code))
+            catch (Exception error) when (MediaOrMusicCode(error) is { } openCode && RecoverableMusicError(state, openCode))
             {
-                if (!recorded) SearchRecommendationCleared?.Invoke();
+                if (!recorded) ctx.ClearSearchRecommendationStart();
                 state.Opening = false;
                 if (!await RecoverMusicAsync(state, expired: false)) throw;
             }
@@ -491,23 +493,21 @@ public sealed partial class MusicPlaybackController
                     AcceptOfficialSong(state.Song, refreshed.Target);
                     UpdateFeedbackSelection();
                     UpdateSourceChoicesIfOpen();
-                    SourcesUpdatedForLyrics?.Invoke();
+                    ctx.UpdateLyricSources();
                     PlaybackSourceBindings();
-                    RestoreLyricsRequested?.Invoke();
+                    ctx.RestoreLyricsIfNeeded();
                     ScheduleExpiry(state);
                     if (alreadyStarted) ConfirmRecoveredSourceStarted(state);
                     return true;
                 }
                 catch (Exception error) when (cachedAttempt && error is not OperationCanceledException &&
-                    CurrentRecovery(state) && (error is PlaybackException native && RetryablePreparation(native.Code) ||
-                        error is MusicOperationException operation && RetryablePreparation(operation.Code)))
+                    CurrentRecovery(state) && MediaOrMusicCode(error) is { } cachedFailCode && RetryablePreparation(cachedFailCode))
                 {
                     if (state.Pending?.Media is { } failed)
                     {
-                        string code = error is PlaybackException fileError ? fileError.Code : ((MusicOperationException)error).Code;
-                        if (code is "RECORDING_MISMATCH" or "IDENTITY_MISMATCH" or "MEDIA_MISMATCH")
+                        if (cachedFailCode is "RECORDING_MISMATCH" or "IDENTITY_MISMATCH" or "MEDIA_MISMATCH")
                         {
-                            state.Session!.Reject(failed, code);
+                            state.Session!.Reject(failed, cachedFailCode);
                             refreshExact = false;
                             rejectCurrent = true;
                         }
@@ -518,7 +518,7 @@ public sealed partial class MusicPlaybackController
                     continuation = playback.CaptureContinuation() ?? throw new MusicOperationException("CONTINUATION_UNAVAILABLE");
                     state.PendingFailure = null;
                 }
-                catch (MusicOperationException error) when (error.Code == "CACHE_MISS" &&
+                catch (Exception error) when (MediaOrMusicCode(error) == "CACHE_MISS" &&
                     state.Pending?.Media is { Uri: null } && CurrentRecovery(state))
                 {
                     var missing = state.Pending.Media;
@@ -532,16 +532,14 @@ public sealed partial class MusicPlaybackController
                 }
                 catch (Exception error) when ((exactAttempt || state.Pending is not null) &&
                     error is not OperationCanceledException && CurrentRecovery(state) &&
-                    CanChangeFailedSource(state, error is PlaybackException mediaError ? mediaError.Code :
-                        error is MusicOperationException musicError ? musicError.Code : null))
+                    CanChangeFailedSource(state, MediaOrMusicCode(error)))
                 {
+                    string rejectReason = MediaOrMusicCode(error) ?? "PLAYBACK_UNAVAILABLE";
                     if (state.Pending?.Media is { } failed)
-                        state.Session?.Reject(failed, error is PlaybackException rejectedMedia ? rejectedMedia.Code :
-                            error is MusicOperationException rejectedOperation ? rejectedOperation.Code : "PLAYBACK_UNAVAILABLE");
+                        state.Session?.Reject(failed, rejectReason);
                     else if (exactAttempt)
                     {
-                        state.Session?.Reject(state.Media!, error is PlaybackException rejectedNative ? rejectedNative.Code :
-                            error is MusicOperationException rejectedResolve ? rejectedResolve.Code : "PLAYBACK_UNAVAILABLE");
+                        state.Session?.Reject(state.Media!, rejectReason);
                         rejectCurrent = false;
                     }
                     DiscardPendingMedia(state);
@@ -720,27 +718,6 @@ public sealed partial class MusicPlaybackController
                 InvalidateFeedback();
                 if (OwnsCurrent) TrackMusicRecovery(playback.PauseAsync());
             }
-            UpdateSourceChoicesIfOpen();
-        }
-    }
-
-    internal void OnSourceExclusionAdded(string songId, string provider, string platform)
-    {
-        IncrementExclusionsRevision();
-        if (musicRecovery is { Song.Id: var id, Session: { } session } state && id == songId)
-        {
-            session.Exclude(provider, platform);
-            UpdateSourceChoicesIfOpen();
-        }
-        ForgetRecording(songId);
-    }
-
-    internal async Task OnSourceExclusionRemovedAsync(string songId, CancellationToken token)
-    {
-        IncrementExclusionsRevision();
-        if (musicRecovery is { Song.Id: var id, Session: { } session } state && id == songId)
-        {
-            await session.LoadExclusionsAsync(token);
             UpdateSourceChoicesIfOpen();
         }
     }

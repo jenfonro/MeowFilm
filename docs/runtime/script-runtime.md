@@ -4,9 +4,9 @@
 
 ```text
 apps/runtime/entry.mjs
-  受信 session config 的 createRuntime/startRuntime 独立入口
-apps/runtime/bootstrap.mjs、client.mjs、contracts.mjs
-  标准本地 HTTP 装配、Node 调用端、模块版本和安全错误
+  九模块公共装配与 createAppRuntime 入口
+apps/runtime/bootstrap.mjs、contracts.mjs
+  标准本地 HTTP 装配、模块版本和契约声明
 apps/runtime/modules/{music-script,cat-script,source-runtime}.mjs
   LX、CatNode、Reader/CatVod 的明确业务 owner
 apps/runtime/modules/{pan-runtime,metadata-data,film-playback}.mjs
@@ -37,7 +37,7 @@ packages/netease-token/、apps/runtime/modules/netease-token.mjs
 
 受信调用方可显式启用 `pan@0.1.0/pan.runtime.v1` 的[网盘账号、分享与取址能力](pan-runtime.md)、`tmdb@0.1.0/tmdb.data.v1` 与 `douban@0.1.0/douban.data.v1` 的[元数据能力](metadata-data.md)，以及 `film@0.1.0/film.playback.v1` 的[影视播放业务](film-playback.md)。这些是 Node 内置业务，不是新的脚本执行所有者；通用默认三模块不变。
 
-iOS 与 Windows 的正式 App entry 在同一 HTTP 会话中按 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 顺序装配九模块。`connectFilmPlayback` 复用前六个 provider owner 并连接变更撤权，不另建来源或账号实例；随后追加[网易实时 token 模块](netease-token.md)与借用其能力的[音乐平台模块](music-platform.md)，不改变默认三模块。film 持有智能播放会话、业务缓存及新增本地播放资料；原生收藏、客户端规则与图片缓存仍由原 owner 管理。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。模块装配不等于原生导航／搜索交接、实际媒体输出或设备验证已完成；搜索交接规则只见[共同契约](../common/film/search.md)，不据此声明 Android 已接入。
+iOS 与 Windows 的正式 App entry 在同一 HTTP 会话中按 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 顺序装配九模块。`connectFilmPlayback` 复用前六个 provider owner 并连接变更撤权，不另建来源或账号实例；随后追加[网易实时 token 模块](netease-token.md)与借用其能力的[音乐平台模块](music-platform.md)。film 持有智能播放会话、业务缓存及新增本地播放资料；原生收藏、客户端规则与图片缓存仍由原 owner 管理。Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。模块装配不等于原生导航／搜索交接、实际媒体输出或设备验证已完成；搜索交接规则只见[共同契约](../common/film/search.md)，不据此声明 Android 已接入。
 
 普通设置可由平台显式注入原生 owner，执行与配置保存互不替代；共同边界见[原生设置存储与通知](../common/settings-storage.md)，公共适配见 [Runtime HTTP](runtime-bridge.md#原生设置注入)。未注入的独立入口仍沿用各模块的 Node 设置文档，不自动访问平台存储。
 

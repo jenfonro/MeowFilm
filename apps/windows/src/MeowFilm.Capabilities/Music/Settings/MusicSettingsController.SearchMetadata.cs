@@ -115,8 +115,7 @@ public sealed partial class MusicSettingsController
             {
                 try
                 {
-                    var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
-                        ct => application.GetSearchPolicyAsync(kind, ct), token);
+                    var settings = await application.Library.GetSearchPolicyAsync(kind, token);
                     if (!SearchPreferencesCurrent(generation)) return;
                     PublishSearchPreferences(settings, kind);
                 }
@@ -180,7 +179,7 @@ public sealed partial class MusicSettingsController
             searchHistoryRequest = request;
             try
             {
-                var history = await application.GetSearchHistoryAsync(request.Token);
+                var history = await application.Library.GetSearchHistoryAsync(request.Token);
                 request.Token.ThrowIfCancellationRequested();
                 if (!stopping && !disposed && epoch == searchHistoryEpoch &&
                     searchHistorySurfaces != SearchHistorySurface.None)
@@ -301,28 +300,24 @@ public sealed partial class MusicSettingsController
         SearchPreferenceBindings();
         return searchPreferencesWork = RunAsync(async () =>
         {
-            if (SearchPolicyChanging is { } onChanging) await onChanging();
             try
             {
-                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
-                    ct => application.SaveSearchPolicyAsync(revision, songsRecord, playlistsRecord, ct), lifetime.Token);
+                var saved = await application.SaveSearchPolicyAsync(revision, songsRecord, playlistsRecord, lifetime.Token);
                 if (!SearchPreferencesCurrent(generation)) return;
                 PublishSearchPreferences(saved);
                 searchPreferenceStatus = "";
             }
-            catch (MusicOperationException error) when (error.Code is
-                "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
+            catch (Exception error) when (ErrorCode(error) is "STORAGE_CONFLICT" or "REVISION_CONFLICT")
             {
                 if (!SearchPreferencesCurrent(generation)) return;
                 try
                 {
-                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
-                        ct => application.GetSearchPolicyAsync(null, ct), lifetime.Token);
+                    var current = await application.Library.GetSearchPolicyAsync(null, lifetime.Token);
                     if (!SearchPreferencesCurrent(generation)) return;
                     PublishSearchPreferences(current);
                     searchPreferenceStatus = SearchKindMatches(SongSearch, songs) && SearchKindMatches(PlaylistSearch, playlists)
                         ? ""
-                        : error.Code == "REVISION_CONFLICT" ? "搜索设置已更新" : "搜索设置保存失败";
+                        : ErrorCode(error) == "REVISION_CONFLICT" ? "搜索设置已更新" : "搜索设置保存失败";
                 }
                 catch (OperationCanceledException) { throw; }
                 catch
@@ -355,14 +350,14 @@ public sealed partial class MusicSettingsController
         if (stopping || disposed || !CanEdit || !HasSearchHistory) return;
         long revision = searchHistoryRevision;
         await RunAsync(async () => PublishSearchHistory(
-            await application.ClearSearchHistoryAsync(revision, confirm: true, lifetime.Token)));
+            await application.Library.ClearSearchHistoryAsync(revision, confirm: true, lifetime.Token)));
     }
 
     internal async Task RecordSearchHistory(string text, string kind, CancellationToken token)
     {
         try
         {
-            PublishSearchHistory(await application.RecordSearchHistoryAsync(text, kind, token));
+            PublishSearchHistory(await application.Library.RecordSearchHistoryAsync(text, kind, token));
         }
         catch (OperationCanceledException) { throw; }
         catch
@@ -378,13 +373,9 @@ public sealed partial class MusicSettingsController
     internal async Task ReadMetadataSettings(CancellationToken token)
     {
         long generation = metadataGeneration;
-        var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.MetadataPolicy,
-            ct => application.GetMetadataPolicyAsync(ct), token);
+        var settings = await application.Library.GetMetadataPolicyAsync(token);
         if (generation != metadataGeneration || stopping || disposed) return;
         PublishMetadataSettings(settings);
-        if (generation == metadataGeneration && !stopping && !disposed &&
-            MetadataArtworkRefreshRequested is { } refresh)
-            await refresh(token);
     }
 
     private void PublishMetadataSettings(MusicMetadataPolicyRecord settings)
@@ -437,18 +428,13 @@ public sealed partial class MusicSettingsController
         long generation = metadataGeneration;
         metadataBusy = true;
         Changed(nameof(CanEditMetadata));
-        MetadataPolicyChanging?.Invoke();
         return metadataWork = RunAsync(async () =>
         {
             try
             {
-                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.MetadataPolicy,
-                    ct => application.SaveMetadataPolicyAsync(revision, platforms, enabled, ct), lifetime.Token);
+                var saved = await application.Library.SaveMetadataPolicyAsync(revision, platforms, enabled, lifetime.Token);
                 if (generation != metadataGeneration || stopping || disposed) return;
                 PublishMetadataSettings(saved);
-                if (generation == metadataGeneration && !stopping && !disposed &&
-                    MetadataArtworkRefreshRequested is { } refresh)
-                    await refresh(lifetime.Token);
             }
             catch
             {
@@ -472,8 +458,6 @@ public sealed partial class MusicSettingsController
                 metadataBusy = false;
                 if (generation == metadataGeneration && !stopping && !disposed)
                     Changed(nameof(CanEditMetadata));
-                if (!stopping && !disposed && MetadataPolicyApplied is { } applied)
-                    await applied();
             }
         });
     }

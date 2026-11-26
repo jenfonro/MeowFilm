@@ -128,7 +128,7 @@ struct PlaybackNetworkPlan {
         return bytes.starts(with: Array("#EXTM3U".utf8))
     }
 
-    private static func unsignedInt64(_ value: String) -> Int64? {
+    static func unsignedInt64(_ value: String) -> Int64? {
         guard !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
         return Int64(value)
     }
@@ -161,6 +161,11 @@ struct PlaybackHTTPRequestPolicy {
         headers = plan.headers
     }
 
+    init(plan: PlaybackNetworkPlan, url: URL) throws {
+        headers = plan.headers
+        current = try PlaybackNetworkPlan.httpURL(url)
+    }
+
     mutating func resetRedirects() { redirects = 0 }
 
     mutating func redirect(to target: URL) throws {
@@ -171,17 +176,21 @@ struct PlaybackHTTPRequestPolicy {
 
     var requestURL: URL { PlaybackNetworkPlan.strippedUserInfoURL(current) }
 
-    func request(start: Int64) throws -> URLRequest {
-        guard start >= 0 else { throw PlaybackNetworkError.invalidResponse }
+    func request(method: String = "GET", rangeHeader: String?) -> URLRequest {
         var request = URLRequest(url: requestURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
-        request.httpMethod = "GET"
+        request.httpMethod = method
         request.httpShouldHandleCookies = false
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
         PlaybackNetworkPlan.applyBasicAuthIfNeeded(from: current, headers: headers, to: &request)
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        request.setValue("bytes=\(start)-", forHTTPHeaderField: "Range")
+        if let rangeHeader { request.setValue(rangeHeader, forHTTPHeaderField: "Range") }
         return request
+    }
+
+    func request(start: Int64) throws -> URLRequest {
+        guard start >= 0 else { throw PlaybackNetworkError.invalidResponse }
+        return request(method: "GET", rangeHeader: "bytes=\(start)-")
     }
 }

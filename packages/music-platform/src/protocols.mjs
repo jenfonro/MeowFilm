@@ -26,7 +26,7 @@ export function responseCookies(rows, allowed, previous = {}, host) {
     }));
     if (host && attributes.domain) {
       const domain = attributes.domain.replace(/^\./, '').toLowerCase();
-      if (domain !== host && !host.endsWith('.' + domain)) fail('REDIRECT_DENIED');
+      if (domain !== host && !host.endsWith('.' + domain)) continue;
     }
     const expired = attributes['max-age'] != null && Number(attributes['max-age']) <= 0 ||
       attributes.expires && Date.parse(attributes.expires) <= Date.now();
@@ -87,11 +87,7 @@ export function wyRequest(path, params, client, account, weapi = false, token, v
 export function encryptedWyResponse(bytes) {
   try {
     let plain = decrypt(bytes, 'e82ckenh8dichen8');
-    if (plain[0] === 0x1f && plain[1] === 0x8b) {
-      const inflated = gunzipSync(plain, { info: true });
-      if (inflated.engine.bytesWritten !== plain.length) fail('INVALID_RESPONSE');
-      plain = inflated.buffer;
-    }
+    if (plain[0] === 0x1f && plain[1] === 0x8b) plain = gunzipSync(plain);
     return decodeJSON(plain);
   } catch (error) { fail(error.code === 'ERR_BUFFER_TOO_LARGE' ? 'LIMIT' : 'INVALID_RESPONSE'); }
 }

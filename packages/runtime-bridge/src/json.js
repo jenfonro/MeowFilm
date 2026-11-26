@@ -1,8 +1,6 @@
 import { Buffer, isUtf8 } from 'node:buffer';
 import { BridgeError } from './errors.js';
-import { checkJSON, parseJSONText, stringifyJSONValue } from './json-value.js';
-
-export { checkJSON };
+import { parseJSONText, stringifyJSONValue } from './json-value.js';
 
 export function encodeJSONValue(value) {
   return Buffer.from(stringifyJSONValue(value), 'utf8');
@@ -14,8 +12,4 @@ export function parseJSON(bytes) {
     .toString('utf8').replace(/^\uFEFF/, ''));
 }
 
-export function decodeJSONValue(bytes) {
-  const value = parseJSON(bytes);
-  checkJSON(value);
-  return value;
-}
+export const decodeJSONValue = parseJSON;

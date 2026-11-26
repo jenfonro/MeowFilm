@@ -22,7 +22,7 @@ public sealed partial class MusicCatalogController
 
     public Task RefreshCatalogAsync()
     {
-        if (!IsCatalogPage || contentState.IsSearchPage || stopping || IsCatalogDaily && dailyStyleBusy || IsUnsupportedCatalogRoute(ctx.CurrentRoute))
+        if (!IsCatalogPage || search.IsSearchPage || stopping || IsCatalogDaily && dailyStyleBusy || IsUnsupportedCatalogRoute(ctx.CurrentRoute))
             return Task.CompletedTask;
         ctx.RetireOperationStatus();
         if (IsCatalogDaily) RetireDailyStyleEditor();
@@ -37,7 +37,7 @@ public sealed partial class MusicCatalogController
         if (catalogPages.TryGetValue(next, out var cached) && RestoreCatalogPage(cached, catalogLoadedPlatform))
         {
             ctx.AdvanceLoadGeneration();
-            catalogActions.Invalidate();
+            InvalidateCatalogAction();
             await PublishCatalogAsync(ctx.CurrentRoute, catalogQuery, catalogLoadedPlatform, catalogLoadedKind, next, cached,
                 token: lifetime.Token, restore: true);
             return;
@@ -91,7 +91,7 @@ public sealed partial class MusicCatalogController
         }
         if (!MusicCatalogDispatcher.IsCatalogSourceRoute(route) && !route.Contains('/') && SelectedCatalogPlatform.Key is "kw" or "mg")
             SelectedCatalogPlatform = CatalogPlatforms[0];
-        catalogActions.Invalidate();
+        InvalidateCatalogAction();
         var platform = route.Split('/') is { Length: 3 } parts ? parts[1] :
             MusicCatalogDispatcher.IsCatalogSourceRoute(route) ? settings.CatalogSourcePlatform : SelectedCatalogPlatform.Key;
         bool playlist = route.StartsWith("catalog-playlist/", StringComparison.Ordinal);
@@ -121,7 +121,7 @@ public sealed partial class MusicCatalogController
         if (stopping) return;
         optionalReads.Retire(ctx.CurrentRoute);
         RetireCatalogLoad();
-        catalogActions.Invalidate();
+        InvalidateCatalogAction();
         ctx.SetStatusQuiet("已取消"); ctx.RefreshBindings();
     }
 
@@ -147,7 +147,7 @@ public sealed partial class MusicCatalogController
         if (IsCatalogLanding)
         {
             ctx.AdvanceLoadGeneration();
-            catalogActions.Invalidate();
+            InvalidateCatalogAction();
             ctx.SetLocation(new(IsCatalogHome ? "catalog-home" : "catalog-channels"),
                 heading: IsCatalogHome ? "发现音乐" : "音乐频道", clearCatalogSongs: true, clearSelection: true, clearTotal: true);
             catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
@@ -184,7 +184,7 @@ public sealed partial class MusicCatalogController
 
     public void RetireCatalogSession()
     {
-        catalogActions.Invalidate();
+        InvalidateCatalogAction();
         RetireCatalogContent();
     }
 
@@ -192,7 +192,8 @@ public sealed partial class MusicCatalogController
     {
         optionalReads.Retire();
         ClearPersonalForSessionRetire();
-        SessionRetiring?.Invoke();
+        ClearVipDisplay();
+        search.RetireSearchTracked();
         var wasPublishing = ctx.Publishing; ctx.Publishing = true;
         try
         {
@@ -204,14 +205,16 @@ public sealed partial class MusicCatalogController
             catalogTag = catalogPageCode = catalogQuery = ""; catalogContinuation = null; catalogMore = false; catalogPage = 1;
             channelTags.Clear(); utilityTags.Clear(); CatalogTagGroups = [];
             utilitySections.Clear();
-            if (IsCatalogPage && !IsCatalogHome) contentState.CatalogSongsSource.Clear();
+            if (IsCatalogPage && !IsCatalogHome) CatalogSongsSource.Clear();
             ChannelTabs.Clear(); VisibleChannelTabs.Clear(); MoreChannelTabs.Clear(); lastChannelRoute = null; channelEntryError = "";
             if (IsCatalogHome && publishedHomeState is { } home)
                 catalogPages[1] = home;
             else if (IsCatalogPage)
             {
-                ctx.ActiveSongs.Clear();
-                contentState.ClearSelectionForCatalog("音乐内容");
+                CatalogSongsSource.Clear();
+                ClearCatalogSelection();
+                catalogHeading = "音乐内容";
+                catalogTotal = 0;
             }
             ctx.RefreshBindings();
         }

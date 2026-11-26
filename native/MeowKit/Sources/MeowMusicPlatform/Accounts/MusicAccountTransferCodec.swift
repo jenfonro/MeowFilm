@@ -1,7 +1,6 @@
 import Foundation
 import CoreFoundation
 import MeowAccounts
-import MeowMusicFeature
 import MeowRuntime
 import MeowJSON
 
@@ -112,13 +111,13 @@ enum MusicAccountTransferCodec {
                   fields["token"]?.isEmpty == false else { throw MusicAccountTransferError.invalidFile }
         }
         let cookie = fields.keys.sorted().map { $0 + "=" + fields[$0]! }.joined(separator: "; ")
-        return try MusicAccountCredential.make(platform: row.platform, userID: row.userID, cookie: cookie)
+        do { return try AccountCredential(siteKey: row.platform.rawValue, userID: row.userID, cookie: cookie) }
+        catch { throw MusicAccountTransferError.invalidFile }
     }
 
     static func entry(_ credential: AccountCredential, platform: MusicAccountPlatform) throws -> MusicAccountTransferEntry {
-        let value = try MusicAccountCredential.read(credential)
-        guard value[music: "platform"] == .string(platform.rawValue) else { throw MusicServiceError.invalidResponse }
-        let cookie = try value[music: "cookie"].musicRequiredText()
+        guard credential.siteKey == platform.rawValue else { throw MusicServiceError.invalidResponse }
+        let cookie = credential.cookie
         var fields: [String: String] = [:]
         for item in cookie.split(separator: ";") {
             guard let at = item.firstIndex(of: "=") else { throw MusicServiceError.invalidResponse }
@@ -127,7 +126,7 @@ enum MusicAccountTransferCodec {
                 fields[name] = item[item.index(after: at)...].trimmingCharacters(in: .whitespaces)
             }
         }
-        let result = MusicAccountTransferEntry(platform: platform, userID: try value[music: "userId"].musicRequiredText(),
+        let result = MusicAccountTransferEntry(platform: platform, userID: credential.userID,
                                                fields: try canonical(fields, platform: platform))
         _ = try self.credential(result)
         return result

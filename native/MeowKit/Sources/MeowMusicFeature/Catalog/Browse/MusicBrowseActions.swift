@@ -115,11 +115,11 @@ extension MusicBrowseViewController {
     }
 
     func selectChoice(_ id: String, section: MusicPublicBrowseSection) {
-        guard let page, let intent = page.makeActionIntent() else { return }
+        guard let page else { return }
         if section.tabs.contains(where: { $0.id == id }) {
-            runPageTask { await page.selectSectionTab(id, sectionID: section.id, intent: intent) }
+            runPageTask { await page.selectSectionTab(id, sectionID: section.id) }
         } else {
-            runPageTask { await page.selectSectionFilter(id, sectionID: section.id, intent: intent) }
+            runPageTask { await page.selectSectionFilter(id, sectionID: section.id) }
         }
     }
 
@@ -157,12 +157,8 @@ extension MusicBrowseViewController {
                     }
                 case .collection(let value):
                     guard !self.model.isClosed else { throw MusicServiceError.closed }
-                    guard let browser = self.model.publicBrowser else { throw MusicServiceError.unavailable }
-                    let detail = MusicPublicBrowseViewModel(service: browser, request: .detail(value),
-                        queuePage: { [weak model = self.model] source, cursor in
-                            guard let model else { throw MusicServiceError.closed }
-                            return try await model.remoteQueuePage(source, cursor: cursor)
-                        }, releaseSource: { [weak model = self.model] in model?.releaseRemoteQueueSource($0) })
+                    guard let service = self.model.service else { throw MusicServiceError.unavailable }
+                    let detail = MusicPublicBrowseViewModel(service: service, request: .detail(value), owner: self.model)
                     detail.appear()
                     defer { detail.disappear() }
                     await detail.loadIfNeeded()
@@ -190,16 +186,17 @@ extension MusicBrowseViewController {
 
     func perform(operation: String, kind: MusicRequestTrace.Operation = .playback,
                          _ action: @escaping @MainActor () async throws -> Void) {
-        guard let page, let intent = page.makeActionIntent() else { return }
-        runPageTask { await page.perform(intent: intent, operation: operation, kind: kind, action) }
+        guard let page else { return }
+        runPageTask { await page.perform(operation: operation, kind: kind, action) }
     }
 
     func saveCollection() {
-        guard let page, let collection = page.networkSaveCollection, let intent = page.makeActionIntent() else { return }
+        guard let page, let collection = page.networkSaveCollection else { return }
+        let pageID = page.actionPageID
         presentPageConfirmation(title: "收藏歌单", confirmTitle: "收藏", onConfirm: { [weak self] in
-            guard let self else { return }
+            guard let self, page.actionPageID == pageID else { return }
             self.runPageTask {
-                await page.perform(intent: intent, operation: "收藏歌单", kind: .library) {
+                await page.perform(operation: "收藏歌单", kind: .library) {
                     try await self.model.saveNetworkPlaylist(collection)
                 }
             }

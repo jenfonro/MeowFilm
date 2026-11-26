@@ -13,7 +13,7 @@ const netdiskUA = 'netdisk;12.11.9;V2238A;android-android;12;JSbridge4.4.0;joint
 const playUA = 'com.android.chrome/131.0.6778.200 (Linux;Android 10) AndroidXMedia3/1.5.1';
 const pageSize = 10000;
 const directory = '/MeowFilm';
-const video = /\.(mp4|mkv|mov|iso|flv)$/i;
+const video = /\.(?:mp4|mkv|mov|iso|flv|ts|m2ts|avi|wmv|rmvb|webm|m4v|mpg|mpeg)$/i;
 
 function active(ctx) {
   if (ctx.signal?.aborted) throw new PanError('CANCELLED');
@@ -70,7 +70,7 @@ function shareInput(share) {
   requireValue(share && typeof share.url === 'string');
   requireValue(share.password === undefined || typeof share.password === 'string');
   const url = address(share.url, undefined, 'INVALID_REQUEST');
-  requireValue(url.hostname === 'pan.baidu.com' && (!url.port || url.port === '443'), 'INVALID_REQUEST');
+  requireValue(url.hostname === 'pan.baidu.com', 'INVALID_REQUEST');
   const match = /^\/s\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname);
   const surl = match ? match[1].replace(/^1/, '') : url.searchParams.get('surl') || '';
   requireValue(/^[A-Za-z0-9_-]+$/.test(surl), 'INVALID_REQUEST');
@@ -184,10 +184,9 @@ async function pages(ctx, auth, path, query, limit, consume, options = {}) {
         consume(item, root);
       }
     }
-    requireValue(!(content.list.length && !added) && !(expected && !content.list.length), 'UPSTREAM_FORMAT');
+    if (!content.list.length || !added) return root;
     const next = morePages(pagination, content, content.list.length, seen.size, limit, total);
     total = next.total;
-    requireValue(!next.more || content.list.length > 0, 'UPSTREAM_FORMAT');
     if (!next.more) return root;
     expected = next.declared;
   }

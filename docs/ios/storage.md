@@ -57,4 +57,4 @@ JSON 仍用于 HTTP、运行器私密 IPC、脚本 API、源码／构建元数�
 
 系统强制终止不保证发送或等待 `willTerminateNotification`。已确认的保存依赖运行期间的 COMMIT；终止通知仅停止音乐，不承担全量异步保存和资源排空。
 
-端侧共同边界见[共享 SQLite 契约](../common/settings-storage.md)，运行器 RPC 及能力边界见[运行器入口](runtime-preflight.md)。
+端侧共同边界见[共享 SQLite 契约](../common/settings-storage.md)，运行器 RPC 及能力边界见[公共 HTTP 契约](../runtime/runtime-bridge.md)。

@@ -50,10 +50,7 @@ export const sameVariantFile = (a, b) => !!a?.variant && !!b?.variant && a.paren
 export const cancelled = error =>
   ['CLOSED', 'CANCELLED', 'STALE_ACCOUNT', 'STALE_SOURCE', 'STALE_SESSION', 'STALE_METADATA'].includes(error?.code);
 
-export function historyPosition(row) {
-  requireValue(Number.isFinite(row.position) && row.position >= 0, 'CORRUPT_STORAGE');
-  return row.position;
-}
+export const historyPosition = row => row.position;
 
 export function episodeTarget(target, episode) {
   const next = { ...target };

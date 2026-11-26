@@ -94,14 +94,12 @@ function historyProjection(row, members) {
   const episode = {};
   for (const [field, column] of [['season', 'season'], ['episode', 'episode'], ['globalEpisode', 'global_episode']])
     if (row[column] !== null) episode[field] = row[column];
-  const result = {
+  return {
     targetId: row.target_id, title: row.title, playbackTarget: target, sourceKey: row.source_key,
     detailId: detailValue(row.detail_id_kind, row.detail_id_text), lineId: detailValue(row.line_id_kind, row.line_id_text), candidateId: row.candidate_id,
     ...(row.has_episode ? { episode } : {}), position: row.position_sec, duration: row.duration_sec, paused: !!row.paused, ended: !!row.ended,
     ...(row.played_at_ms === null ? {} : { playedAt: row.played_at_ms }), updatedAt: row.updated_at_ms,
   };
-  try { validateHistory(result); } catch { throw fail('CORRUPT_STORAGE'); }
-  return result;
 }
 const manualColumns = ['match_id', 'position_order', 'target_id', 'match_kind', 'title', 'name', 'source_key',
   'detail_id_kind', 'detail_id_text', 'provider', 'share_url', 'share_password', 'season_hint', 'enabled',
@@ -142,55 +140,52 @@ export function validateBlock(row, code = 'INVALID_REQUEST') {
 function controlInput(value, previous, native) {
   requireValue(object(value) && value.version === 1 && ['history', 'manual', 'blocks', 'previewTargets', 'groups'].every(key =>
     Array.isArray(value[key])) && !value.history.length && (!native || value.preferences === undefined));
-  const projectRows = (name, project, validate) => value[name].map(row => {
-    const item = project(row);
-    const old = previous[name].find(before => isDeepStrictEqual(project(before), item));
-    if (old) return old;
-    validate(item); return item;
-  });
   const unique = (values, key) => requireValue(new Set(values.map(key)).size === values.length);
+  const oldManual = new Map(previous.manual.map(row => [row.id, row]));
+  const blockKey = row => row.id ?? identity(row);
+  const oldBlocks = new Map(previous.blocks.map(row => [blockKey(row), row]));
+  const oldGroups = new Map(previous.groups.map(row => [row.id, row]));
+  const oldPreviews = new Set(previous.previewTargets);
   const result = {
     version: 1, history: [],
     manual: value.manual.map(row => {
       requireValue(object(row));
       if (row.errorCode && row.id !== undefined) {
-        const old = previous.manual.find(before => before.id === row.id && before.errorCode);
-        if (old) return old;
+        const old = oldManual.get(row.id);
+        if (old?.errorCode) return old;
       }
       const item = fields(row, manualFields);
       if (item.share !== undefined) item.share = fields(item.share, ['url', 'password']);
-      const old = previous.manual.find(before => !before.errorCode &&
-        isDeepStrictEqual((() => {
-          const projected = fields(before, manualFields);
-          if (projected.share !== undefined) projected.share = fields(projected.share, ['url', 'password']);
-          return projected;
-        })(), item));
-      if (old) return old;
+      const old = oldManual.get(item.id);
+      if (old && !old.errorCode && isDeepStrictEqual(old, item)) return old;
       validateManual(item);
       return item;
     }),
     blocks: value.blocks.map(row => {
       requireValue(object(row));
       if (row.id !== undefined) {
-        const old = previous.blocks.find(before => before.id === row.id);
+        const old = oldBlocks.get(row.id);
         if (old) return old;
       }
       const item = fields(row, ['targetId', 'sourceKey', 'detailId', 'lineId']);
-      const old = previous.blocks.find(before => !before.errorCode &&
-        isDeepStrictEqual(fields(before, ['targetId', 'sourceKey', 'detailId', 'lineId']), item));
-      if (old) return old;
+      const old = oldBlocks.get(identity(item));
+      if (old && !old.errorCode && isDeepStrictEqual(old, item)) return old;
       validateBlock(item);
       return item;
     }),
     previewTargets: value.previewTargets,
-    groups: projectRows('groups', row => fields(row, ['id', 'keys', 'members']), row => {
-      requireValue(/^group:[a-f0-9]{64}$/.test(row.id) && Array.isArray(row.keys) && Array.isArray(row.members) &&
-        [...row.keys, ...row.members].every(text));
-      unique(row.keys, key => key); unique(row.members, key => key);
+    groups: value.groups.map(row => {
+      const item = fields(row, ['id', 'keys', 'members']);
+      const old = oldGroups.get(item.id);
+      if (old && isDeepStrictEqual(old, item)) return old;
+      requireValue(/^group:[a-f0-9]{64}$/.test(item.id) && Array.isArray(item.keys) && Array.isArray(item.members) &&
+        [...item.keys, ...item.members].every(text));
+      unique(item.keys, key => key); unique(item.members, key => key);
+      return item;
     }),
   };
-  unique(result.manual, row => row.id); unique(result.blocks, row => row.id ?? identity(row)); unique(result.groups, row => row.id);
-  for (const id of result.previewTargets) if (!previous.previewTargets.includes(id)) requireValue(text(id));
+  unique(result.manual, row => row.id); unique(result.blocks, blockKey); unique(result.groups, row => row.id);
+  for (const id of result.previewTargets) if (!oldPreviews.has(id)) requireValue(text(id));
   unique(result.previewTargets, row => row);
   if (!native) {
     result.preferences = fields(value.preferences, [...preferenceLists, 'iosAutoPrepare', 'metadataViewProvider']);

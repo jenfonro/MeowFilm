@@ -4,12 +4,13 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.Accounts;
 
 internal sealed record StoredAccountDetails(
-    long AccountGeneration, string AccountScope, string AccountFingerprint,
+    long AccountGeneration, string AccountScope,
     string UserId, MusicAccountProfile Profile, long ProfileFetchedAt, long ProfileExpiresAt,
     MusicAccountEntitlements Rights)
 {
+    internal const long ProfileTtl = 7 * 86400000L;
     internal bool BelongsTo(StoredAccount account) => AccountGeneration == account.Generation &&
-        AccountScope == account.Scope && UserId == account.Profile?.UserId && AccountFingerprint == account.ValueFingerprint;
+        AccountScope == account.Scope && UserId == account.Profile?.UserId;
     public override string ToString() => "StoredAccountDetails (private)";
 }
 
@@ -21,7 +22,7 @@ internal static class AccountDetailsStore
     internal static StoredAccountDetails? Read(DatabaseSession db, string platform)
     {
         if (!db.TryQuerySingle("""
-            SELECT account_generation,account_scope,account_fingerprint,user_id,
+            SELECT account_generation,account_scope,user_id,
                    profile_fetched_at_ms,profile_expires_at_ms,
                    profile_platform,profile_user_id,profile_display_name,profile_avatar,
                    rights_vip,rights_tier,rights_expires_at_ms,rights_checked_at_ms,rights_recheck_at_ms,
@@ -33,49 +34,35 @@ internal static class AccountDetailsStore
             {
                 long generation = row.GetInt64(0);
                 string scope = row.GetString(1);
-                string fingerprint = row.GetString(2);
-                string userId = row.GetString(3);
-                long fetched = row.GetNullableInt64(4) ?? 0;
-                long expires = row.GetNullableInt64(5) ?? 0;
-                string? pPlatform = row.GetNullableString(6);
-                string? pUserId = row.GetNullableString(7);
-                string? pDisplayName = row.GetNullableString(8);
-                string? pAvatar = row.GetNullableString(9);
-                bool? vip = row.GetNullableBool(10);
-                string? tier = row.GetNullableString(11);
-                long? rExpires = row.GetNullableInt64(12);
-                long? rChecked = row.GetNullableInt64(13);
-                long? rRecheck = row.GetNullableInt64(14);
-                bool? rDeferred = row.GetNullableBool(15);
-                string? rError = row.GetNullableString(16);
-                long? rRetry = row.GetNullableInt64(17);
+                string userId = row.GetString(2);
+                long fetched = row.GetNullableInt64(3) ?? 0;
+                long expires = row.GetNullableInt64(4) ?? 0;
+                string pPlatform = row.GetNullableString(5) ?? platform;
+                string pUserId = row.GetNullableString(6) ?? userId;
+                string pDisplayName = row.GetNullableString(7) ?? "";
+                string? pAvatar = row.GetNullableString(8);
+                bool? vip = row.GetNullableBool(9);
+                string tier = row.GetNullableString(10) ?? "unknown";
+                long? rExpires = row.GetNullableInt64(11);
+                long rChecked = row.GetNullableInt64(12) ?? 0;
+                long rRecheck = row.GetNullableInt64(13) ?? 0;
+                bool rDeferred = row.GetNullableBool(14) ?? false;
+                string? rError = row.GetNullableString(15);
+                long rRetry = row.GetNullableInt64(16) ?? 0;
 
-                AccountRules.Require(
-                    generation is >= 0 and <= AccountRules.MaxInteger &&
-                    scope.Length is > 0 and <= 128 &&
-                    fingerprint.Length is > 0 and <= 64 &&
-                    pPlatform == platform && pUserId is not null && pDisplayName is not null &&
-                    fetched > 0 && expires == fetched + AccountDetailsSnapshot.ProfileTtl &&
-                    tier is not null && rChecked is >= 0 and <= AccountRules.MaxInteger &&
-                    rRecheck is >= 0 and <= AccountRules.MaxInteger &&
-                    rDeferred is not null && rRetry is >= 0 and <= AccountRules.MaxInteger,
-                    "CORRUPT_STORAGE");
-
-                var profile = new MusicAccountProfile(pPlatform!, pUserId!, pDisplayName!, pAvatar);
                 return (
                     Generation: generation,
                     Scope: scope,
-                    Fingerprint: fingerprint,
                     UserId: userId,
-                    Profile: profile,
+                    Profile: new MusicAccountProfile(pPlatform, pUserId, pDisplayName, pAvatar),
                     Fetched: fetched,
                     Expires: expires,
-                    Membership: new MusicAccountMembership(vip, tier!, rExpires),
-                    CheckedAt: rChecked!.Value,
-                    RecheckAt: rRecheck!.Value,
-                    Deferred: rDeferred!.Value,
+                    Membership: new MusicAccountMembership(vip, tier, rExpires),
+                    CheckedAt: rChecked,
+                    RecheckAt: rRecheck,
+                    Deferred: rDeferred,
                     ErrorCode: rError,
-                    RetryAt: rRetry!.Value);
+                    RetryAt: rRetry);
             },
             out var rowData,
             ("$plat", platform)))
@@ -86,16 +73,16 @@ internal static class AccountDetailsStore
             row => row.GetString(0),
             ("$plat", platform)).ToArray();
 
-        var rights = AccountDetailsSnapshot.Freeze(new(
+        var rights = new MusicAccountEntitlements(
             rowData.Membership,
             rowData.CheckedAt,
             rowData.RecheckAt,
-            levels,
+            Array.AsReadOnly(levels),
             rowData.Deferred,
             rowData.ErrorCode,
-            rowData.RetryAt));
+            rowData.RetryAt);
         return new StoredAccountDetails(
-            rowData.Generation, rowData.Scope, rowData.Fingerprint, rowData.UserId,
+            rowData.Generation, rowData.Scope, rowData.UserId,
             rowData.Profile, rowData.Fetched, rowData.Expires, rights);
     }
 
@@ -138,7 +125,7 @@ internal static class AccountDetailsStore
             ("$plat", platform),
             ("$gen", next.AccountGeneration),
             ("$scope", next.AccountScope),
-            ("$fp", next.AccountFingerprint),
+            ("$fp", ""),
             ("$uid", next.UserId),
             ("$pf", next.ProfileFetchedAt),
             ("$pe", next.ProfileExpiresAt),
@@ -164,7 +151,6 @@ internal static class AccountDetailsStore
 
     internal static void Delete(DatabaseSession db, string platform)
     {
-        // Cascades to windows_music_account_audio_levels.
         db.Execute("DELETE FROM windows_music_account_details WHERE platform=$plat", ("$plat", platform));
     }
 }

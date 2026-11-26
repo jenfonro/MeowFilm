@@ -25,9 +25,11 @@ import { dirname, extname, resolve, posix } from 'node:path';
 import { fault, requireValue } from './errors.js';
 import { PrivateVolume, inside } from './private-volume.js';
 import { NativeResources } from './cat-resources.js';
-import { Request, Response } from './node-web-values.js';
+import { loadCatWebValues } from './native-loader.js';
 import { dnsFacade } from './network-boundary.js';
 import { afterCloseDispatch, closeResource, guardDetachedEmitter, ignoreError } from './resource-close.js';
+
+const { Request, Response } = loadCatWebValues();
 
 const require = createRequire(import.meta.url);
 const sdkPackages = new Set(['acorn', 'supports-color', '@opentelemetry/api']);

@@ -54,9 +54,7 @@ public sealed partial class MusicLibraryOwner
                 foreach (string id in requested)
                 {
                     token.ThrowIfCancellationRequested();
-                    songs[id] = loaded.TryGetValue(id, out var song) && song is not null
-                        ? NativeMusicSong.Normalize(song)
-                        : null;
+                    songs[id] = loaded.GetValueOrDefault(id);
                 }
             }
             else
@@ -84,7 +82,7 @@ public sealed partial class MusicLibraryOwner
             MusicRules.Require(!closed && !preparing, "CLOSED");
             snapshotSession = visibleSongs;
         }
-        return snapshotSession?.Read(id) is { } song ? NativeMusicSong.Normalize(song) : null;
+        return snapshotSession?.Read(id);
     }
 
     internal async Task ArtworkLoadCompletedAsync(string address, bool succeeded)
@@ -96,9 +94,6 @@ public sealed partial class MusicLibraryOwner
             if (closed || preparing) return;
             if (succeeded && failedArtwork.Count == 0) return;
             await LoadAsync(CancellationToken.None).ConfigureAwait(false);
-            if (recommendationUnknown is null && pending is { Owner: PendingOwner.SongMetadata })
-                await ReconcileLockedAsync(CancellationToken.None).ConfigureAwait(false);
-            if (pending is not null || recommendationUnknown is not null) return;
             var ids = session!.Songs.Artwork(address);
             if (ids.Count == 0) return;
             if (succeeded)
@@ -132,7 +127,7 @@ public sealed partial class MusicLibraryOwner
                 });
                 changed = true;
             }
-            if (changed) await CommitAsync(candidate, PendingOwner.SongMetadata, CancellationToken.None).ConfigureAwait(false);
+            if (changed) await CommitAsync(candidate).ConfigureAwait(false);
         }
         finally { gate.Release(); }
     }
@@ -151,12 +146,8 @@ public sealed partial class MusicLibraryOwner
             songObservations[pair.Key] = Math.Max(songObservations.GetValueOrDefault(pair.Key), pair.Value);
     }
 
-    private static MusicSongRecord SongReference(MusicLibrarySession doc, string id)
-    {
-        var song = doc.Songs.Read(id) ?? throw new MusicLibraryException("SONG_NOT_FOUND");
-        MusicRules.Require(song.SongId == id, "INVALID_SONG_ID");
-        return NativeMusicSong.Normalize(song);
-    }
+    private static MusicSongRecord SongReference(MusicLibrarySession doc, string id) =>
+        doc.Songs.Read(id) ?? throw new MusicLibraryException("SONG_NOT_FOUND");
 
     private static MusicSongRecord EntrySong(MusicLibrarySession doc, MusicQueueEntryRecord entry) =>
         SongReference(doc, entry.SongId);
@@ -281,7 +272,7 @@ public sealed partial class MusicLibraryOwner
         }
         if (snapshotSession is null) return song;
         string? id = snapshotSession.Registered(song) ?? snapshotSession.Find(song);
-        return id is null ? song : NativeMusicSong.Normalize(snapshotSession.Read(id)!);
+        return id is null ? song : snapshotSession.Read(id)!;
     }
 
     internal MusicSongRecord[] ProjectSongs(IReadOnlyList<MusicSongRecord> songs)
@@ -302,7 +293,7 @@ public sealed partial class MusicLibraryOwner
         {
             var song = songs[i];
             string? id = snapshotSession.Registered(song) ?? snapshotSession.Find(song);
-            result[i] = id is null ? song : NativeMusicSong.Normalize(snapshotSession.Read(id)!);
+            result[i] = id is null ? song : snapshotSession.Read(id)!;
         }
         return result;
     }
@@ -323,14 +314,11 @@ public sealed partial class MusicLibraryOwner
         {
             MusicRules.Require(!closed && !preparing, "CLOSED");
             await LoadAsync(token).ConfigureAwait(false);
-            if (recommendationUnknown is null && pending is { Owner: PendingOwner.SongMetadata })
-                await ReconcileLockedAsync(token).ConfigureAwait(false);
-            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
             var candidate = session!.Candidate(true);
             var accepted = new Dictionary<(string SongId, string Platform), long>();
             var adopted = RegisterSongs(candidate, recordings, authoritative, observation, accepted);
             token.ThrowIfCancellationRequested();
-            await CommitAsync(candidate, PendingOwner.SongMetadata, token, accepted).ConfigureAwait(false);
+            await CommitAsync(candidate, accepted).ConfigureAwait(false);
 
             int index = 0;
             return RewritePlatformResult(result, shape, el =>
@@ -350,14 +338,11 @@ public sealed partial class MusicLibraryOwner
         {
             MusicRules.Require(!closed && !preparing, "CLOSED");
             await LoadAsync(token).ConfigureAwait(false);
-            if (recommendationUnknown is null && pending is { Owner: PendingOwner.SongMetadata })
-                await ReconcileLockedAsync(token).ConfigureAwait(false);
-            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
             var candidate = session!.Candidate(true);
             var accepted = authoritative ? new Dictionary<(string SongId, string Platform), long>() : null;
             var adopted = RegisterSongs(candidate, [normalized], authoritative: authoritative, observation: observation, accepted: accepted);
             token.ThrowIfCancellationRequested();
-            await CommitAsync(candidate, PendingOwner.SongMetadata, token, accepted).ConfigureAwait(false);
+            await CommitAsync(candidate, accepted).ConfigureAwait(false);
             return adopted[0];
         }
         finally { gate.Release(); }

@@ -101,7 +101,7 @@ enum NovelLibraryRepository {
         return result
     }
 
-    static func retain(_ incoming: NovelBookStorageRecord, shelf: Bool, validate: (NovelBookStorageRecord) -> Bool, _ db: SQLiteConnection) throws -> String {
+    static func retain(_ incoming: NovelBookStorageRecord, shelf: Bool, _ db: SQLiteConnection) throws -> String {
         let existing = try findExisting(incoming, db)
         var next = incoming
         if let existing {
@@ -116,7 +116,6 @@ enum NovelLibraryRepository {
             next.addedAt = Date()
         }
         let inheritedProgress = try resolveConflicts(&next, preserveProgress: true, db)
-        guard validate(next) else { throw NovelError.invalidInput("书籍数据无效") }
         try saveBook(next, db)
         if let inheritedProgress {
             let hasProgress = try db.queryOne("SELECT 1 FROM novel_progress WHERE book_id=?", [.text(next.id)], map: { _ in true }) == true
@@ -155,7 +154,7 @@ enum NovelLibraryRepository {
         }
     }
 
-    static func record(_ incoming: NovelBookStorageRecord, anchor: NovelAnchor, validate: (NovelBookStorageRecord) -> Bool, _ db: SQLiteConnection) throws -> String {
+    static func record(_ incoming: NovelBookStorageRecord, anchor: NovelAnchor, _ db: SQLiteConnection) throws -> String {
         let existing = try findExisting(incoming, db)
         var next = incoming
         if let existing {
@@ -170,7 +169,6 @@ enum NovelLibraryRepository {
             next.addedAt = Date()
         }
         _ = try resolveConflicts(&next, preserveProgress: false, db)
-        guard validate(next) else { throw NovelError.invalidInput("书籍数据无效") }
         try saveBook(next, db)
         try db.upsert(
             "novel_progress",
@@ -344,11 +342,8 @@ enum NovelLibraryRepository {
             "FROM novel_reading_settings s LEFT JOIN ios_novel_reading_background b ON b.singleton=s.singleton " +
             "WHERE s.singleton=1"
         ) { cursor in
-            guard let mode = NovelReadingMode(rawValue: try cursor.text(0)) else {
-                throw NovelError.corruptStorage
-            }
             var settings = NovelReadingSettings()
-            settings.mode = mode
+            settings.mode = NovelReadingMode(rawValue: try cursor.text(0)) ?? .slide
             settings.fontSize = try cursor.double(1)
             settings.fontWeight = try cursor.double(2)
             settings.fontName = try cursor.text(3)

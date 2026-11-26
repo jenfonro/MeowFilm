@@ -15,13 +15,13 @@ public final class FilmHomeModel: ObservableObject {
         let error: FilmHomeError?
     }
 
-    private let sourceByID: [String: any FilmSource]
+    private let sourceByID: [String: DoubanFilmSource]
     private var snapshots: [String: Snapshot] = [:]
     private var requestID: UUID?
     private var loadTask: Task<Void, Never>?
     private var isClosed = false
 
-    public init(sources: [any FilmSource]) {
+    public init(sources: [DoubanFilmSource]) {
         let descriptors = sources.map(\.descriptor)
         self.sources = descriptors
         self.selectedSourceID = descriptors.first?.id
@@ -30,13 +30,13 @@ public final class FilmHomeModel: ObservableObject {
 
     public func categoryModel(sectionID: String) -> FilmCategoryModel? {
         guard let selectedSourceID,
-              let source = sourceByID[selectedSourceID] as? any FilmCategorySource,
+              let source = sourceByID[selectedSourceID],
               let category = source.categories.first(where: { $0.rawValue == sectionID }) else { return nil }
         return FilmCategoryModel(category: category, source: source)
     }
 
     func supportsCategory(sectionID: String) -> Bool {
-        guard let selectedSourceID, let source = sourceByID[selectedSourceID] as? any FilmCategorySource else { return false }
+        guard let selectedSourceID, let source = sourceByID[selectedSourceID] else { return false }
         return source.categories.contains { $0.rawValue == sectionID }
     }
 

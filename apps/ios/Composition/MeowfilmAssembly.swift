@@ -28,7 +28,7 @@ final class MeowfilmAssembly: ObservableObject {
     }
     let appearance = MusicAppearancePreferencesStore()
     let filmLibrary = FilmLibrary()
-    lazy var filmSources: [any FilmSource] = [DoubanFilmSource { [weak self] in
+    lazy var filmSources: [DoubanFilmSource] = [DoubanFilmSource { [weak self] in
         guard let resources = await self?.resources else { throw FilmHomeError.network }
         return try await resources.scriptSession.connection()
     }]
@@ -74,7 +74,7 @@ final class MeowfilmAssembly: ObservableObject {
     var automaticSync: MusicAutomaticLibrarySync?
     var foreground = UIApplication.shared.applicationState == .active
     var filmPlayback: FilmPlaybackModel?
-    var filmMedia: MeowfilmFilmMedia?
+    var filmMedia: FilmPlaybackMedia?
     var filmMediaPlayback: FilmPlaybackModel? { filmMedia?.currentModel }
     var filmModels: [FilmPlaybackModel] {
         var identities = Set<ObjectIdentifier>()
@@ -391,7 +391,7 @@ final class MeowfilmAssembly: ObservableObject {
         filmSearch: FilmSearchService?,
         filmBackground: Task<Void, Never>?,
         films: [FilmPlaybackModel],
-        filmMedia: MeowfilmFilmMedia?,
+        filmMedia: FilmPlaybackMedia?,
         playback: PlaybackController?,
         pendingScripts: Task<Void, Never>?,
         filmImages: ArtworkImages?,
@@ -433,7 +433,7 @@ final class MeowfilmAssembly: ObservableObject {
         do { try await resources?.musicScripts.close() }
         catch { record(error.localizedDescription) }
         if let report = await resources?.musicAccounts?.close(), !report.cleanupComplete {
-            record(MusicServiceError.commitUnconfirmed.localizedDescription)
+            record("音乐账号关闭清理未完成")
         }
         do { try await resources?.musicPlatform.close() }
         catch { record(error.localizedDescription) }

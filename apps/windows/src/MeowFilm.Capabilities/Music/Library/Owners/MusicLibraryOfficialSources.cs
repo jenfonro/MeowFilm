@@ -10,19 +10,8 @@ public sealed partial class MusicLibraryOwner
     private readonly object officialSourcesGate = new();
     private OfficialSourcesLease? officialSourcesLease;
 
-    private static MusicOfficialSourcesRecord OfficialSources(MusicLibrarySession doc)
-    {
-        var value = doc.ReadOfficialSources() ?? DefaultOfficialSources;
-        try { ValidateOfficialSources(value); }
-        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
-        return value;
-    }
-
-    private static void ValidateOfficialSources(MusicOfficialSourcesRecord settings)
-    {
-        MusicRules.Require(settings.Revision is >= 0 and <= MusicRules.MaxInteger);
-        ValidateOfficialSourceSet(settings.Enabled);
-    }
+    private static MusicOfficialSourcesRecord OfficialSources(MusicLibrarySession doc) =>
+        doc.ReadOfficialSources() ?? DefaultOfficialSources;
 
     private static void ValidateOfficialSourceSet(string[] enabled)
     {
@@ -33,34 +22,33 @@ public sealed partial class MusicLibraryOwner
     public Task<MusicOfficialSourcesRecord> GetOfficialSourcesAsync(CancellationToken cancellationToken = default) =>
         RunLibraryReadAsync(doc =>
         {
-            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
             var settings = OfficialSources(doc);
             RefreshOfficialSources(doc);
             return settings;
-        }, cancellationToken, authoritativeFor: PendingOwner.OfficialSources);
+        }, cancellationToken);
 
-    public Task<MusicOfficialSourcesRecord> SaveOfficialSourcesAsync(
+    public async Task<MusicOfficialSourcesRecord> SaveOfficialSourcesAsync(
         long ifRevision,
         string[] enabled,
-        CancellationToken cancellationToken = default) =>
-        RunLibraryWriteAsync(PendingOwner.OfficialSources, doc =>
+        CancellationToken cancellationToken = default)
+    {
+        bool mutated = false;
+        var saved = await RunLibraryWriteAsync(doc =>
         {
-            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
             var settings = OfficialSources(doc);
             var nextEnabled = enabled.ToArray();
             ValidateOfficialSourceSet(nextEnabled);
             MusicRules.Require(ifRevision == settings.Revision, "REVISION_CONFLICT");
             var next = new MusicOfficialSourcesRecord(checked(settings.Revision + 1), OfficialSourcePlatforms, nextEnabled);
-            ValidateOfficialSources(next);
             cancellationToken.ThrowIfCancellationRequested();
-            // Revoke before CAS admission, including a write whose receipt is later unknown.
             InvalidateOfficialSources();
             doc.SetOfficialSources(next);
             return (next, true);
-        }, cancellationToken);
+        }, cancellationToken, onCommitted: () => mutated = true, refreshOfficialSources: true).ConfigureAwait(false);
+        if (mutated) InvokeSafe(OfficialSourcesChanged, saved);
+        return saved;
+    }
 
-    // A generation is shared by readers until the sole owner changes/reconciles the policy.
-    // Its immutable token remains safe to observe after the owner disposes the revoked CTS.
     internal sealed class OfficialSourcesLease : IDisposable
     {
         private readonly MusicLibraryOwner owner;
@@ -94,7 +82,7 @@ public sealed partial class MusicLibraryOwner
                 revoking = true;
             }
             try { revoked.Cancel(); }
-            catch (AggregateException) { /* All linked official operations are still revoked. */ }
+            catch (AggregateException) { }
             finally
             {
                 lock (lifetimeGate) revoking = false;
@@ -132,7 +120,6 @@ public sealed partial class MusicLibraryOwner
         { lock (owner.officialSourcesGate) RequireCurrent(platform); }
         internal T Publish<T>(string? platform, Func<T> result)
         {
-            // Final validation and publication cannot straddle policy revocation.
             lock (owner.officialSourcesGate) { RequireCurrent(platform); return result(); }
         }
     }
@@ -174,9 +161,6 @@ public sealed partial class MusicLibraryOwner
             MusicRules.Require(!closed && !preparing, "CLOSED");
             await LoadAsync(token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
-            // Native consumers must not use the public authoritative read to implicitly
-            // settle an unknown CAS. Only an explicit get/reconcile may reopen admission.
-            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
             return RefreshOfficialSources(session!).Retain();
         }
         catch (StorageException error)

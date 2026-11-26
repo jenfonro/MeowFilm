@@ -12,13 +12,13 @@ public final class FilmCategoryModel: ObservableObject {
     @Published public private(set) var hasMore = true
     var filterRows: [FilmCategoryFilter] { category.filterRows(for: filters) }
 
-    private let source: any FilmCategorySource
+    private let source: DoubanFilmSource
     private var offset = 0
     private var closed = false
     private var requestID: UUID?
     private var task: Task<Void, Never>?
 
-    public init(category: FilmCategory, source: any FilmCategorySource) {
+    public init(category: FilmCategory, source: DoubanFilmSource) {
         self.category = category
         self.source = source
         filters = category.defaultFilters

@@ -32,49 +32,6 @@ final class VideoLogSinkBox: @unchecked Sendable {
     }
 }
 
-private final class VideoSessionCleanupBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var engine: PlaybackEngine?
-    private var output: VideoOutput?
-    private var closed = false
-
-    func attachOutput(_ output: VideoOutput) {
-        lock.lock()
-        if !closed {
-            self.output = output
-        }
-        lock.unlock()
-    }
-
-    func attach(_ engine: PlaybackEngine) {
-        lock.lock()
-        if !closed {
-            self.engine = engine
-        }
-        lock.unlock()
-    }
-
-    func clear() {
-        lock.lock()
-        closed = true
-        engine = nil
-        output = nil
-        lock.unlock()
-    }
-
-    func takeForDeinit() -> (engine: PlaybackEngine?, output: VideoOutput?) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !closed else { return (nil, nil) }
-        closed = true
-        let takenEngine = engine
-        let takenOutput = output
-        engine = nil
-        output = nil
-        return (takenEngine, takenOutput)
-    }
-}
-
 /// Main-actor session boundary over the self-owned FFmpeg 8.1.2 + VideoToolbox + AVSampleBufferDisplayLayer kernel.
 /// Owns decoding, rendering, sync, tracks, subtitles, chapters and diagnostics; never owns business sessions or AVAudioSession.
 @MainActor
@@ -93,9 +50,8 @@ public final class VideoSession {
     public var onTransportRate: (@MainActor (Float) -> Void)?
     public var onBuffering: (@MainActor (Bool) -> Void)?
 
-    private nonisolated let cleanupBox = VideoSessionCleanupBox()
     private let presentGate = PresentGate()
-    private var engine: PlaybackEngine?
+    private nonisolated(unsafe) var engine: PlaybackEngine?
     private var preparation: Task<Void, Error>?
     private var seekOperation: Task<Double, Error>?
     private var recoveryTask: Task<Void, Never>?
@@ -109,29 +65,13 @@ public final class VideoSession {
     private var cancelled = false
     private var failure: VideoKernelFailure?
 
-    public init() throws {
-        cleanupBox.attachOutput(output)
-    }
+    public init() throws {}
 
-    deinit {
-        let (engine, output) = cleanupBox.takeForDeinit()
+    nonisolated deinit {
         if let engine {
             engine.cancel()
             DispatchQueue.global(qos: .utility).async {
                 engine.closeSync()
-            }
-        }
-        if let output {
-            if Thread.isMainThread {
-                MainActor.assumeIsolated {
-                    output.closeSync()
-                }
-            } else {
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        output.closeSync()
-                    }
-                }
             }
         }
     }
@@ -175,7 +115,6 @@ public final class VideoSession {
 
         let core = PlaybackEngine()
         engine = core
-        cleanupBox.attach(core)
         wireEngine(core)
 
         let task = Task<VideoStreamInfo, Error> {
@@ -323,11 +262,11 @@ public final class VideoSession {
             // Mark recovery before mutating FFmpeg stream position so any cancellation (including
             // chained supersede + cancel) cannot resume from an unconfirmed target.
             if committed { needsRecoverySeek = true }
-            let ticket = try engine.beginSeek(to: position)
-            presentGate.setMinimumSerial(ticket.videoSerial)
+            let prepared = try engine.prepareSeek(to: position)
+            presentGate.setMinimumSerial(prepared.videoSerial)
             output.invalidateFrame()
 
-            _ = try await engine.waitSeek(ticket)
+            _ = try await engine.performSeek(prepared)
             try check()
             guard seekRevision == revision else { throw VideoKernelFailure.cancelled }
 
@@ -395,7 +334,6 @@ public final class VideoSession {
                 }.value
             }
             await output.close()
-            cleanupBox.clear()
             self.engine = nil
             self.info = nil
             self.onFailure = nil; self.onEnd = nil

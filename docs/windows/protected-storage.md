@@ -16,9 +16,9 @@ Windows 平台表定义按数据库角色与域组织在 `packages/storage/schem
 
 ## 目录归属
 
-- `MeowFilm.Platform/Storage/Engine/`：`DatabaseRole`、`IStorageDatabase`、`NativeDatabase`、`DatabaseSession`、`PreparedStatementCache`、`StorageValue`、`TypedValueNodes`、`SerialOperationQueue`、`StorageError.cs`（`StorageError`／`StorageException`；`SQLITE_CONSTRAINT` 统一映射 `Constraint`，准入上限统一 `128 / 32 MiB`）
+- `MeowFilm.Platform/Storage/Engine/`：`DatabaseRole`、`IStorageDatabase`、`NativeDatabase`、`DatabaseSession`、`PreparedStatementCache`、`TypedValueNodes`、`StorageError.cs`（`StorageError`／`StorageException`；`SQLITE_CONSTRAINT` 统一映射 `Constraint`，写通道有界容量 `128`）
 - `MeowFilm.Platform/Storage/Schema/`：`StorageSchema`（双角色嵌入资源加载与 schema identity/hash 校验）
-- `MeowFilm.Platform/Storage/Files/`：`DatabaseDirectory`、`FileResourceCache`、`RawResourceDirectory`、`UserDataDirectory`、`WindowsStorageFiles`
+- `MeowFilm.Platform/Storage/Files/`：`DatabaseDirectory`、`RawResourceDirectory`、`UserDataDirectory`、`WindowsStorageFiles`
 - `MeowFilm.Capabilities/<Domain>/Storage/`：各业务域持久化仓库直接执行强类型 SQL ↔ 强类型领域/存储记录（`Film/Storage/`、`Pan/Storage/`、`Novel/Storage/`、`Accounts/Storage/`、`Feedback/Storage/`、`Recommendations/Storage/`、`Catalog/Storage/`、`PlaybackCache/Storage/`、`Library/Storage/`），进程内全链路采用纯强类型 C# 领域模型（`MusicLibrarySession` / `MusicLibraryRules` 等，仅在外部 Node 边界与调试原始投影使用 `MusicNodeSongCodec`），存储层内零 `System.Text.Json` / `JsonObject` / `JsonNode` / `LJ` / 写入前整表回读 Diff 或非清空路径整表重插。
 
 ## 数据 owner
@@ -41,7 +41,7 @@ Windows 平台表定义按数据库角色与域组织在 `packages/storage/schem
 
 ## 事务与可靠性
 
-`NativeDatabase` 采用 WAL 读写分离连接模型：写事务在单一 writer lane 串行执行，只读查询路由至独立只读连接（`ReadOnly` + `PRAGMA query_only=ON`），并内置有界 `PreparedStatementCache`（LRU 256）避免热点 SQL 重复编译。写连接打开时统一应用并核对基准 PRAGMA：`foreign_keys=ON`、`trusted_schema=OFF`、`journal_mode=WAL`、`synchronous=FULL`（`data` 库）/`NORMAL`（`cache` 库）、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`busy_timeout=5000`、`temp_store=MEMORY`、`cache_size=-16384`，并通过 `application_id`、`user_version = 1` 与 `storage_identity.schema_hash` 核对 schema 身份；只读连接配置 `busy_timeout=5000`、`foreign_keys=ON`、`trusted_schema=OFF`、`temp_store=MEMORY`、`cache_size=-16384`、`query_only=ON`，核对 `journal_mode=wal`、`auto_vacuum=2`、`query_only=1`。常规读写直接运行在已打开句柄之上，不执行每请求目录/文件 syscall，也不获取跨进程维护锁；仅开库与周期维护（checkpoint / incremental_vacuum）通过角色独立维护锁（`data-maintenance.lock` / `cache-maintenance.lock`）协调。数据库关闭先拒绝新操作并排空已接纳事务，然后释放连接；不在关闭时执行 checkpoint／vacuum。本地 SQLite 不等同于服务器集群或跨设备多主高可用。
+`NativeDatabase` 采用 WAL 读写分离连接模型：写事务在单一 writer lane 串行执行，只读查询路由至独立只读连接（`ReadOnly` + `PRAGMA query_only=ON`），并内置有界 `PreparedStatementCache`（LRU 256）避免热点 SQL 重复编译。写连接打开时统一应用基准 PRAGMA：`foreign_keys=ON`、`trusted_schema=OFF`、`journal_mode=WAL`、`synchronous=FULL`（`data` 库）/`NORMAL`（`cache` 库）、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`busy_timeout=5000`、`temp_store=MEMORY`、`cache_size=-16384`，并通过 `application_id`、`user_version = 1` 与 `storage_identity.schema_hash` 核对 schema 身份；只读连接配置 `busy_timeout=5000`、`foreign_keys=ON`、`trusted_schema=OFF`、`temp_store=MEMORY`、`cache_size=-16384`、`query_only=ON`。常规读写直接运行在已打开句柄之上，不执行每请求目录/文件 syscall，也不获取跨进程维护锁；仅开库与周期维护（checkpoint / incremental_vacuum）通过角色独立维护锁（`data-maintenance.lock` / `cache-maintenance.lock`）协调。数据库关闭先拒绝新操作并排空已接纳事务，然后释放连接；不在关闭时执行 checkpoint／vacuum。本地 SQLite 不等同于服务器集群或跨设备多主高可用。
 
 缓存按所属表／记录策略失效，`meowfilm-cache.sqlite3` 故障不破坏或删除永久库 `meowfilm-data.sqlite3`。图片、音频、源码等原始 bytes 不进入数据库（在线展示歌词保存在缓存库 `cached_music_lyrics*`，手工本地歌词保存在永久库 `windows_music_local_lyrics*`）。`resources-v1` 是资源文件目录，不是第二份结构化数据库；`RawResourceDirectory` 读取时按文件存在性与记录字节长度 O(1) 校验（不做每读每写 SHA-256），`windows_music_audio_files` 仅保留长度与时间戳等实际消费列；所有运行期临时文件（含小说 WebView2 临时 profile）统一落在 `<dataRoot>/tmp` 并在启动时自动清扫。正常退出统一走 `AppShutdown` 并受 5 秒排空超时保护（超时强杀残留 Node 子进程并记录告警）。
 

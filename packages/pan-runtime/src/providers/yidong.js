@@ -11,7 +11,7 @@ const accountDevice = '||9|12.27.0|chrome|143.0.0.0|pda50460feabd10141fb59a3ba78
 const pageSize = 200;
 const refreshPeriod = 12 * 60 * 60 * 1000;
 const shareID = /^[A-Za-z0-9_-]+$/;
-const videoName = /\.(?:mp4|mkv|mov|iso|flv)$/i;
+const videoName = /\.(?:mp4|mkv|mov|iso|flv|ts|m2ts|avi|wmv|rmvb|webm|m4v|mpg|mpeg)$/i;
 
 function parseShare(share) {
   requireValue(object(share) && typeof share.url === 'string');
@@ -179,8 +179,7 @@ async function* directoryPages(ctx, share, parentId) {
       files.add(item.coID);
       nextFiles.push(item);
     }
-    const hasNext = ca.length >= pageSize || co.length >= pageSize;
-    requireValue(!hasNext || nextDirectories.length + nextFiles.length > 0, 'UPSTREAM_FORMAT');
+    const hasNext = (ca.length >= pageSize || co.length >= pageSize) && (nextDirectories.length + nextFiles.length > 0);
     yield { directories: nextDirectories, files: nextFiles };
     if (!hasNext) return;
   }
@@ -301,50 +300,22 @@ function escapeXML(value) {
   return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[char]);
 }
 
-function xmlText(value) {
-  let result = '', offset = 0;
-  const parts = /<!\[CDATA\[([\s\S]*?)\]\]>|([^<]+)/gy;
-  while (offset < value.length) {
-    parts.lastIndex = offset;
-    const match = parts.exec(value);
-    requireValue(match, 'UPSTREAM_FORMAT');
-    offset = parts.lastIndex;
-    if (match[1] !== undefined) { result += match[1]; continue; }
-    result += match[2].replace(/&([^;]*);|&/g, (entity, name) => {
-      const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
-      if (Object.hasOwn(named, name)) return named[name];
-      requireValue(/^#(?:\d+|x[0-9a-fA-F]+)$/.test(name ?? ''), 'UPSTREAM_FORMAT');
-      const point = name.startsWith('#x') ? parseInt(name.slice(2), 16) : Number(name.slice(1));
-      requireValue(point === 9 || point === 10 || point === 13 ||
-        (point >= 32 && point <= 0xD7FF) || (point >= 0xE000 && point <= 0xFFFD) ||
-        (point >= 0x10000 && point <= 0x10FFFF), 'UPSTREAM_FORMAT');
-      return String.fromCodePoint(point);
-    });
-  }
-  return result;
+function unescapeXML(value) {
+  return value.replace(/^<!\[CDATA\[([\s\S]*?)\]\]>$/, '$1')
+    .replace(/&(?:amp|lt|gt|quot|apos|#(\d+)|#x([0-9a-fA-F]+));/g, (raw, dec, hex) =>
+      dec ? String.fromCodePoint(Number(dec)) : hex ? String.fromCodePoint(parseInt(hex, 16))
+        : ({ '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" })[raw]);
 }
 
 function refreshToken(body) {
-  const root = /^(?:<\?xml\s+[^?]*\?>\s*)?<root\s*>([\s\S]*)<\/root>$/.exec(decodeUTF8(body).trim());
-  requireValue(root, 'UPSTREAM_FORMAT');
-  const values = new Map(), source = root[1];
-  const elements = /\s*(?:<([A-Za-z_][\w.-]*)\s*>([\s\S]*?)<\/\1>|<([A-Za-z_][\w.-]*)\s*\/>)\s*/gy;
-  let offset = 0;
-  while (offset < source.length && source.slice(offset).trim()) {
-    elements.lastIndex = offset;
-    const match = elements.exec(source);
-    requireValue(match, 'UPSTREAM_FORMAT');
-    const key = match[1] ?? match[3];
-    requireValue(!values.has(key), 'UPSTREAM_FORMAT');
-    values.set(key, xmlText(match[2] ?? '').trim());
-    offset = elements.lastIndex;
-  }
-  requireValue(values.has('return'), 'UPSTREAM_FORMAT');
-  const result = values.get('return');
-  requireValue(/^-?\d+$/.test(result), 'UPSTREAM_FORMAT');
-  requireValue(result === '0', result === '1' ? 'AUTH_FAILED' : 'UPSTREAM_ERROR');
-  requireValue(values.get('token'), 'UPSTREAM_FORMAT');
-  return values.get('token');
+  const xml = decodeUTF8(body).trim();
+  const code = /<return\s*>([\s\S]*?)<\/return>/.exec(xml)?.[1]?.trim() ?? '';
+  requireValue(/^-?\d+$/.test(code), 'UPSTREAM_FORMAT');
+  requireValue(code === '0', code === '1' ? 'AUTH_FAILED' : 'UPSTREAM_ERROR');
+  const rawToken = /<token\s*>([\s\S]*?)<\/token>/.exec(xml)?.[1]?.trim() ?? '';
+  const token = unescapeXML(rawToken).trim();
+  requireValue(token, 'UPSTREAM_FORMAT');
+  return token;
 }
 
 async function refresh(_, ctx) {

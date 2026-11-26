@@ -21,7 +21,7 @@ public final class MusicArtworkImages {
 
     fileprivate let images: ArtworkImages
     let effects = MusicArtworkEffectsCache()
-    private var selector: (any MusicArtworkSelecting)?
+    private var selector: NativeMusicService?
     private var failedViews: [ObjectIdentifier: WeakArtworkView] = [:]
 
     public convenience init() {
@@ -48,7 +48,7 @@ public final class MusicArtworkImages {
         images.debugClearMemoryCache()
     }
 
-    func configure(cache: any MusicPresentationCaching, selector: (any MusicArtworkSelecting)?) {
+    func configure(cache: MusicNativePresentationCache, selector: NativeMusicService?) {
         images.setByteCache(cache); self.selector = selector
     }
     func read(_ url: URL) async throws -> (UIImage, Data?, URL) {

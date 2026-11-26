@@ -25,9 +25,9 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
     private readonly HashSet<Session> sessions = [];
     private Task? disposal;
     private bool closed;
-    private sealed class Entry(string fingerprint)
+    private sealed class Entry(FeedbackAttemptKey key)
     {
-        internal readonly string Fingerprint = fingerprint;
+        internal readonly FeedbackAttemptKey Key = key;
         internal Task<MusicFeedbackSession>? Start;
         internal Session? Active;
         internal string? Terminal;
@@ -78,7 +78,7 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             }
         }
         start = FeedbackProtocolRules.Start(account, start);
-        string fingerprint = FeedbackProtocolRules.Fingerprint(account, start);
+        var attemptKey = FeedbackProtocolRules.AttemptKey(account, start);
         Session session;
         lock (gate)
         lock (start.Attempt.Gate)
@@ -87,14 +87,14 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             FeedbackProtocolRules.Require(start.Attempt.State is null or Entry, "INSTANCE_MISMATCH");
             if (start.Attempt.State is Entry old)
             {
-                FeedbackProtocolRules.Require(old.Fingerprint == fingerprint, "INSTANCE_MISMATCH");
+                FeedbackProtocolRules.Require(old.Key == attemptKey, "INSTANCE_MISMATCH");
                 FeedbackProtocolRules.Require(old.Terminal is null, old.Terminal ?? "START_UNCONFIRMED");
                 FeedbackProtocolRules.Require(old.Active is { Closed: false }, "CLOSED");
                 FeedbackProtocolRules.Require(ReferenceEquals(old.Active!.Owner, this), "INSTANCE_MISMATCH");
                 old.Active!.Token.ThrowIfCancellationRequested();
                 return ObserveDuplicate(old.Start!, old.Active, cancellationToken);
             }
-            var entry = new Entry(fingerprint);
+            var entry = new Entry(attemptKey);
             session = new(this, account, start, entry, cancellationToken);
             entry.Active = session; entry.Start = session.Started.Task;
             start.Attempt.State = entry; sessions.Add(session); pending.Add(session.Started.Task);

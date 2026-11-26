@@ -2,7 +2,7 @@ import Dispatch
 import Foundation
 import MeowContracts
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 
 final class MusicNativeFMSession {
     let source: MusicRemoteQueueSource
@@ -21,7 +21,7 @@ final class MusicNativeFMSession {
     }
 }
 
-extension NativeMusicService: MusicFMPlaybackServing {
+extension NativeMusicService {
     public func rememberedFM() async throws -> MusicHomeAction {
         let own = epoch
         let binding = try await currentHomeBinding()
@@ -48,7 +48,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
         try session.source.authorization.check()
         let savedFM = try MusicQueueFMState.fromAction(session.action, continueEnabled: enabled)
         try session.source.authorization.perform {
-            try similarQueueTransaction(enabled ? [.queue, .playback] : [.queue]) { d in
+            try transaction(enabled ? [.queue, .playback] : [.queue]) { d in
                 d.queue.fm = savedFM
                 if enabled { selectContinuationMode(&d) }
             }
@@ -113,7 +113,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
             return
         }
         guard d.queue.source?.sourceType == "fm", !d.queue.entries.isEmpty else {
-            try similarQueueTransaction([.queue]) { draft in
+            try transaction([.queue]) { draft in
                 if draft.queue.fm == saved { draft.queue.fm = nil }
             }
             fmRestored = true
@@ -150,7 +150,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
             let newSessionID = source.id.uuidString.lowercased()
             let updatedFM = try MusicQueueFMState.fromAction(action, continueEnabled: continueEnabled)
             try source.authorization.perform {
-                try similarQueueTransaction([.queue]) { draft in
+                try transaction([.queue]) { draft in
                     try musicRequire(draft.queue.fm == saved && draft.queue.source?.sourceType == "fm", .targetChanged)
                     let previousSessionID = draft.queue.source?.remoteSession
                     draft.queue.source?.remoteSession = newSessionID
@@ -169,11 +169,10 @@ extension NativeMusicService: MusicFMPlaybackServing {
         } catch {
             if let openedSource { openedSource.revoke(); await openedSource.close() }
             let failure = MusicServiceError.sanitized(error)
-            if failure == .commitUnconfirmed { throw failure }
             try check(own)
             guard fmRestoration?.id == restoration else { throw MusicServiceError.cancelled }
             if failure.isAuthenticationFailure || [.staleAccess, .notFound, .unsupported].contains(failure) {
-                try similarQueueTransaction([.queue]) { draft in
+                try transaction([.queue]) { draft in
                     if draft.queue.fm == saved { draft.queue.fm = nil }
                 }
                 fmRestored = true
@@ -195,10 +194,10 @@ extension NativeMusicService: MusicFMPlaybackServing {
         emitSimilar()
     }
     func fmPreferenceScope(_ binding: MusicNativeHomeBinding) async throws -> String {
-        guard let owner = accounts as? any MusicNativeFMProviding else {
+        guard let accounts else {
             return binding.loggedIn ? "wy-fm:" + binding.scope : "wy-fm:guest"
         }
-        let scope = try await owner.nativeFMPreferenceScope(binding)
+        let scope = try await accounts.nativeFMPreferenceScope(binding)
         try musicRequire(!scope.isEmpty, .invalidResponse)
         return scope
     }
@@ -260,7 +259,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
         let context = try remoteContext(session.source)
         var live: [String: MusicRecommendationMetadata] = [:]
         try session.source.authorization.perform {
-            try similarQueueTransaction([.queue]) { d in
+            try transaction([.queue]) { d in
                 try musicRequire(d.queue.source?.remoteSession == session.source.id.uuidString.lowercased(), .targetChanged)
                 let songs = try repositorySongs(tracks.map(\.songID), d)
                 let rows = try makeEntries(songs, state: &d, context: context)

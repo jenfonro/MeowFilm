@@ -2,8 +2,6 @@
 import Foundation
 import Combine
 
-/// Each visible entry owns its presentation state; the existing home browser
-/// remains the authority for the selection and its compare-and-swap revision.
 @MainActor
 public final class MusicHomeSourceSettingsModel: ObservableObject {
     @Published public private(set) var selection: MusicHomeSourceSelection?
@@ -13,91 +11,57 @@ public final class MusicHomeSourceSettingsModel: ObservableObject {
     private var active = false
     private var request: UUID?
     private var work: Task<Void, Never>?
-    private var accessObservation: AnyCancellable?
-    private var homeBrowser: (any MusicHomeBrowsing)? { model.publicBrowser as? any MusicHomeBrowsing }
 
-    public init(model: MusicViewModel) {
-        self.model = model
-        accessObservation = model.accessChanges.receive(on: RunLoop.main).sink { [weak self] in
-            guard let self, self.model.isClosed else { return }
-            self.invalidate()
-        }
-    }
+    public init(model: MusicViewModel) { self.model = model }
 
     public func activate() {
         guard !active else { return }
-        active = true
-        loadSelection()
+        active = true; loadSelection()
     }
 
-    public func deactivate() {
-        active = false
-        invalidate()
-    }
+    public func deactivate() { active = false; invalidate() }
 
     public func select(_ platform: MusicPublicBrowsePlatform) {
         guard active, !model.isClosed,
-              let homeBrowser, let current = selection, current.selected != platform,
+              let service = model.service, let current = selection, current.selected != platform,
               current.available.contains(platform), !isSaving else { return }
-        let request = UUID()
-        self.request = request
-        isSaving = true
-        let submitted = model.settingsReceipts.submit(settings: ["home/selectedSource"], operation: "保存数据源") {
-            try await homeBrowser.selectHomeSource(platform, ifRevision: current.revision)
-        }
+        let id = UUID(); request = id; isSaving = true
         work = Task { [weak self] in
             do {
-                let value = try await submitted.value
-                guard let self, isCurrent(request) else { return }
-                work = nil
-                selection = value
-                isSaving = false
+                let value = try await service.selectHomeSource(platform, ifRevision: current.revision)
+                guard let self, isCurrent(id) else { return }
+                work = nil; selection = value; isSaving = false
             } catch {
-                guard self?.isCurrent(request) == true else { return }
-                // A failed acknowledgement can still have committed; never replay the write.
-                let value = try? await homeBrowser.homeSourceSelection()
-                guard let self, isCurrent(request) else { return }
-                work = nil
-                selection = value
-                isSaving = false
-                if (error as? MusicServiceError) != .commitUnconfirmed {
-                    report(error, operation: "保存数据源")
-                }
+                let value = try? await service.homeSourceSelection()
+                guard let self, isCurrent(id) else { return }
+                work = nil; selection = value; isSaving = false
+                report(error, operation: "保存数据源")
             }
         }
     }
 
     private func loadSelection() {
         invalidate()
-        guard active, !model.isClosed, let homeBrowser else { return }
-        let request = UUID()
-        self.request = request
+        guard active, !model.isClosed, let service = model.service else { return }
+        let id = UUID(); request = id
         work = Task { [weak self] in
-            guard self?.isCurrent(request) == true else { return }
-            let result: Result<MusicHomeSourceSelection, Error>
-            do { result = .success(try await homeBrowser.homeSourceSelection()) }
-            catch { result = .failure(error) }
-            guard let self, isCurrent(request) else { return }
-            work = nil
-            switch result {
-            case .success(let value): selection = value
-            case .failure(let error):
-                selection = nil
-                report(error, operation: "读取数据源")
+            do {
+                let value = try await service.homeSourceSelection()
+                guard let self, isCurrent(id) else { return }
+                work = nil; selection = value
+            } catch {
+                guard let self, isCurrent(id) else { return }
+                work = nil; selection = nil; report(error, operation: "读取数据源")
             }
         }
     }
 
-    private func isCurrent(_ request: UUID) -> Bool {
-        active && self.request == request && !model.isClosed && !Task.isCancelled
+    private func isCurrent(_ id: UUID) -> Bool {
+        active && request == id && !model.isClosed && !Task.isCancelled
     }
 
     private func invalidate() {
-        request = nil
-        work?.cancel()
-        work = nil
-        selection = nil
-        isSaving = false
+        request = nil; work?.cancel(); work = nil; selection = nil; isSaving = false
     }
 
     private func report(_ error: Error, operation: String) {

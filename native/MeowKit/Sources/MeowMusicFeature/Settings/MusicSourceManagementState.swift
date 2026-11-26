@@ -3,9 +3,6 @@ import Foundation
 import Combine
 import MeowStorage
 
-/// One list of built-in and script sources. Built-in sources are playback
-/// settings owned by the music service; scripts are owned by the script owner.
-/// Neither is a global "current source", and the page never stores drafts.
 @MainActor
 final class MusicSourceManagementState: ObservableObject {
     @Published private(set) var official: [MusicAccountPlatform] = MusicAccountPlatform.allCases
@@ -27,15 +24,11 @@ final class MusicSourceManagementState: ObservableObject {
     private var pageGeneration = UUID()
     private var generation = UUID()
     private var officialWork: Task<Void, Never>?
-    private var officialSubmitted = false
     private var work: [UUID: Task<Void, Never>] = [:]
-    private var submittedWrites = Set<UUID>()
     private var sourceWork: [String: UUID] = [:]
     private var importWork: UUID?
     private var readID = UUID()
-    private var listRevision = UUID()
     private var detailReadIDs: [String: UUID] = [:]
-    private var uncertainDetails = Set<String>()
 
     init(model: MusicViewModel) {
         self.model = model
@@ -70,26 +63,20 @@ final class MusicSourceManagementState: ObservableObject {
     }
 
     func hide(_ page: AnyObject) {
-        // UIKit shows the next page before hiding the previous one. Only the
-        // current visible page can end this shared owner's visibility.
         guard visiblePage == ObjectIdentifier(page) else { return }
         visible = false
         cancelPageWork()
     }
 
     func close() {
-        active = false
-        visible = false
-        visiblePage = nil
-        error = nil
+        active = false; visible = false; visiblePage = nil; error = nil
         invalidateAccess()
     }
 
     func reconcileAccess() {
         guard active, model.isClosed else { return }
         invalidateAccess()
-        error = nil
-        scripts = []
+        error = nil; scripts = []
         reconcileSettings()
     }
 
@@ -111,20 +98,14 @@ final class MusicSourceManagementState: ObservableObject {
         officialWork = Task { [weak self] in
             guard let self else { return }
             defer {
-                officialWork = nil; officialSubmitted = false
-                if admitted {
-                    savingOfficial = false
-                    reconcileSettings()
-                }
+                officialWork = nil
+                if admitted { savingOfficial = false; reconcileSettings() }
             }
             guard canSubmit(access, page: page) else { return }
-            officialSubmitted = true
-            // Write failures are reported by the playback-settings owner.
             await model.updateSettings(change)
         }
     }
 
-    /// The switch shows the requested value while its own write is in flight.
     func scriptEnabled(_ item: MusicScriptSourceItem) -> Bool { pending[item.id] ?? item.enabled }
     func isPending(_ id: String) -> Bool { sourceWork[id] != nil }
     func item(_ id: String) -> MusicScriptSourceItem? { scripts.first { $0.id == id } }
@@ -133,23 +114,17 @@ final class MusicSourceManagementState: ObservableObject {
         guard admitted, let service = model.scriptSources, !isPending(id),
               let current = item(id), current.enabled != enabled else { return }
         pending[id] = enabled
-        listRevision = UUID()
-        let access = generation, page = pageGeneration, receipts = model.settingsReceipts
-        run(configurationWrite: true, sourceID: id) { [weak self] submit in
+        let access = generation, page = pageGeneration
+        run(configurationWrite: true, sourceID: id) { [weak self] in
             do {
-                try submit()
-                let value = try await receipts.submit(
-                    settings: ["scripts/" + id + "/enabled"], operation: "保存音源设置") {
-                        try await service.setScriptSourceEnabled(id, enabled: enabled)
-                    }.value
+                let value = try await service.setScriptSourceEnabled(id, enabled: enabled)
                 guard let self, self.canSubmit(access, page: page) else { return }
                 self.pending[id] = nil
                 self.replace(value)
             } catch {
                 guard let self, self.canSubmit(access, page: page) else { return }
                 self.pending[id] = nil
-                self.fail(error, receiptOwned: true)
-                self.reload()
+                self.fail(error); self.reload()
             }
         }
     }
@@ -157,45 +132,34 @@ final class MusicSourceManagementState: ObservableObject {
     func remove(_ id: String) {
         guard admitted, let service = model.scriptSources, !isPending(id), item(id) != nil else { return }
         pending[id] = false
-        listRevision = UUID()
-        let access = generation, page = pageGeneration, receipts = model.settingsReceipts
-        run(configurationWrite: true, sourceID: id) { [weak self] submit in
+        let access = generation, page = pageGeneration
+        run(configurationWrite: true, sourceID: id) { [weak self] in
             do {
-                try submit()
-                try await receipts.submit(
-                    settings: ["scripts/" + id + "/installation"], operation: "删除音源") {
-                        try await service.removeScriptSource(id)
-                    }.value
+                try await service.removeScriptSource(id)
                 guard let self, self.canSubmit(access, page: page) else { return }
                 self.pending[id] = nil
-                self.listRevision = UUID()
                 self.scripts.removeAll { $0.id == id }
                 self.selected.remove(id); self.details[id] = nil; self.detailReadIDs[id] = nil
             } catch {
                 guard let self, self.canSubmit(access, page: page) else { return }
                 self.pending[id] = nil
-                self.fail(error, receiptOwned: true)
-                self.reload()
+                self.fail(error); self.reload()
             }
         }
     }
 
     func importFiles(_ urls: [URL]) {
         guard admitted, let service = model.scriptSources, importWork == nil, !urls.isEmpty else { return }
-        let access = generation, page = pageGeneration, receipts = model.settingsReceipts
+        let access = generation, page = pageGeneration
         importing = true
-        listRevision = UUID()
-        run(configurationWrite: true, importing: true) { [weak self] submit in
+        run(configurationWrite: true, importing: true) { [weak self] in
             var failure: Error?
             for url in urls {
                 guard self?.canSubmit(access, page: page) == true else { break }
                 do {
                     let data = try await ImportedFileReader.read(url)
-                    try submit()
-                    let value = try await receipts.submit(settings: ["scripts/import/" + url.absoluteString],
-                                                         operation: "导入音源") {
-                        try await service.importScriptSource(data, fileName: url.lastPathComponent)
-                    }.value
+                    guard self?.canSubmit(access, page: page) == true else { break }
+                    let value = try await service.importScriptSource(data, fileName: url.lastPathComponent)
                     guard let self, self.canSubmit(access, page: page) else { return }
                     self.replace(value)
                 } catch {
@@ -205,7 +169,7 @@ final class MusicSourceManagementState: ObservableObject {
             }
             guard let self, self.canSubmit(access, page: page) else { return }
             self.importing = false
-            if let failure { self.fail(failure, receiptOwned: true); self.reload() }
+            if let failure { self.fail(failure); self.reload() }
         }
     }
 
@@ -214,44 +178,33 @@ final class MusicSourceManagementState: ObservableObject {
         guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)), url.scheme != nil else {
             fail(MusicServiceError.insecureScriptURL); return
         }
-        let access = generation, page = pageGeneration, receipts = model.settingsReceipts
+        let access = generation, page = pageGeneration
         importing = true
-        listRevision = UUID()
-        run(configurationWrite: true, importing: true) { [weak self] submit in
+        run(configurationWrite: true, importing: true) { [weak self] in
             do {
-                try submit()
-                let value = try await receipts.submit(settings: ["scripts/import/" + url.absoluteString],
-                                                     operation: "下载音源") {
-                    try await service.downloadScriptSource(from: url)
-                }.value
+                let value = try await service.downloadScriptSource(from: url)
                 guard let self, self.canSubmit(access, page: page) else { return }
                 self.importing = false
                 self.replace(value)
             } catch {
                 guard let self, self.canSubmit(access, page: page) else { return }
                 self.importing = false
-                self.fail(error, receiptOwned: true)
-                self.reload()
+                self.fail(error); self.reload()
             }
         }
     }
 
     func reload() {
         guard admitted, let service = model.scriptSources else { return }
-        let access = generation
-        let id = UUID(), revision = listRevision; readID = id
-        run { [weak self] _ in
+        let access = generation, id = UUID(); readID = id
+        run { [weak self] in
             do {
                 let values = try await service.scriptSources()
                 guard let self, self.currentRead(access), self.readID == id else { return }
-                // A read spanning a management change cannot replace newer facts.
-                // Re-read rather than dropping the reconciliation of uncertain writes.
-                guard self.listRevision == revision else { self.reload(); return }
                 let previous = Dictionary(self.scripts.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
                 let next = Dictionary(values.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
                 let observed = Set(self.details.keys).union(self.detailReadIDs.keys)
-                let changed = observed.filter { previous[$0] != next[$0] || self.uncertainDetails.contains($0) }
-                self.uncertainDetails = []
+                let changed = observed.filter { previous[$0] != next[$0] }
                 for sourceID in changed {
                     self.detailReadIDs[sourceID] = nil
                     self.details[sourceID] = nil
@@ -260,7 +213,6 @@ final class MusicSourceManagementState: ObservableObject {
                 for sourceID in changed where next[sourceID] != nil { self.readDetail(sourceID) }
             } catch {
                 guard let self, self.currentRead(access), self.readID == id else { return }
-                guard self.listRevision == revision else { self.reload(); return }
                 self.fail(error)
             }
         }
@@ -279,10 +231,10 @@ final class MusicSourceManagementState: ObservableObject {
     func removeSelected() { for id in selected where item(id) != nil { remove(id) } }
     func checkOfficial(_ platform: MusicAccountPlatform) {
         let id = "official:" + platform.rawValue
-        guard admitted, !checking.contains(id), let service = model.service as? any MusicOfficialSourceChecking else { return }
+        guard admitted, !checking.contains(id), let service = model.service else { return }
         checking.insert(id)
         let access = generation
-        run { [weak self] _ in
+        run { [weak self] in
             do {
                 try await service.checkOfficialSource(platform)
                 guard let self, self.currentRead(access) else { return }
@@ -297,7 +249,7 @@ final class MusicSourceManagementState: ObservableObject {
         guard admitted, let service = model.scriptSources, item(id) != nil else { return }
         let access = generation, readID = UUID()
         detailReadIDs[id] = readID
-        run { [weak self] _ in
+        run { [weak self] in
             do {
                 let value = try await service.scriptSourceDetail(id)
                 guard let self, self.currentRead(access), self.detailReadIDs[id] == readID,
@@ -311,167 +263,99 @@ final class MusicSourceManagementState: ObservableObject {
         }
     }
     func checkScript(_ id: String) {
-        perform(id, checking: true) { service, submit in
-            try submit()
-            return try await service.checkScriptSource(id)
-        }
+        perform(id, checking: true) { try await $0.checkScriptSource(id) }
     }
     func edit(_ id: String, name: String, url: String?) {
-        perform(id) { service, submit in
-            try submit()
-            return try await self.model.settingsReceipts.submit(
-                settings: ["scripts/" + id + "/metadata"], operation: "保存音源设置") {
-                    try await service.editScriptSource(id, name: name, networkURL: url)
-                }.value
-        }
+        perform(id) { try await $0.editScriptSource(id, name: name, networkURL: url) }
     }
     func update(_ id: String, file: URL? = nil) {
-        perform(id) { service, submit in
+        perform(id) { service in
             if let file {
                 let data = try await ImportedFileReader.read(file)
-                try submit()
-                return try await self.model.settingsReceipts.submit(
-                    settings: ["scripts/" + id + "/source"], operation: "更新音源") {
-                        try await service.updateScriptSource(id, data: data, fileName: file.lastPathComponent)
-                    }.value
+                return try await service.updateScriptSource(id, data: data, fileName: file.lastPathComponent)
             }
-            try submit()
-            return try await self.model.settingsReceipts.submit(
-                settings: ["scripts/" + id + "/source"], operation: "更新音源") {
-                    try await service.updateScriptSource(id)
-                }.value
+            return try await service.updateScriptSource(id)
         }
     }
     func rollback(_ id: String) {
-        perform(id) { service, submit in
-            try submit()
-            return try await self.model.settingsReceipts.submit(
-                settings: ["scripts/" + id + "/source"], operation: "回滚音源") {
-                    try await service.rollbackScriptSource(id)
-                }.value
-        }
+        perform(id) { try await $0.rollbackScriptSource(id) }
     }
     private func perform(_ id: String, checking check: Bool = false,
-                         operation: @escaping @MainActor (any MusicScriptSourceManaging, @MainActor () throws -> Void)
-                            async throws -> MusicScriptSourceItem) {
+                         operation: @escaping @MainActor (NativeMusicScriptService) async throws -> MusicScriptSourceItem) {
         guard admitted, let service = model.scriptSources, let item = item(id), !isPending(id) else { return }
         pending[id] = item.enabled
         if check { checking.insert(id) }
-        listRevision = UUID()
         let access = generation, page = pageGeneration
-        run(configurationWrite: !check, sourceID: id) { [weak self] submit in
+        run(configurationWrite: !check, sourceID: id) { [weak self] in
             do {
-                let value = try await operation(service, submit)
+                let value = try await operation(service)
                 guard let self, self.canSubmit(access, page: page) else { return }
                 self.pending[id] = nil; self.checking.remove(id); self.replace(value); self.readDetail(id)
             } catch {
                 guard let self, self.canSubmit(access, page: page) else { return }
-                self.pending[id] = nil; self.checking.remove(id); self.fail(error, receiptOwned: !check)
-                self.uncertainDetails.insert(id)
-                self.reload()
+                self.pending[id] = nil; self.checking.remove(id); self.fail(error); self.reload()
             }
         }
     }
 
-    private var admitted: Bool {
-        visible && isActive
-    }
-
-    private func current(_ access: UUID) -> Bool {
-        // Accepted writes settle while hidden; only reads depend on visibility
-        // and cancellation. A closed/revoked generation never receives them.
-        isActive && access == generation
-    }
-
-    private func currentRead(_ access: UUID) -> Bool {
-        !Task.isCancelled && visible && current(access)
-    }
-
-    private func canSubmit(_ access: UUID, page: UUID) -> Bool {
-        currentRead(access) && pageGeneration == page
-    }
+    private var admitted: Bool { visible && isActive }
+    private func currentRead(_ access: UUID) -> Bool { !Task.isCancelled && visible && isActive && access == generation }
+    private func canSubmit(_ access: UUID, page: UUID) -> Bool { currentRead(access) && pageGeneration == page }
 
     private func replace(_ value: MusicScriptSourceItem) {
-        listRevision = UUID()
         detailReadIDs[value.id] = nil
         if let index = scripts.firstIndex(where: { $0.id == value.id }) { scripts[index] = value }
         else { scripts.append(value) }
     }
 
-    private func fail(_ error: Error, receiptOwned: Bool = false) {
+    private func fail(_ error: Error) {
         if let error = error as? ImportedFileError {
             if error != .cancelled { self.error = error.localizedDescription }
             return
         }
         let failure = MusicServiceError.sanitized(error)
-        guard failure != .cancelled, !receiptOwned || failure != .commitUnconfirmed else { return }
-        self.error = failure.localizedDescription
+        if failure != .cancelled { self.error = failure.localizedDescription }
     }
 
     private func run(configurationWrite: Bool = false, sourceID: String? = nil, importing: Bool = false,
-                     _ body: @escaping @MainActor (@MainActor () throws -> Void) async -> Void) {
-        let id = UUID(), owner = model.service as? any MusicSourcePlaybackServing
+                     _ body: @escaping @MainActor () async -> Void) {
+        let id = UUID(), owner = model.service
         let access = generation, page = pageGeneration
         if let sourceID { sourceWork[sourceID] = id }
         if importing { importWork = id }
         work[id] = Task { [weak self] in
             guard let self else { return }
             defer {
-                work[id] = nil; submittedWrites.remove(id)
+                work[id] = nil
                 if let sourceID, sourceWork[sourceID] == id {
-                    sourceWork[sourceID] = nil
-                    if pending[sourceID] != nil { pending[sourceID] = nil }
+                    sourceWork[sourceID] = nil; pending[sourceID] = nil
                 }
-                if importWork == id {
-                    importWork = nil
-                    if self.importing { self.importing = false }
-                }
+                if importWork == id { importWork = nil; self.importing = false }
             }
-            if !configurationWrite, !canSubmit(access, page: page) { return }
-            await body {
-                guard self.canSubmit(access, page: page) else { throw MusicServiceError.cancelled }
-                if configurationWrite { self.submittedWrites.insert(id) }
-            }
-            // A committed or uncertain write outlives its page's receipt. This
-            // separate task must not inherit UI cancellation/access checks.
-            if submittedWrites.contains(id) {
-                await Task { await owner?.sourceConfigurationChanged() }.value
-                if admitted, !canSubmit(access, page: page) {
-                    listRevision = UUID()
-                    uncertainDetails.formUnion(Set(details.keys).union(detailReadIDs.keys))
-                    reload()
-                }
+            guard canSubmit(access, page: page) else { return }
+            await body()
+            if configurationWrite {
+                await owner?.sourceConfigurationChanged()
             }
         }
     }
 
     private func cancelPageWork() {
-        pageGeneration = UUID()
-        readID = UUID()
-        detailReadIDs = [:]
-        if !officialSubmitted { officialWork?.cancel() }
-        for (id, task) in work where !submittedWrites.contains(id) {
-            task.cancel()
-            if let sourceID = sourceWork.first(where: { $0.value == id })?.key {
-                sourceWork[sourceID] = nil
-                pending[sourceID] = nil
-            }
-            if importWork == id { importWork = nil; importing = false }
-        }
-        for id in checking { pending[id] = nil }
-        checking = []
+        pageGeneration = UUID(); readID = UUID(); detailReadIDs = [:]
+        officialWork?.cancel()
+        for (_, task) in work { task.cancel() }
+        work = [:]; sourceWork = [:]; importWork = nil
+        pending = [:]; checking = []; importing = false; savingOfficial = false
     }
 
     private func invalidateAccess() {
         generation = UUID()
         cancelPageWork()
-        uncertainDetails = []
-        pending = [:]; importing = false
     }
 
     deinit {
-        if !officialSubmitted { officialWork?.cancel() }
-        for (id, task) in work where !submittedWrites.contains(id) { task.cancel() }
+        officialWork?.cancel()
+        for task in work.values { task.cancel() }
     }
 }
 #endif

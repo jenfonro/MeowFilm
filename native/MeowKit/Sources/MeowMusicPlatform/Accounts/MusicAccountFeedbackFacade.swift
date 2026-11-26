@@ -1,9 +1,32 @@
 import Foundation
 import MeowAccounts
 import MeowDebug
-import MeowMusicFeature
 
-extension NativeMusicAccountService: MusicNativeFeedbackLifecycleProviding {
+struct MusicAccountFeedbackNativeSession: Sendable {
+    let id: String
+}
+
+struct MusicAccountFeedbackNativeResult: Sendable {
+    let receipt: MusicPlaybackFeedbackReceipt
+    var session: MusicAccountFeedbackNativeSession? = nil
+}
+
+extension NativeMusicAccountService {
+    struct ActiveFeedbackSession {
+        let session: MusicPlaybackFeedbackSession
+        let token: AccountSessionToken
+        let credentialRevision: AccountCredentialUpdateRevision
+        let epoch: UUID
+        let revision: Int
+        let pendingScope: String?
+        var start: MusicPlaybackFeedbackReport?
+        var end: MusicPlaybackFeedbackReport?
+        var startReceipt: MusicPlaybackFeedbackReceipt = .unconfirmed
+        var endReceipt: MusicPlaybackFeedbackReceipt = .unconfirmed
+        var remoteSession: MusicAccountFeedbackNativeSession?
+        var startedAt: TimeInterval = 0
+    }
+
     public func configurePlaybackFeedback(_ settings: MusicPlaybackFeedbackSettings) throws {
         try check()
         guard !playbackFeedbackClosing else { throw MusicServiceError.closed }
@@ -37,32 +60,12 @@ extension NativeMusicAccountService: MusicNativeFeedbackLifecycleProviding {
         feedbackDrain?.task.cancel()
     }
 
-    private func pendingFeedbackScope(_ credential: AccountCredentialUpdateLease,
-                                      provider: MusicNodeAccountProvider) async throws -> String {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let nativeID = try await provider.nativeID(credential.credential)
-        let identity = try encoder.encode(credential.token.identity)
-        let namespace = musicSHA256Hex(identity + Data(nativeID.utf8))
-        return "wy-playback-v1:" + namespace + ":" + credential.revision.cacheScopeID.uuidString.lowercased()
-    }
-
-    private func registerPendingPlaybackFeedback(_ value: MusicPlaybackFeedbackReport, scope: String,
-                                                 setting: MusicPlaybackFeedbackSetting,
-                                                 credential: AccountCredentialUpdateLease, own: UUID, revision: Int,
-                                                 consent: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackReceipt {
-        try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
-        try await consent.check()
-        try check(own)
-        guard !playbackFeedbackClosing, setting == playbackFeedbackSetting else { throw MusicServiceError.cancelled }
-        let register: () throws -> MusicPlaybackFeedbackReceipt = {
-            try self.playbackFeedbackOutbox.enqueue(value, scope: scope, setting: setting, at: self.now().timeIntervalSince1970)
-        }
-        let result: MusicPlaybackFeedbackReceipt
-        if value.event == .start, let proof = value.target.recommendationProof {
-            result = try proof.authorization.perform(register)
-        } else { result = try register() }
-        schedulePendingPlaybackFeedback()
-        return result
+    private func pendingFeedbackScope(_ credential: AccountCredentialUpdateLease) -> String {
+        let identity = credential.token.identity
+        return "wy-playback-v1:" + identity.source.installationID.uuidString.lowercased() + ":" +
+            identity.accountID.uuidString.lowercased() + ":" +
+            credential.credential.userID + ":" +
+            credential.revision.cacheScopeID.uuidString.lowercased()
     }
 
     func schedulePendingPlaybackFeedback() {
@@ -91,27 +94,24 @@ extension NativeMusicAccountService: MusicNativeFeedbackLifecycleProviding {
         do {
             let credential = try await accounts.credentialUpdateLease(for: token)
             defer { credential.revoke() }
-            try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
-            let scope = try await pendingFeedbackScope(credential, provider: provider)
-            try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
-            guard !playbackFeedbackClosing else { return }
+            guard !closed, !playbackFeedbackClosing, epoch == own,
+                  tokens[.netease] == token, validated.contains(.netease),
+                  revisions[.netease, default: 0] == revision,
+                  credential.phase == .signedIn else { return }
+            let scope = pendingFeedbackScope(credential)
             try playbackFeedbackOutbox.activate(scope: scope, at: now().timeIntervalSince1970)
             let candidates = try playbackFeedbackOutbox.candidates(at: now().timeIntervalSince1970)
             for candidate in candidates {
-                try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
+                guard !closed, !playbackFeedbackClosing, !Task.isCancelled, epoch == own,
+                      tokens[.netease] == token, validated.contains(.netease),
+                      revisions[.netease, default: 0] == revision else { break }
                 guard let (entry, gate) = try playbackFeedbackOutbox.reserve(candidate) else { continue }
                 let operation = UUID()
-                let authorization = MusicPlaybackFeedbackAuthorization { [weak self] in
-                    try await gate.check()
-                    guard let self else { throw MusicServiceError.closed }
-                    try await self.checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
-                }
                 let worker = Task {
-                    try await authorization.check()
-                    return try await provider.uploadPlaybackLog(entry.eventBody(),
-                        authorization: authorization)
+                    try gate.check()
+                    return try await provider.uploadPlaybackLog(entry.eventBody(), authorization: gate)
                 }
-                do { try gate.register(operation) { authorization.revoke(); worker.cancel() } }
+                do { try gate.register(operation) { worker.cancel() } }
                 catch { worker.cancel() }
                 defer { gate.remove(operation) }
                 do {
@@ -145,72 +145,141 @@ extension NativeMusicAccountService: MusicNativeFeedbackLifecycleProviding {
     public func flushPendingPlaybackFeedback() async {
         while let drain = feedbackDrain { await drain.task.value }
     }
-}
 
-extension NativeMusicAccountService: MusicNativeFeedbackProviding {
     func revokePlaybackFeedback(_ platform: MusicAccountPlatform? = nil) {
-        for lease in playbackFeedbackLeases.values where platform == nil || lease.platform == platform { lease.revoke() }
-        playbackFeedbackLeases = playbackFeedbackLeases.filter { $0.value.authorization.isActive || !$0.value.isDrained }
+        let ids = feedbackSessions.filter { platform == nil || $0.value.session.platform == platform }.map(\.key)
+        for id in ids {
+            guard let removed = feedbackSessions.removeValue(forKey: id) else { continue }
+            if let remote = removed.remoteSession, let provider = providers[removed.session.platform] {
+                Task { await provider.releaseFeedback(remote) }
+            }
+        }
     }
 
-    public func beginPlaybackFeedback(platform: MusicAccountPlatform,
-                                      authorization consent: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackLease {
-        try check(); try await consent.check()
+    public func beginPlaybackFeedback(platform: MusicAccountPlatform, settingGeneration: Int) async throws -> MusicPlaybackFeedbackSession {
+        try check()
         guard !playbackFeedbackClosing else { throw MusicServiceError.closed }
         _ = try configured(platform)
         guard let token = tokens[platform], validated.contains(platform), !transitions.contains(platform),
-              !requiresExplicitRestore.contains(platform), let provider = providers[platform] else { throw MusicServiceError.authRequired }
-        playbackFeedbackLeases = playbackFeedbackLeases.filter { $0.value.authorization.isActive || !$0.value.isDrained }
+              !requiresExplicitRestore.contains(platform), providers[platform] != nil else {
+            throw MusicServiceError.authRequired
+        }
         let own = epoch, revision = revisions[platform, default: 0]
         try await validToken(token, platform: platform, own: own, revision: revision)
         let credential = try await accounts.credentialUpdateLease(for: token)
-        do {
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            try await consent.check()
-            try check(own)
-            guard tokens[platform] == token, validated.contains(platform), revisions[platform, default: 0] == revision else {
-                throw MusicServiceError.staleResult
+        defer { credential.revoke() }
+        guard epoch == own, tokens[platform] == token, validated.contains(platform),
+              revisions[platform, default: 0] == revision, credential.phase == .signedIn else {
+            throw MusicServiceError.staleResult
+        }
+        let pendingScope: String?
+        if platform == .netease {
+            guard playbackFeedbackSetting.enabled, playbackFeedbackSetting.generation == settingGeneration else {
+                throw MusicServiceError.cancelled
             }
-            let identity = token.identity
-            let scope = identity.source.installationID.uuidString.lowercased() + ":" + identity.source.siteKey + ":" + identity.accountID.uuidString.lowercased()
-            let register: (@Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt)?
-            if platform == .netease {
-                let setting = playbackFeedbackSetting
-                guard setting.enabled else { throw MusicServiceError.cancelled }
-                let pendingScope = try await pendingFeedbackScope(credential, provider: provider)
-                try await checkPlaybackFeedback(platform: platform, lease: credential, epoch: own, revision: revision)
-                try playbackFeedbackOutbox.activate(scope: pendingScope, at: now().timeIntervalSince1970)
-                register = { [weak self] report in
-                    guard let self else { throw MusicServiceError.closed }
-                    return try await self.registerPendingPlaybackFeedback(report, scope: pendingScope,
-                        setting: setting, credential: credential, own: own, revision: revision, consent: consent)
+            let scope = pendingFeedbackScope(credential)
+            try playbackFeedbackOutbox.activate(scope: scope, at: now().timeIntervalSince1970)
+            pendingScope = scope
+        } else {
+            pendingScope = nil
+        }
+        let session = MusicPlaybackFeedbackSession(platform: platform, settingGeneration: settingGeneration,
+                                                   registersLocally: platform == .netease)
+        feedbackSessions[session.id] = ActiveFeedbackSession(
+            session: session,
+            token: token,
+            credentialRevision: credential.revision,
+            epoch: own,
+            revision: revision,
+            pendingScope: pendingScope
+        )
+        return session
+    }
+
+    public func reportPlaybackFeedback(_ session: MusicPlaybackFeedbackSession,
+                                       report value: MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt {
+        guard value.target.platform == session.platform else { throw MusicServiceError.targetChanged }
+        try Self.validateFeedbackReport(value)
+        guard var active = feedbackSessions[session.id],
+              epoch == active.epoch || (playbackFeedbackClosing && session.registersLocally),
+              tokens[session.platform] == active.token,
+              validated.contains(session.platform) || (playbackFeedbackClosing && session.registersLocally),
+              revisions[session.platform, default: 0] == active.revision else {
+            throw MusicServiceError.staleResult
+        }
+        if value.event == .start {
+            if let start = active.start {
+                guard start == value else { throw MusicServiceError.targetChanged }
+                return active.end == nil ? active.startReceipt : .unconfirmed
+            }
+            active.start = value
+            if session.platform != .netease { active.startedAt = ProcessInfo.processInfo.systemUptime }
+        } else {
+            guard let start = active.start, start.instanceID == value.instanceID, start.target == value.target,
+                  active.startReceipt == .confirmed || (session.platform != .kugou && active.startReceipt == .registered) else {
+                return .unconfirmed
+            }
+            if let end = active.end {
+                guard end == value else { throw MusicServiceError.targetChanged }
+                return active.endReceipt
+            }
+            if session.platform != .netease {
+                guard value.listened <= max(0, ProcessInfo.processInfo.systemUptime - active.startedAt) + 2 else {
+                    throw MusicServiceError.invalidRequest
                 }
-            } else { register = nil }
-            let value = try MusicAccountFeedbackFactory.make(platform: platform, scope: scope, lease: credential,
-                provider: provider, consent: consent, register: register, authenticationRejected: { [weak self] in
-                    await self?.rejectFeedbackSession(token, platform: platform, epoch: own, revision: revision)
-                }, current: { [weak self] in
-                    guard let self else { throw MusicServiceError.closed }
-                    try await self.checkPlaybackFeedback(platform: platform, lease: credential, epoch: own, revision: revision)
-                })
-            playbackFeedbackLeases[value.id] = value
-            return value
-        } catch { credential.revoke(); throw safe(error) }
+            }
+            if session.platform == .kugou {
+                guard value.mediaListened <= value.listened * 16 + 1,
+                      value.mediaListened + 1 >= value.listened * 0.25 else {
+                    throw MusicServiceError.invalidRequest
+                }
+            }
+            active.end = value
+        }
+        feedbackSessions[session.id] = active
+
+        if session.platform == .netease {
+            guard let scope = active.pendingScope else { throw MusicServiceError.cancelled }
+            let setting = MusicPlaybackFeedbackSetting(enabled: true, generation: session.settingGeneration)
+            let receipt = try playbackFeedbackOutbox.enqueue(value, scope: scope, setting: setting, at: now().timeIntervalSince1970)
+            if value.event == .start { feedbackSessions[session.id]?.startReceipt = receipt }
+            else { feedbackSessions[session.id]?.endReceipt = receipt }
+            schedulePendingPlaybackFeedback()
+            return receipt
+        }
+
+        guard let provider = providers[session.platform] else { throw MusicServiceError.unsupported }
+        let remoteState = active.remoteSession
+        let result = try await authenticated(session.platform, token: active.token, own: active.epoch, revision: active.revision) {
+            try await provider.feedback(value, session: remoteState)
+        }
+        if value.event == .start {
+            if feedbackSessions[session.id] != nil {
+                feedbackSessions[session.id]?.startReceipt = result.receipt
+                feedbackSessions[session.id]?.remoteSession = result.session
+            } else if let orphan = result.session {
+                await provider.releaseFeedback(orphan)
+            }
+        } else if feedbackSessions[session.id] != nil {
+            feedbackSessions[session.id]?.endReceipt = result.receipt
+            feedbackSessions[session.id]?.remoteSession = nil
+        }
+        return result.receipt
     }
 
-    private func rejectFeedbackSession(_ token: AccountSessionToken, platform: MusicAccountPlatform,
-                                       epoch own: UUID, revision: Int) async {
-        guard epoch == own, revisions[platform, default: 0] == revision,
-              tokens[platform] == token, validated.contains(platform) else { return }
-        await rejectSession(token, platform: platform)
+    public func endPlaybackFeedback(_ session: MusicPlaybackFeedbackSession) async {
+        guard let removed = feedbackSessions.removeValue(forKey: session.id) else { return }
+        if let remote = removed.remoteSession, let provider = providers[session.platform] {
+            await provider.releaseFeedback(remote)
+        }
     }
 
-    private func checkPlaybackFeedback(platform: MusicAccountPlatform, lease: AccountCredentialUpdateLease,
-                                       epoch own: UUID, revision: Int) async throws {
-        try await validToken(lease.token, platform: platform, own: own, revision: revision)
-        let observed = try await accounts.credentialUpdateLease(for: lease.token)
-        defer { observed.revoke() }
-        try await validToken(lease.token, platform: platform, own: own, revision: revision)
-        guard observed.revision == lease.revision, observed.credential == lease.credential else { throw MusicServiceError.staleResult }
+    private static func validateFeedbackReport(_ value: MusicPlaybackFeedbackReport) throws {
+        guard [value.duration, value.listened, value.mediaListened, value.position,
+               value.startedAt, value.occurredAt].allSatisfy({ $0.isFinite && $0 >= 0 }),
+              value.rate.isFinite, value.rate > 0,
+              value.event == .start ? (value.listened == 0 && value.mediaListened == 0 && value.reason == nil) : value.reason != nil else {
+            throw MusicServiceError.invalidRequest
+        }
     }
 }

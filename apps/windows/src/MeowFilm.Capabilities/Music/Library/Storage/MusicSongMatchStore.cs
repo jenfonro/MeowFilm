@@ -1,5 +1,4 @@
 using System.Text;
-using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
@@ -49,7 +48,7 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
             return await database.ReadSnapshotAsync(db => (IReadOnlyList<SongMatchRecord>)ReadEntries(db, Now), token)
                 .ConfigureAwait(false);
         }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return []; }
+        catch (StorageException) { return []; }
         finally { gate.Release(); }
     }
 
@@ -63,14 +62,11 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
         try
         {
             var prepared = new List<SongMatchRecord>(updated.Count);
-            long writeBytes = 256;
             foreach (var entry in updated)
             {
-                var validated = Validate(entry);
-                long size = validated.EstimateBytes();
+                long size = entry.EstimateBytes();
                 if (size > MaximumBytes) continue;
-                prepared.Add(validated with { StoredBytes = size });
-                writeBytes = checked(writeBytes + size);
+                prepared.Add(entry with { StoredBytes = size });
             }
             var removeIds = removed.Where(id => Guid.TryParseExact(id, "D", out _)).Distinct(StringComparer.Ordinal).ToArray();
             if (prepared.Count == 0 && removeIds.Length == 0) return;
@@ -122,7 +118,7 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
                 }
 
                 return db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
-            }, token, checked((int)Math.Min(writeBytes, int.MaxValue))).ConfigureAwait(false);
+            }, token).ConfigureAwait(false);
         }
         finally { gate.Release(); }
     }
@@ -136,7 +132,7 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
             {
                 db.Execute("DELETE FROM windows_music_source_matches");
                 return db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
-            }, token, 256).ConfigureAwait(false);
+            }, token).ConfigureAwait(false);
         }
         finally { gate.Release(); }
     }
@@ -185,32 +181,12 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
             dict[p.Platform] = p.State;
         }
 
-        var values = new List<SongMatchRecord>(validRows.Count);
-        foreach (var (songId, storedBytes) in validRows)
-        {
-            var row = new SongMatchRecord(
-                songId,
-                platformsBySong.TryGetValue(songId, out var plats)
-                    ? plats
-                    : new Dictionary<string, SongMatchPlatformState>(StringComparer.Ordinal),
-                storedBytes);
-            values.Add(Validate(row));
-        }
-        return values.ToArray();
-    }
-
-    private static SongMatchRecord Validate(SongMatchRecord entry)
-    {
-        MusicRules.Require(Guid.TryParseExact(entry.SongId, "D", out _), "CORRUPT_STORAGE");
-        var platforms = new Dictionary<string, SongMatchPlatformState>(entry.Platforms.Count, StringComparer.Ordinal);
-        foreach (var (platform, state) in entry.Platforms)
-        {
-            MusicRules.Require(platform is "wy" or "tx" or "kw" or "kg" or "mg" &&
-                state.State is "matched" or "notFound" or "failed" &&
-                state.CheckedAt >= 0, "CORRUPT_STORAGE");
-            platforms[platform] = state;
-        }
-        return new SongMatchRecord(entry.SongId, platforms, entry.StoredBytes);
+        return validRows.Select(r => new SongMatchRecord(
+            r.SongId,
+            platformsBySong.TryGetValue(r.SongId, out var plats)
+                ? plats
+                : new Dictionary<string, SongMatchPlatformState>(StringComparer.Ordinal),
+            r.StoredBytes)).ToArray();
     }
 
     public void Dispose()

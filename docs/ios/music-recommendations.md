@@ -14,7 +14,7 @@
 
 `MusicPlaybackControlsView` 将来源模式与普通三方式合并到播放模式按钮，收藏左侧不再放独立 ∞ 或保留其占位。图标、菜单顺序、退出资格和续播互斥遵循共同契约；循环图形保留原造型并增加纵向弧度。顶部私人 FM 入口显示当前具体频道／场景，菜单不重复频道项。
 
-`MusicPlaybackControlsView`、`MusicPlayerContentModel`、队列页和更多菜单共用同一 `MusicViewModel`。模式回调绑定 occurrence、attempt、队列／设置 revision、账号、来源快照、命令代次及当前菜单状态；隐藏、布局切换或身份失效的旧菜单不能执行。队列页保留真实候选、分组、错误重试、未知提交核对和适用的返回按钮，不提供独立续播控件。`commitUnconfirmed` 只重读既有状态，不重放未确认提交；真实失败使用统一错误提醒并以 `errorID` 去重。
+`MusicPlaybackControlsView`、`MusicPlayerContentModel`、队列页和更多菜单共用同一 `MusicViewModel`。模式回调绑定 occurrence、attempt、队列／设置 revision、账号、来源快照、命令代次及当前菜单状态；隐藏、布局切换或身份失效的旧菜单不能执行。队列页保留真实候选、分组、错误重试和适用的返回按钮，不提供独立续播控件。真实失败使用统一错误提醒并以 `errorID` 去重。
 
 私人漫游选择页使用共享 `VerticalPageTransition(edge: .top)`；全屏播放器仍从底部进入。页头为当前频道名、15pt 常规字（Regular），背景使用 `MusicPlayerBackgroundView(.full)` 与播放器有效调色，贯穿全高，页头不叠加通用短渐变。主模式与场景卡片保留排列，显示边框和选中标记；旋转、交互取消、账号失效与关闭继续走既有页面生命周期。
 

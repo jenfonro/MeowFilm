@@ -20,32 +20,24 @@ extension MusicPublicBrowseViewModel {
         await load(cursor: nil, direction: 0, refresh: true)
     }
 
-    /// Explicit section-scoped selection, validated against the still-visible
-    /// response. A failed feed read must not erase the channel's other content.
-    public func selectSectionFilter(_ id: String, sectionID: String, intent: MusicPublicBrowseActionIntent) async {
-        guard !closed, visible, !isLoading, !isActing,
-              issuedIntent == intent.id, pageEpoch == intent.page,
+    public func selectSectionFilter(_ id: String, sectionID: String) async {
+        guard !closed, visible, contentIsCurrent, !isLoading, !isActing,
               let section = sections.first(where: { $0.id == sectionID }),
               section.filters.contains(where: { $0.id == id }), section.selectedFilter != id,
               case .discovery(.channel(let channel, _)) = request else { return }
         let candidate = MusicPublicBrowseRequest.discovery(.channel(channel, tag: id))
         invalidate(clear: false)
         loadedPages = [:]
-        // Publish the new target only with a successful feed. Failure or
-        // cancellation must never attach an old cursor to a new algorithm.
         await load(cursor: nil, direction: 0, refresh: true, requestOverride: candidate)
     }
 
-    /// Uses returned data; only a tab with missing display fields invokes its
-    /// scoped loader. No channel/algorithm request, playback or persistence.
-    public func selectSectionTab(_ id: String, sectionID: String, intent: MusicPublicBrowseActionIntent) async {
-        guard !closed, visible, !isLoading, !isActing,
-              issuedIntent == intent.id, pageEpoch == intent.page,
+    public func selectSectionTab(_ id: String, sectionID: String) async {
+        guard !closed, visible, contentIsCurrent, !isLoading, !isActing,
               let index = sections.firstIndex(where: { $0.id == sectionID }),
               let tab = sections[index].tabs.first(where: { $0.id == id }),
               sections[index].selectedTab != id else { return }
         let old = sections[index]
-        issuedIntent = nil; pageEpoch = UUID()
+        pageEpoch = UUID()
         let own = pageEpoch, readEpoch = loadEpoch
         tabTask?.cancel()
         var items = tab.items
@@ -73,9 +65,7 @@ extension MusicPublicBrowseViewModel {
             }
             sectionDiagnosticIDs[sectionID] = nil
             publishArtwork()
-            if let repository = service as? any MusicSongRepositoryReading {
-                await refreshSongProjections(repository)
-            }
+            await refreshSongProjections(service)
         } catch {
             guard !closed, visible, pageEpoch == own, loadEpoch == readEpoch, !Task.isCancelled else { return }
             let failure = MusicServiceError.sanitized(error)
@@ -99,45 +89,29 @@ extension MusicPublicBrowseViewModel {
         await refresh()
     }
 
-    public func saveDailyStyle(_ selection: MusicDailyStyleSelection,
-                               receipts: MusicSettingsReceiptOwner) async throws -> MusicDailyStyleSave {
+    public func saveDailyStyle(_ selection: MusicDailyStyleSelection) async throws -> MusicDailyStyleSave {
         guard !closed, visible, !isLoading, !isActing, let source = remoteSource,
-              let editor = source.dailyStyle else { throw MusicServiceError.staleResult }
+              source.dailyStyle != nil else { throw MusicServiceError.staleResult }
         let own = pageEpoch
         let action = UUID(); actionEpoch = action
         isActing = true
         defer { if actionEpoch == action { isActing = false } }
-        let work = receipts.submit(settings: ["daily-style/" + editor.scope + "/selection"],
-                                   operation: "保存推荐风格") {
-            let result = try await source.saveDailyStyle(selection)
-            guard result.saveConfirmed else { throw MusicServiceError.commitUnconfirmed }
-            return result
-        }
         let result: MusicDailyStyleSave
         do {
-            result = try await work.value
+            result = try await source.saveDailyStyle(selection)
         } catch {
             if !Task.isCancelled, !closed, visible, pageEpoch == own, remoteSource?.id == source.id {
-                // The remote write may have happened. Pre-write cursors must
-                // not remain actionable while the sheet reports a failed read.
                 sections = []; nextCursor = nil; currentCursor = nil
                 cursorOffsets = ["": 0]; back = []; pageNumber = 1; trackOffset = 0; dailyStyle = nil
                 detailSourcePositions = [:]
                 loaded = false; failedPage = (cursor: nil, direction: 0)
-                let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
-                self.error = failure == .commitUnconfirmed ? nil : failure
-                if failure == .commitUnconfirmed { await load(cursor: nil, direction: 0) }
+                self.error = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
             }
             throw error
         }
         guard !Task.isCancelled, !closed, visible, pageEpoch == own, remoteSource?.id == source.id else { return result }
-        // Re-render through the same source and normal display projection.
-        // Its first page is the exact readback already returned by save, not
-        // another recommendation request or a second account mutation.
         cursorOffsets = ["": 0]; back = []; currentCursor = nil
         await load(cursor: nil, direction: 0)
-        // Projection failures belong to this page read, not to the settled
-        // write receipt. The load publishes its own current error.
         return result
     }
 
@@ -149,18 +123,17 @@ extension MusicPublicBrowseViewModel {
         let source: MusicRemoteQueueSource
         if let remoteSource { source = remoteSource }
         else {
-            guard let request = queueRequest, let provider = service as? any MusicPublicBrowseQueueLoading else {
+            guard let request = queueRequest else {
                 throw MusicServiceError.unsupported
             }
-            let opened = try await provider.openPublicQueue(request)
+            let opened = try await service.openPublicQueue(request)
             guard !closed, visible, pageEpoch == own, !Task.isCancelled else {
-                releaseSource(opened); throw MusicServiceError.cancelled
+                release(opened); throw MusicServiceError.cancelled
             }
             remoteSource = opened; source = opened; watchSource()
         }
         if let availabilityNotice = source.context.availabilityNotice { notice = availabilityNotice }
         guard let track else { return (source, 0) }
-        guard let queuePage else { throw MusicServiceError.unsupported }
         let position = detailSourcePositions[track.ref]
         var duplicate = 0
         selectedOccurrence: for page in (back + [currentCursor]).compactMap({ loadedPages[$0 ?? ""] }) {
@@ -176,7 +149,7 @@ extension MusicPublicBrowseViewModel {
         var fallback: Int?
         var cursor: String?, count = 0, seen = Set<String>()
         repeat {
-            let page = try await queuePage(source, cursor)
+            let page = try await remotePage(source, cursor: cursor)
             try Task.checkCancellation(); try source.authorization.check()
             guard !closed, visible, pageEpoch == own else { throw MusicServiceError.staleResult }
             for (index, row) in page.items.enumerated() {
@@ -200,17 +173,15 @@ extension MusicPublicBrowseViewModel {
         throw MusicServiceError.notFound
     }
 
-    /// Count matches in the full source prefix, not in the currently displayed
-    /// (possibly paginated) rows. Duplicates keep their occurrence position.
     public func filteredQueueIndex(source: MusicRemoteQueueSource, index: Int,
                                    query: String) async throws -> Int {
-        guard let queuePage, remoteSource?.id == source.id, index >= 0 else {
+        guard remoteSource?.id == source.id, index >= 0 else {
             throw MusicServiceError.staleResult
         }
         let own = pageEpoch
         var cursor: String?, seen = Set<String>(), offset = 0, matches = 0
         repeat {
-            let page = try await queuePage(source, cursor)
+            let page = try await remotePage(source, cursor: cursor)
             try Task.checkCancellation(); try source.authorization.check()
             guard !closed, visible, pageEpoch == own else { throw MusicServiceError.staleResult }
             for row in page.items {
@@ -228,14 +199,6 @@ extension MusicPublicBrowseViewModel {
         throw MusicServiceError.notFound
     }
 
-    /// Callback is explicit user intent. The existing queue/player owner must
-    /// additionally fence its own transaction and playback after suspension.
-    public func makeActionIntent() -> MusicPublicBrowseActionIntent? {
-        guard !closed, visible, contentIsCurrent, !isActing, isHome || !isLoading else { return nil }
-        let id = UUID(); issuedIntent = id
-        return .init(id: id, page: pageEpoch)
-    }
-
     var actionErrorID: UUID? { actionError == nil ? nil : actionEpoch }
 
     func dismissActionError(id: UUID) {
@@ -243,12 +206,10 @@ extension MusicPublicBrowseViewModel {
         actionError = nil; actionDiagnosticID = nil
     }
 
-    public func perform(intent: MusicPublicBrowseActionIntent, operation: String = "歌单操作",
+    public func perform(operation: String = "歌单操作",
                         kind: MusicRequestTrace.Operation = .library,
                         _ body: @escaping @MainActor () async throws -> Void) async {
-        guard !closed, visible, contentIsCurrent, !isActing, isHome || !isLoading, issuedIntent == intent.id,
-              pageEpoch == intent.page else { return }
-        issuedIntent = nil
+        guard !closed, visible, contentIsCurrent, !isActing, isHome || !isLoading else { return }
         let own = UUID()
         let trace = MusicRequestTrace(kind, platform: requestPlatform)
         trace.record(.started)

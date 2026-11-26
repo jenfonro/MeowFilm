@@ -1,6 +1,6 @@
 import Foundation
 import MeowDebug
-import MeowMusicFeature
+import MeowMusicPlatform
 
 struct MusicNativeResolvedSource: Sendable {
     let option: MusicPlaybackOption
@@ -32,7 +32,7 @@ struct MusicNativePreparedCacheSource: Sendable {
     var armed = false
 }
 
-extension NativeMusicService: MusicSourcePlaybackServing {
+extension NativeMusicService {
     public func sourceConfigurationChanged() async {
         let previous = await sourceSessionStore.invalidateConfiguration()
         for id in preparedSources.filter({ !$0.value.armed }).keys { discardSource(attemptID: id) }
@@ -40,11 +40,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         await previous?.close()
     }
 
-    public func sourceSession(occurrenceID: String, expectedQueueRevision: Int) async throws -> any MusicSourcePlaybackSession {
-        try await concreteSourceSession(occurrenceID: occurrenceID, expectedQueueRevision: expectedQueueRevision)
-    }
-
-    func concreteSourceSession(occurrenceID: String, expectedQueueRevision: Int) async throws -> MusicNativeSourceInspection {
+    public func sourceSession(occurrenceID: String, expectedQueueRevision: Int) async throws -> MusicNativeSourceInspection {
         let d = try read()
         try musicRequire(d.queue.currentID == occurrenceID && d.queue.revision == expectedQueueRevision, .staleRevision)
         let revision = await sourceSessionStore.currentRevision()
@@ -128,7 +124,6 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         try admitSource(song, selection: value.choice.selection)
         try value.audio.playbackAuthorization?.check()
         try musicRequire(value.audio.expiresAt.map { $0 > now() } ?? true, .invalidMediaCandidate)
-        try validateDelivery(value.audio, song: song, playback: seed.playback, automaticQuality: false)
         let id = UUID().uuidString.lowercased(), audio = value.audio
         let authorization = audio.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization()
         var cache: MusicNativeAudioCacheAttempt?
@@ -137,7 +132,6 @@ extension NativeMusicService: MusicSourcePlaybackServing {
                 attemptID: id, playbackAuthorization: authorization, preparing: true)
             try inspectionCheck(seed)
             let song = try currentSongMetadata(seed.song)
-            try validateDelivery(audio, song: song, playback: seed.playback, automaticQuality: false)
             let candidate = MusicPlaybackCandidate(attemptId: id, occurrenceId: seed.ref.id, resourceId: "music:" + id,
                 url: audio.url, headers: audio.headers, title: song.title,
                 startPosition: try read().playback.positionSeconds, requestedQuality: value.quality,
@@ -150,7 +144,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
             return .init(candidate: candidate, selection: value.choice.selection)
         } catch {
             authorization.revoke(); cache?.source?.retire()
-            if let cache { cache.authorization.revoke(); access.remove(cache.accessRegistration) }
+            if let cache { cache.authorization.revoke() }
             throw error
         }
     }
@@ -170,7 +164,6 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         try admitSource(song, selection: value.result.choice.selection)
         try value.candidate.playbackAuthorization?.check()
         try musicRequire(value.result.audio.expiresAt.map { $0 > now() } ?? true, .invalidMediaCandidate)
-        try validateDelivery(value.result.audio, song: song, playback: value.seed.playback, automaticQuality: false)
         preparedSources[attemptID]?.armed = true
     }
 
@@ -240,12 +233,12 @@ extension NativeMusicService: MusicSourcePlaybackServing {
             value.candidate.playbackAuthorization?.revoke()
             value.cache?.source?.retire()
             if let cache = value.cache, cache.captureCompleted {
-                cache.authorization.revoke(); access.remove(cache.accessRegistration)
+                cache.authorization.revoke()
             }
         }
         if let value = preparedCacheSources.removeValue(forKey: attemptID) {
             value.cache.readLease?.release()
-            value.cache.authorization.revoke(); access.remove(value.cache.accessRegistration)
+            value.cache.authorization.revoke()
         }
     }
 
@@ -254,13 +247,13 @@ extension NativeMusicService: MusicSourcePlaybackServing {
             value.candidate.playbackAuthorization?.revoke()
             value.cache?.source?.retire()
             if let cache = value.cache, cache.captureCompleted {
-                cache.authorization.revoke(); access.remove(cache.accessRegistration)
+                cache.authorization.revoke()
             }
         }
         preparedSources = [:]
         for value in preparedCacheSources.values {
             value.cache.readLease?.release()
-            value.cache.authorization.revoke(); access.remove(value.cache.accessRegistration)
+            value.cache.authorization.revoke()
         }
         preparedCacheSources = [:]
     }
@@ -272,8 +265,6 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         try value.cache.authorization.check()
         let song = try song(.init(kind: .queue, id: candidate.occurrenceId), d)
         try admitSource(song, selection: value.playback.selection)
-        try musicRequire(MusicMediaDuration.matches(expected: song.effectiveDuration, actual: candidate.delivery?.duration),
-                         .invalidMediaCandidate)
     }
 
     func prepareCachedSource(seed: MusicSourceInspectionSeed, quality: String,
@@ -285,32 +276,36 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         catch { if let hit { discardSource(attemptID: hit.candidate.attemptId) }; throw error }
         return hit.map { .init(candidate: $0.candidate, selection: $0.selection) }
     }
+
+    public func chorus(attemptID: String, actualDuration: Double) async throws -> MusicChorusPoint? {
+        try check()
+        guard let current = attempt, current.id == attemptID, current.ready, !current.ended,
+              let accounts else { return nil }
+        let own = epoch, d = try read(), selection = current.selection
+        guard d.queue.currentID == current.occurrence else { return nil }
+        let song = try self.song(.init(kind: .queue, id: current.occurrence), d)
+        let (source, row) = try target(song, selection.sourceKey)
+        guard platformEnabled(source.platform), selection.siteId == source.platform,
+              ["wy", "kg"].contains(source.platform) else { return nil }
+        let recorded = row.resolvedDuration
+        guard recorded.isFinite, recorded > 0, actualDuration.isFinite, actualDuration > 0 else { return nil }
+        let cachedOnly = audioCacheAttempt?.attemptID == attemptID && audioCacheAttempt?.audio == nil
+        let point = try await work(label: "chorus") {
+            try await accounts.nativeChorus(nativeID: source.nativeId, selection: selection,
+                                            recordingDuration: recorded, actualDuration: actualDuration, cachedOnly: cachedOnly)
+        }
+        try check(own)
+        guard attempt?.id == attemptID, attempt?.ready == true, attempt?.ended == false,
+              attempt?.selection == selection,
+              try read().queue.currentID == current.occurrence else { throw MusicServiceError.staleResult }
+        return point?.fits(recordingDuration: recorded, actualDuration: actualDuration) == true ? point : nil
+    }
 }
 
-actor MusicSourceInspectionLease: MusicSourceInspectionSession {
-    let session: any MusicSourcePlaybackSession
-    private var closed = false
-    init(session: any MusicSourcePlaybackSession) { self.session = session }
-    private func check() throws { if closed { throw MusicServiceError.closed } }
-    func updates() async -> AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error> {
-        guard !closed else { return AsyncThrowingStream { $0.finish(throwing: MusicServiceError.closed) } }
-        return await session.updates()
-    }
-    func loadMore(refresh: Bool) async throws -> MusicResolvedSourcesSnapshot {
-        try check(); return try await session.loadMore(refresh: refresh)
-    }
-    func adopt(sourceID: String, occurrenceID: String, expectedQueueRevision: Int) async throws -> MusicPlaybackSelection {
-        try check(); return try await session.adopt(sourceID: sourceID, occurrenceID: occurrenceID, expectedQueueRevision: expectedQueueRevision)
-    }
-    func reject(sourceKey: String, occurrenceID: String, expectedQueueRevision: Int) async throws {
-        try check(); try await session.reject(sourceKey: sourceKey, occurrenceID: occurrenceID, expectedQueueRevision: expectedQueueRevision)
-    }
-    func close() async { closed = true; await session.cancelInspection() }
-}
-
-actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
+public actor MusicNativeSourceInspection {
     private static let maxConcurrentProbes = 3
     private let owner: NativeMusicService
+    private let sharedWithPlayback: Bool
     nonisolated let lifetime: MusicSourceSessionLifetime
     private var seed: MusicSourceInspectionSeed
     private var staged: MusicSongRecord
@@ -336,8 +331,9 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
     private var observers: [UUID: AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error>.Continuation] = [:]
 
     init(owner: NativeMusicService, seed: MusicSourceInspectionSeed,
-         cached: [MusicNativeResolvedSource]) {
+         cached: [MusicNativeResolvedSource], sharedWithPlayback: Bool = true) {
         self.owner = owner; self.seed = seed; self.lifetime = seed.lifetime
+        self.sharedWithPlayback = sharedWithPlayback
         staged = seed.song; results = cached
         attempted = Set(cached.map(\.attemptKey))
     }
@@ -373,7 +369,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
               isLoading: !pageTasks.isEmpty || matching)
     }
 
-    func updates() -> AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error> {
+    public func updates() -> AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error> {
         for result in results { observeAuthorization(result.audio.playbackAuthorization) }
         return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let id = UUID()
@@ -564,7 +560,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         return winner
     }
 
-    func match(quality: String?, sourceID: String?) async throws -> MusicPreparedSource {
+    public func match(quality: String?, sourceID: String?) async throws -> MusicPreparedSource {
         if let sourceID {
             guard let selection = files.first(where: { $0.id == sourceID })?.selection ??
                 results.first(where: { $0.id == sourceID })?.choice.selection else { throw MusicServiceError.notFound }
@@ -577,11 +573,11 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         selection.installationId + ":" + selection.siteId + ":" + selection.sourceKey + ":" + selection.quality
     }
 
-    func beginSelection() {
+    public func beginSelection() {
         options = nil; attempted = Set(results.map(\.attemptKey)); mediaFailed = []
     }
 
-    func rejectMedia(candidate: MusicPlaybackCandidate, selection: MusicPlaybackSelection) async {
+    public func rejectMedia(candidate: MusicPlaybackCandidate, selection: MusicPlaybackSelection) async {
         invalidMediaURLs.insert(candidate.url)
         if candidate.isCachedAudio {
             await owner.discardCachedPlayback(attemptID: candidate.attemptId)
@@ -604,7 +600,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         return file
     }
 
-    func match(intent: MusicSourceIntent) async throws -> MusicPreparedSource {
+    public func match(intent: MusicSourceIntent) async throws -> MusicPreparedSource {
         do { return try await matchSource(intent: intent) }
         catch let declaration as MusicSourceDeclarationFailure { throw declaration.failure }
     }
@@ -687,7 +683,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         }
     }
 
-    func loadMore(refresh: Bool) async throws -> MusicResolvedSourcesSnapshot {
+    public func loadMore(refresh: Bool) async throws -> MusicResolvedSourcesSnapshot {
         try await check()
         guard !matching else { return snapshot() }
         if refresh {
@@ -739,11 +735,19 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         publish()
     }
 
-    func cancelInspection() {
+    public func cancelInspection() {
         for task in pageTasks.values { task.cancel() }
     }
 
-    func adopt(sourceID: String, occurrenceID: String, expectedQueueRevision: Int) async throws -> MusicPlaybackSelection {
+    public func closeInspection() async {
+        if sharedWithPlayback {
+            cancelInspection()
+        } else {
+            await close()
+        }
+    }
+
+    public func adopt(sourceID: String, occurrenceID: String, expectedQueueRevision: Int) async throws -> MusicPlaybackSelection {
         try await check()
         guard seed.ref.id == occurrenceID, seed.state.revision == expectedQueueRevision else { throw MusicServiceError.targetChanged }
         guard let value = results.first(where: { $0.id == sourceID }) else { throw MusicServiceError.staleResult }
@@ -753,7 +757,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         return value.choice.selection
     }
 
-    func reject(sourceKey: String, occurrenceID: String, expectedQueueRevision: Int) async throws {
+    public func reject(sourceKey: String, occurrenceID: String, expectedQueueRevision: Int) async throws {
         try await check()
         seed = try await owner.inspectionReject(seed, sourceKey: sourceKey, occurrenceID: occurrenceID,
                                                 expectedRevision: expectedQueueRevision)
@@ -780,7 +784,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         publish()
     }
 
-    func close() async {
+    public func close() async {
         if closing == nil {
             let optionTask = optionRead; optionTask?.cancel(); optionRead = nil
             let physicalPages = Array(pageTasks.values), owner = owner, label = label

@@ -1,9 +1,8 @@
 import Foundation
 import MeowAccounts
 import MeowDebug
-import MeowMusicFeature
 
-extension NativeMusicAccountService: MusicAccountTransferring {
+extension NativeMusicAccountService {
     func revokeAccountImports(_ platform: MusicAccountPlatform? = nil) {
         for batch in transferBatches.values {
             for item in batch.items where platform == nil || item.entry.platform == platform {
@@ -110,10 +109,10 @@ extension NativeMusicAccountService: MusicAccountTransferring {
                 try check(batch.epoch)
                 let candidate = try MusicAccountTransferCodec.credential(item.entry)
                 let value = try await run(platform) {
-                    guard try await provider.nativeID(candidate) == item.entry.userID else { throw MusicServiceError.targetChanged }
+                    guard await provider.nativeID(candidate) == item.entry.userID else { throw MusicServiceError.targetChanged }
                     let verified = try await provider.verify(candidate)
                     guard verified.nativeID == item.entry.userID,
-                          try await provider.nativeID(verified.credential) == item.entry.userID else { throw MusicServiceError.targetChanged }
+                          await provider.nativeID(verified.credential) == item.entry.userID else { throw MusicServiceError.targetChanged }
                     return verified
                 }
                 try check(batch.epoch)

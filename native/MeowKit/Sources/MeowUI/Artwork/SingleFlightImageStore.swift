@@ -426,14 +426,13 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
 
     nonisolated deinit {
         closed = true
-        let allFlights = Array(flights.values)
+        let allFlights = Array(flights.values) + producers.values.filter { flight in flights[flight.key] !== flight }
         flights.removeAll()
         pending.removeAll()
-        let activeProducers = Array(producers.values)
         producers.removeAll()
-        guard !activeProducers.isEmpty || !allFlights.isEmpty else { return }
+        guard !allFlights.isEmpty else { return }
         let cleanup: @MainActor @Sendable () -> Void = {
-            for flight in activeProducers {
+            for flight in allFlights {
                 flight.abandoned = true
                 flight.task?.cancel()
                 flight.task = nil
@@ -443,22 +442,9 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
                     continuation.resume(throwing: CancellationError())
                 }
             }
-            for flight in allFlights {
-                flight.abandoned = true
-                let consumers = Array(flight.consumers.values)
-                flight.consumers.removeAll()
-                for continuation in consumers {
-                    continuation.resume(throwing: CancellationError())
-                }
-            }
         }
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { cleanup() }
-        } else {
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { cleanup() }
-            }
-        }
+        if Thread.isMainThread { MainActor.assumeIsolated(cleanup) }
+        else { DispatchQueue.main.async { MainActor.assumeIsolated(cleanup) } }
     }
 }
 #endif

@@ -21,10 +21,7 @@ import MeowDebug
     @Published public private(set) var submittingSMS = false
     @Published public private(set) var resendSeconds = 0
     @Published private(set) var statusesRevision = UUID()
-    private let service: any MusicAccountsServing
-    private let sessionRefreshing: (any MusicAccountsRefreshing)?
-    private let smsService: (any MusicAccountsSMSServing)?
-    private let profileService: (any MusicAccountsProfileServing)?
+    private let service: NativeMusicAccountService
     private let onSessionChanged: @MainActor (MusicAccountPlatform) -> Void
     private var active = false
     private var foreground = true
@@ -35,20 +32,15 @@ import MeowDebug
     private var operation: Task<Void, Never>?, polling: Task<Void, Never>?
     private var statusReloadRequested = false
 
-    public init(service: any MusicAccountsServing,
+    public init(service: NativeMusicAccountService,
                 onSessionChanged: @escaping @MainActor (MusicAccountPlatform) -> Void = { _ in }) {
         self.service = service
         self.onSessionChanged = onSessionChanged
-        sessionRefreshing = service as? any MusicAccountsRefreshing
-        smsService = service as? any MusicAccountsSMSServing
-        profileService = service as? any MusicAccountsProfileServing
     }
-    public func supportsSMS(_ platform: MusicAccountPlatform) -> Bool { platform != .qq && smsService != nil }
-    public var supportsProfileRefresh: Bool { profileService != nil }
-    public var supportsSessionRefresh: Bool { sessionRefreshing != nil }
+    public func supportsSMS(_ platform: MusicAccountPlatform) -> Bool { platform != .qq }
+    public var supportsProfileRefresh: Bool { true }
     public func showsSessionRefresh(_ platform: MusicAccountPlatform) -> Bool {
-        guard supportsSessionRefresh, active,
-              let row = rows.first(where: { $0.platform == platform }) else { return false }
+        guard active, let row = rows.first(where: { $0.platform == platform }) else { return false }
         return row.phase == .signedIn || row.phase == .requiresValidation
     }
     public func canRefreshSession(_ platform: MusicAccountPlatform) -> Bool {
@@ -61,7 +53,7 @@ import MeowDebug
     }
     public func deactivate() { active = false; invalidate() }
     private func invalidate(keepingRows: Bool = false, keepingPhone: Bool = false) {
-        let old = challenge?.id, sms = smsAttempt, service = service, smsService = smsService, previous = cleanup
+        let old = challenge?.id, sms = smsAttempt, service = service, previous = cleanup
         epoch = UUID(); refreshID = UUID()
         operation?.cancel(); polling?.cancel(); countdown?.cancel(); operation = nil; polling = nil; countdown = nil
         challenge = nil; if !keepingRows { rows = [] }
@@ -73,7 +65,7 @@ import MeowDebug
         cleanup = Task {
             await previous?.value
             if let old { await service.cancelLogin(challengeID: old) }
-            if let sms { await smsService?.cancelSMSLogin(attemptID: sms) }
+            if let sms { await service.cancelSMSLogin(attemptID: sms) }
         }
     }
     private func current(_ own: UUID) -> Bool { active && own == epoch && !Task.isCancelled }
@@ -94,16 +86,16 @@ import MeowDebug
            [.signedIn, .unavailable, .removalPending].contains(row.phase) {
             let id = smsAttempt; smsAttempt = nil; code = ""; phone = ""; loginPlatform = nil
             countdown?.cancel(); resendSeconds = 0
-            if let id { Task { await smsService?.cancelSMSLogin(attemptID: id) } }
+            if let id { Task { await service.cancelSMSLogin(attemptID: id) } }
         }
         // Local statuses remain read-only in the service. The visible account
         // page explicitly enriches signed-in rows once, never sends an SMS.
-        if enrich, foreground, let profileService {
+        if enrich, foreground {
             for row in rows where row.phase == .signedIn && row.profile == nil {
                 let trace = MusicRequestTrace(.accountAPI, platform: .init(accountPlatform: row.platform))
                 do {
                     let value = try await MusicRequestTrace.$current.withValue(trace) {
-                        try await profileService.refreshProfile(platform: row.platform)
+                        try await service.refreshProfile(platform: row.platform)
                     }
                     guard current(own), refreshID == request else { return }
                     guard value.platform == row.platform else { throw MusicServiceError.invalidResponse }
@@ -147,11 +139,8 @@ import MeowDebug
         let trace = MusicRequestTrace(.accountAPI, platform: selected.map { .init(accountPlatform: $0) })
         trace.record(.started)
         isBusy = true
-        guard current(own) else { return }
         if clearError { error = nil }
-        guard current(own) else { return }
         refreshingPlatform = platform
-        guard current(own) else { return }
         operation = Task { [weak self] in
             guard let self, current(own) else { return }
             await MusicRequestTrace.$current.withValue(trace) { [self] in
@@ -214,9 +203,9 @@ import MeowDebug
         perform(enrich: false, clearError: false) { _ in }
     }
     public func refreshProfile(_ platform: MusicAccountPlatform) {
-        guard let profileService, loginPlatform == nil else { return }
-        perform(name: "资料刷新", platform: platform, reconcileOnFailure: true) { [profileService] _ in
-            _ = try await profileService.refreshProfile(platform: platform)
+        guard loginPlatform == nil else { return }
+        perform(name: "资料刷新", platform: platform, reconcileOnFailure: true) { [service] _ in
+            _ = try await service.refreshProfile(platform: platform)
         }
     }
     public func validate(_ platform: MusicAccountPlatform) {
@@ -226,10 +215,10 @@ import MeowDebug
         }
     }
     public func refreshSession(_ platform: MusicAccountPlatform) {
-        guard canRefreshSession(platform), let sessionRefreshing else { return }
-        perform(name: "刷新登录会话", refreshing: platform, sessionChangedPlatform: platform) { [weak self, sessionRefreshing] own in
+        guard canRefreshSession(platform) else { return }
+        perform(name: "刷新登录会话", refreshing: platform, sessionChangedPlatform: platform) { [weak self, service] own in
             guard let self, current(own), showsSessionRefresh(platform), challenge == nil else { return }
-            let result = try await sessionRefreshing.refresh(platform: platform)
+            let result = try await service.refresh(platform: platform)
             guard current(own) else { return }
             guard result.platform == platform else { throw MusicServiceError.invalidResponse }
             // The normal perform -> statuses path owns UI state. Never apply
@@ -279,28 +268,28 @@ import MeowDebug
         digits(code, count: 4...8)
     }
     public func sendSMS() {
-        guard canSendSMS, let platform = loginPlatform, let smsService else { return }
+        guard canSendSMS, let platform = loginPlatform else { return }
         let id = smsAttempt ?? UUID(); smsAttempt = id
         let country = countryCode, number = phone
         // Reserve UI time before dispatch: switching method during a send must
         // not enable duplicate user sends while its outcome is unknown.
         retryDates[platform] = Date().addingTimeInterval(60); updateCountdown()
         sendingSMS = true
-        perform(name: "发送验证码", platform: platform, reconcileOnFailure: true) { [weak self, smsService] own in
-            let receipt = try await smsService.sendSMS(platform: platform, countryCode: country, phone: number, attemptID: id)
-            guard let self, current(own), smsAttempt == id else { await smsService.cancelSMSLogin(attemptID: id); return }
+        perform(name: "发送验证码", platform: platform, reconcileOnFailure: true) { [weak self, service] own in
+            let receipt = try await service.sendSMS(platform: platform, countryCode: country, phone: number, attemptID: id)
+            guard let self, current(own), smsAttempt == id else { await service.cancelSMSLogin(attemptID: id); return }
             retryDates[platform] = receipt.retryAt; updateCountdown()
         }
     }
     public func submitSMS() {
-        guard canSubmitSMS, let platform = loginPlatform, let smsService else { return }
+        guard canSubmitSMS, let platform = loginPlatform else { return }
         let id = smsAttempt ?? UUID(); smsAttempt = id
         let country = countryCode, number = phone, captcha = code
         submittingSMS = true
-        perform(name: "验证码登录", platform: platform, reconcileOnFailure: true) { [weak self, smsService] own in
-            let value = try await smsService.submitSMS(platform: platform, countryCode: country, phone: number, code: captcha, attemptID: id)
+        perform(name: "验证码登录", platform: platform, reconcileOnFailure: true) { [weak self, service] own in
+            let value = try await service.submitSMS(platform: platform, countryCode: country, phone: number, code: captcha, attemptID: id)
             if value.platform == platform, value.phase == .signedIn { self?.onSessionChanged(platform) }
-            guard let self, current(own), smsAttempt == id else { await smsService.cancelSMSLogin(attemptID: id); return }
+            guard let self, current(own), smsAttempt == id else { await service.cancelSMSLogin(attemptID: id); return }
             guard value.platform == platform, value.phase == .signedIn else { throw MusicServiceError.invalidResponse }
             code = ""; phone = ""; smsAttempt = nil; loginPlatform = nil; countdown?.cancel()
         }

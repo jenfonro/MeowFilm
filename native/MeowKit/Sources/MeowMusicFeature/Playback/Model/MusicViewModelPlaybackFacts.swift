@@ -44,7 +44,7 @@ extension MusicViewModel {
                 } else if let nativeAttempt { playback.pause(attempt: nativeAttempt) }
             }
             playbackState.phase = .paused
-            await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
+            await service?.pauseSimilarNavigation()
             return
         }
         if pausePlaybackRecovery() { return }
@@ -54,7 +54,7 @@ extension MusicViewModel {
             return
         }
         let own = lifecycle, token = selectionID, control = playbackControlRevision
-        await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
+        await service?.pauseSimilarNavigation()
         guard !isClosed, lifecycle == own, selectionID == token, playbackControlRevision == control else { return }
         if let fmSource = recommendations.fmSource, !fmSource.authorization.isActive {
             cancelFMNavigation(); stopFM(); invalidateSelection(stopMedia: true)
@@ -141,8 +141,8 @@ extension MusicViewModel {
             try candidate?.playbackAuthorization?.check()
             // Both the App and system resume reuse this exact admission. An
             // already admitted stream is not stopped merely by a settings write.
-            if let exclusions = service as? any MusicSourceExclusionServing, let selection = lastSelection {
-                let rows = try await exclusions.sourceExclusions()
+            if let service, let selection = lastSelection {
+                let rows = try await service.sourceExclusions()
                 try checkSelection(epoch, token: token, occurrenceID: current.id, admission: nil)
                 guard nativeAttempt == native, terminalAttempt == nil, playbackControlRevision == control else { return }
                 try recommendations.fmSource?.authorization.check()
@@ -224,11 +224,6 @@ extension MusicViewModel {
         if event.kind == .paused, (event.error as? NativePlaybackError) == .audioSessionUnavailable {
             error = NativePlaybackError.audioSessionUnavailable.localizedDescription
         }
-        if ![.failed, .stopped, .replaced].contains(event.kind),
-           !MusicMediaDuration.matches(expected: current?.track.duration ?? 0, actual: event.snapshot.duration),
-           recoverSourceAudio(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
-                resourceId: candidate.resourceId, kind: .failed, position: event.snapshot.position),
-                invalidDuration: true) { return }
         // The unique native event has passed resource/native generation and
         // protected-file admission.
         if event.kind == .failed {
@@ -280,9 +275,6 @@ extension MusicViewModel {
             // Native identity/terminal admission already rejects its resume.
             else if fact.kind == .stopped { playPauseCommandTask?.task.cancel() }
         }
-        if ![.failed, .stopped].contains(fact.kind),
-           !MusicMediaDuration.matches(expected: current?.track.duration ?? 0, actual: fact.duration),
-           recoverSourceAudio(fact, invalidDuration: true) { return }
         if recoverSourceAudio(fact) { return }
         position = fact.position
         if let duration = fact.duration, duration.isFinite, duration >= 0 { self.duration = duration }
@@ -313,21 +305,19 @@ extension MusicViewModel {
                 guard self.candidate?.attemptId == candidate.attemptId else { return }
                 try candidate.fileAuthorization?.check()
                 try candidate.playbackAuthorization?.check()
-                if let similar = service as? any MusicSimilarModeServing,
-                   [.paused, .stopped].contains(fact.kind),
+                if [.paused, .stopped].contains(fact.kind),
                    self.navigationID == navigation {
                     // Retiring a source selection does not retire this donor's
                     // pause. Only a newer navigation may supersede its cancel.
-                    await similar.pauseSimilarNavigation()
+                    await service.pauseSimilarNavigation()
                     try self.check(epoch)
                     guard self.candidate?.attemptId == candidate.attemptId else { return }
                     try candidate.fileAuthorization?.check()
                     try candidate.playbackAuthorization?.check()
                 }
                 let accepted: Bool
-                if let similar = service as? any MusicSimilarModeServing,
-                   token == self.selectionID, self.candidate?.attemptId == fact.attemptId {
-                    accepted = try await similar.recordSimilarPlaybackFact(fact)
+                if token == self.selectionID, self.candidate?.attemptId == fact.attemptId {
+                    accepted = try await service.recordSimilarPlaybackFact(fact)
                 } else { accepted = try await service.record(fact) }
                 try self.check(epoch)
                 guard token == self.selectionID, self.candidate?.attemptId == fact.attemptId else { return }

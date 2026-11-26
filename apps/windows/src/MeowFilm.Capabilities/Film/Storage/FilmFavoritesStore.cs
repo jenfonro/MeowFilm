@@ -240,18 +240,13 @@ internal static class FilmFavoritesStore
     {
         string favoriteId = row.GetString(0);
         string itemId = row.GetString(1);
-        string? title = row.GetNullableString(2);
-        string? poster = row.GetNullableString(3);
-        string? score = row.GetNullableString(4);
-        string? textBadge = row.GetNullableString(5);
-        string? subtitle = row.GetNullableString(6);
-
-        string? targetKind = row.GetNullableString(7);
-        string? targetTitle = row.GetNullableString(8);
-        if (string.IsNullOrWhiteSpace(itemId) || string.IsNullOrWhiteSpace(title) ||
-            poster is null || score is null || textBadge is null || subtitle is null ||
-            string.IsNullOrWhiteSpace(targetKind) || string.IsNullOrWhiteSpace(targetTitle))
-            throw new StorageException(StorageError.Corrupt);
+        string title = row.GetNullableString(2) ?? "";
+        string poster = row.GetNullableString(3) ?? "";
+        string score = row.GetNullableString(4) ?? "";
+        string textBadge = row.GetNullableString(5) ?? "";
+        string subtitle = row.GetNullableString(6) ?? "";
+        string targetKind = row.GetNullableString(7) ?? "";
+        string targetTitle = row.GetNullableString(8) ?? "";
 
         string? sKey = row.GetNullableString(15);
         string? sEngine = row.GetNullableString(16);

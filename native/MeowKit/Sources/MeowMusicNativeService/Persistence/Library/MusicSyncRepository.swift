@@ -4,84 +4,33 @@ import MeowStorage
 enum MusicSyncRepository {
     static func read(_ db: SQLiteConnection, scope: String) throws -> MusicSyncStateRecord? {
         guard let row = try db.queryOne(
-            "SELECT phase,auto_revision,auto_intent_revision,auto_settled_intent_revision,auto_order_only " +
-            "FROM ios_music_sync_state WHERE scope=?",
+            "SELECT phase,auto_revision,auto_intent_revision,auto_settled_intent_revision,auto_order_only FROM ios_music_sync_state WHERE scope=?",
             [.text(scope)],
-            map: { c in
-                (
-                    phase: try c.text(0),
-                    autoRev: try c.integer(1),
-                    autoIntentRev: try c.integer(2),
-                    autoSettledRev: try c.integer(3),
-                    autoOrderOnly: try c.optionalText(4)
-                )
-            }
+            map: { c in (phase: try c.text(0), autoRev: try c.integer(1), autoIntentRev: try c.integer(2),
+                         autoSettledRev: try c.integer(3), autoOrderOnly: try c.optionalText(4)) }
         ) else { return nil }
 
-        var manualSelections: [MusicSyncSelectionRecord] = []
-        var automaticSelections: [MusicSyncSelectionRecord] = []
-        try db.scan(
-            "SELECT section,platform,favorites,playlists FROM ios_music_sync_selections WHERE scope=? ORDER BY section,position",
-            [.text(scope)]
-        ) { c in
-            let entry = MusicSyncSelectionRecord(
-                platform: try c.text(1),
-                favorites: try c.bool(2),
-                playlists: try c.bool(3)
-            )
-            if try c.text(0) == "manual" {
-                manualSelections.append(entry)
-            } else {
-                automaticSelections.append(entry)
-            }
+        var manualSelections: [MusicSyncSelectionRecord] = [], automaticSelections: [MusicSyncSelectionRecord] = []
+        try db.scan("SELECT section,platform,favorites,playlists FROM ios_music_sync_selections WHERE scope=? ORDER BY section,position", [.text(scope)]) { c in
+            let entry = MusicSyncSelectionRecord(platform: try c.text(1), favorites: try c.bool(2), playlists: try c.bool(3))
+            if try c.text(0) == "manual" { manualSelections.append(entry) } else { automaticSelections.append(entry) }
         }
-
-        let scopes: [MusicSyncScopeRecord] = try db.query(
-            "SELECT platform,account_scope FROM ios_music_sync_scopes WHERE scope=? ORDER BY platform",
-            [.text(scope)]
-        ) { c in
-            MusicSyncScopeRecord(platform: try c.text(0), accountScope: try c.text(1))
+        let scopes: [MusicSyncScopeRecord] = try db.query("SELECT platform,account_scope FROM ios_music_sync_scopes WHERE scope=? ORDER BY platform", [.text(scope)]) {
+            MusicSyncScopeRecord(platform: try $0.text(0), accountScope: try $0.text(1))
         }
-
-        let issues: [MusicLibraryIssueRecord] = try db.query(
-            "SELECT platform,collection_id,code FROM ios_music_sync_issues WHERE scope=? ORDER BY position",
-            [.text(scope)]
-        ) { c in
-            MusicLibraryIssueRecord(
-                platform: try c.optionalText(0),
-                collectionID: try c.optionalText(1),
-                code: try c.text(2)
-            )
+        let issues: [MusicLibraryIssueRecord] = try db.query("SELECT platform,collection_id,code FROM ios_music_sync_issues WHERE scope=? ORDER BY position", [.text(scope)]) {
+            MusicLibraryIssueRecord(platform: try $0.optionalText(0), collectionID: try $0.optionalText(1), code: try $0.text(2))
         }
-
-        let autoBindings: [MusicSyncAutoBindingRecord] = try db.query(
-            "SELECT platform,account_id,binding_scope FROM ios_music_sync_auto_bindings WHERE scope=? ORDER BY platform",
-            [.text(scope)]
-        ) { c in
-            MusicSyncAutoBindingRecord(
-                platform: try c.text(0),
-                accountID: try c.text(1),
-                bindingScope: try c.text(2)
-            )
+        let autoBindings: [MusicSyncAutoBindingRecord] = try db.query("SELECT platform,account_id,binding_scope FROM ios_music_sync_auto_bindings WHERE scope=? ORDER BY platform", [.text(scope)]) {
+            MusicSyncAutoBindingRecord(platform: try $0.text(0), accountID: try $0.text(1), bindingScope: try $0.text(2))
         }
-
-        let relationshipPlatforms: [String] = try db.query(
-            "SELECT platform FROM ios_music_sync_relationship_platforms WHERE scope=? ORDER BY position",
-            [.text(scope)]
-        ) { try $0.text(0) }
+        let relationshipPlatforms: [String] = try db.query("SELECT platform FROM ios_music_sync_relationship_platforms WHERE scope=? ORDER BY position", [.text(scope)]) { try $0.text(0) }
 
         struct FenceMemberKey: Hashable { let fenceIndex: Int; let memberSet: String }
         var fenceMembers: [FenceMemberKey: [MusicSyncFenceMemberRecord]] = [:]
-        try db.scan(
-            "SELECT fence_index,member_set,native_id,occurrence_id FROM ios_music_sync_fence_members " +
-            "WHERE scope=? ORDER BY fence_index,member_set,position",
-            [.text(scope)]
-        ) { c in
-            let key = FenceMemberKey(fenceIndex: try c.integer(0), memberSet: try c.text(1))
-            fenceMembers[key, default: []].append(MusicSyncFenceMemberRecord(
-                nativeID: try c.text(2),
-                occurrenceID: try c.optionalText(3)
-            ))
+        try db.scan("SELECT fence_index,member_set,native_id,occurrence_id FROM ios_music_sync_fence_members WHERE scope=? ORDER BY fence_index,member_set,position", [.text(scope)]) { c in
+            fenceMembers[FenceMemberKey(fenceIndex: try c.integer(0), memberSet: try c.text(1)), default: []]
+                .append(MusicSyncFenceMemberRecord(nativeID: try c.text(2), occurrenceID: try c.optionalText(3)))
         }
 
         let fences: [MusicSyncFenceRecord] = try db.query(
@@ -90,73 +39,44 @@ enum MusicSyncRepository {
             "mut_directory_revision,before_id,before_name,before_kind,before_writable," +
             "before_can_rename,before_can_delete,before_can_order,before_revision," +
             "before_sub_remote_id,before_sub_relation_id,before_sub_name,before_sub_creator," +
-            "before_sub_artwork,before_sub_count " +
-            "FROM ios_music_sync_fences WHERE scope=? ORDER BY fence_index",
+            "before_sub_artwork,before_sub_count FROM ios_music_sync_fences WHERE scope=? ORDER BY fence_index",
             [.text(scope)]
         ) { f in
             let idx = try f.integer(0)
-            let before: MusicSyncFenceBeforeRecord?
-            if let beforeID = try f.optionalText(13) {
-                before = MusicSyncFenceBeforeRecord(
-                    id: beforeID,
-                    name: try f.optionalText(14) ?? "",
-                    kind: try f.optionalText(15) ?? "",
-                    writable: try f.optionalBool(16) ?? false,
-                    canRename: try f.optionalBool(17) ?? false,
-                    canDelete: try f.optionalBool(18) ?? false,
-                    canOrder: try f.optionalBool(19) ?? false,
+            let before = try f.optionalText(13).map { beforeID in
+                MusicSyncFenceBeforeRecord(
+                    id: beforeID, name: try f.optionalText(14) ?? "", kind: try f.optionalText(15) ?? "",
+                    writable: try f.optionalBool(16) ?? false, canRename: try f.optionalBool(17) ?? false,
+                    canDelete: try f.optionalBool(18) ?? false, canOrder: try f.optionalBool(19) ?? false,
                     revision: try f.optionalText(20) ?? "",
                     members: fenceMembers[FenceMemberKey(fenceIndex: idx, memberSet: "before")] ?? []
                 )
-            } else {
-                before = nil
             }
-            let beforeSub: MusicSyncFenceBeforeSubscriptionRecord?
-            if let subRemoteID = try f.optionalText(21) {
-                beforeSub = MusicSyncFenceBeforeSubscriptionRecord(
-                    remoteID: subRemoteID,
-                    relationID: try f.optionalText(22) ?? "",
-                    name: try f.optionalText(23) ?? "",
-                    creator: try f.optionalText(24) ?? "",
-                    artwork: try f.optionalText(25) ?? "",
-                    count: try f.optionalInteger(26)
+            let beforeSub = try f.optionalText(21).map { subRemoteID in
+                MusicSyncFenceBeforeSubscriptionRecord(
+                    remoteID: subRemoteID, relationID: try f.optionalText(22) ?? "", name: try f.optionalText(23) ?? "",
+                    creator: try f.optionalText(24) ?? "", artwork: try f.optionalText(25) ?? "", count: try f.optionalInteger(26)
                 )
-            } else {
-                beforeSub = nil
             }
             return MusicSyncFenceRecord(
-                platform: try f.text(1),
-                accountID: try f.text(2),
-                fenceScope: try f.text(3),
-                localID: try f.optionalText(4) ?? "",
-                localRevision: try f.optionalInteger(5) ?? 0,
-                acknowledgedID: try f.optionalText(6),
-                acknowledgedName: try f.optionalText(7),
-                mutationID: try f.optionalText(8),
-                mutationAction: try f.optionalText(9),
-                mutationCollectionID: try f.optionalText(10),
-                mutationName: try f.optionalText(11),
+                platform: try f.text(1), accountID: try f.text(2), fenceScope: try f.text(3),
+                localID: try f.optionalText(4) ?? "", localRevision: try f.optionalInteger(5) ?? 0,
+                acknowledgedID: try f.optionalText(6), acknowledgedName: try f.optionalText(7),
+                mutationID: try f.optionalText(8), mutationAction: try f.optionalText(9),
+                mutationCollectionID: try f.optionalText(10), mutationName: try f.optionalText(11),
                 mutationDirectoryRevision: try f.optionalText(12),
                 mutationMembers: fenceMembers[FenceMemberKey(fenceIndex: idx, memberSet: "mutation")] ?? [],
                 directoryIDs: (fenceMembers[FenceMemberKey(fenceIndex: idx, memberSet: "directory")] ?? []).map(\.nativeID),
-                before: before,
-                beforeSubscription: beforeSub
+                before: before, beforeSubscription: beforeSub
             )
         }
 
         return MusicSyncStateRecord(
-            phase: row.phase,
-            autoRevision: row.autoRev,
-            autoIntentRevision: row.autoIntentRev,
-            autoSettledIntentRevision: row.autoSettledRev,
-            autoOrderOnly: row.autoOrderOnly,
-            manualSelections: manualSelections,
-            automaticSelections: automaticSelections,
-            scopes: scopes,
-            issues: issues,
-            autoBindings: autoBindings,
-            relationshipPlatforms: relationshipPlatforms,
-            fences: fences
+            phase: row.phase, autoRevision: row.autoRev, autoIntentRevision: row.autoIntentRev,
+            autoSettledIntentRevision: row.autoSettledRev, autoOrderOnly: row.autoOrderOnly,
+            manualSelections: manualSelections, automaticSelections: automaticSelections,
+            scopes: scopes, issues: issues, autoBindings: autoBindings,
+            relationshipPlatforms: relationshipPlatforms, fences: fences
         )
     }
 

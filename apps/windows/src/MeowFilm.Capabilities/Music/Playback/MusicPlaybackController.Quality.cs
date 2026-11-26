@@ -298,10 +298,10 @@ public sealed partial class MusicPlaybackController
         {
             await stopped;
             if (recordingKey is not null)
-                await application.AddRecordingExclusionAsync(
+                await application.Library.AddRecordingExclusionAsync(
                     state.Song.Id, recordingKey, target.Platform, name, state.Song.Title, state.Song.Artist, lifetime.Token);
             else
-                await application.AddSourceExclusionAsync(
+                await application.Library.AddSourceExclusionAsync(
                     state.Song.Id, exclusionProvider, target.Platform, name, state.Song.Title, state.Song.Artist, lifetime.Token);
             IncrementExclusionsRevision();
             state.Session!.Exclude(exclusionProvider, target.Platform);
@@ -379,17 +379,15 @@ public sealed partial class MusicPlaybackController
                     }
                     catch (Exception error) when (!published && selection.Source is null &&
                         error is not OperationCanceledException && CurrentRecovery(state) &&
-                        (error is PlaybackException playbackError && RetryablePreparation(playbackError.Code) ||
-                         error is MusicOperationException operation && RetryablePreparation(operation.Code)))
+                        MediaOrMusicCode(error) is { } rejectCode && RetryablePreparation(rejectCode))
                     {
-                        session.Reject(next, error is PlaybackException native ? native.Code : ((MusicOperationException)error).Code);
+                        session.Reject(next, rejectCode);
                     }
                     catch (Exception error) when (!published && selection.Source is not null &&
                         error is not OperationCanceledException && CurrentRecovery(state) &&
-                        (error is PlaybackException mediaError && RetryablePreparation(mediaError.Code) ||
-                            error is MusicOperationException operation && RetryablePreparation(operation.Code)))
+                        MediaOrMusicCode(error) is { } rejectSourceCode && RetryablePreparation(rejectSourceCode))
                     {
-                        session.Reject(next, error is PlaybackException native ? native.Code : ((MusicOperationException)error).Code);
+                        session.Reject(next, rejectSourceCode);
                         throw;
                     }
                 }
@@ -492,7 +490,7 @@ public sealed partial class MusicPlaybackController
                 UpdateFeedbackSelection();
                 state.Attempted = false;
                 ScheduleExpiry(state);
-                SourcesUpdatedForLyrics?.Invoke();
+                ctx.UpdateLyricSources();
                 PlaybackSourceBindings();
             }, pending.Access.Token);
         }
@@ -502,7 +500,7 @@ public sealed partial class MusicPlaybackController
             DiscardPendingMedia(state);
             throw;
         }
-        RestoreLyricsRequested?.Invoke();
+        ctx.RestoreLyricsIfNeeded();
         ConfirmRecoveredSourceStarted(state);
     }
 }

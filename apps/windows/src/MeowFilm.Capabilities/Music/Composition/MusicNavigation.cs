@@ -17,7 +17,8 @@ public sealed partial class MusicCapability
         bool clearCatalogSongs = false, bool clearSelection = false, bool clearTotal = false, bool clearCollection = false)
     {
         ctx.CurrentLocation = next;
-        Library.SetLocationState(heading, clearLibrary, clearCatalogSongs, clearSelection, clearTotal, clearCollection);
+        Library.SetLocationState(heading, clearLibrary, clearSelection, clearTotal, clearCollection);
+        Catalog.SetCatalogLocationState(heading, clearCatalogSongs, clearSelection, clearTotal);
     }
 
     internal bool PublishContentSelection((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous,
@@ -35,7 +36,12 @@ public sealed partial class MusicCapability
     }
 
     internal MusicLocation CaptureLocation() =>
-        ctx.CurrentLocation with { Selected = Library.SelectedSong?.SelectionKey, Scroll = Presentation.CaptureScroll() };
+        ctx.CurrentLocation with
+        {
+            Selected = (Search.IsSearchPage ? Search.SearchSelectedSong :
+                Catalog.IsCatalogPage ? Catalog.CatalogSelectedSong : Library.SelectedSong)?.SelectionKey,
+            Scroll = Presentation.CaptureScroll()
+        };
 
     internal void RememberLocation()
     {

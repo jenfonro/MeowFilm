@@ -13,7 +13,7 @@ function createMetadataModule(id, { dataRoot, nativeSettings, debug } = {}) {
   const images = createMetadataImageTransport();
   let closed = false, closing, cleanupFailure;
   const failure = error => ({ ok: false, contract: spec.contract,
-    code: spec.codes.has(error?.code) ? error.code : 'UPSTREAM_FORMAT' });
+    code: typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'UPSTREAM_FORMAT' });
   function track(work) {
     active.add(work);
     work.finally(() => active.delete(work)).catch(() => {});

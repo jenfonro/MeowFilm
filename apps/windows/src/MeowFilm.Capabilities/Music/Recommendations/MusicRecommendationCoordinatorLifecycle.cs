@@ -2,7 +2,6 @@ using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Core.Debug;
 using static MeowFilm.Capabilities.Recommendations.RecommendationJson;
-using static MeowFilm.Capabilities.Recommendations.MusicRecommendationQueuePort;
 
 namespace MeowFilm.Capabilities.Recommendations;
 
@@ -14,7 +13,7 @@ public sealed partial class MusicRecommendationCoordinator
     private Task persistTail = Task.CompletedTask;
     private bool publishing;
     private MusicRecommendationSnapshot? notice;
-    private Task? abortion, release;
+    private Task? release;
 
     private static MusicRecommendationSessionRecord? ToSessionRecord(Session? s)
     {
@@ -57,8 +56,8 @@ public sealed partial class MusicRecommendationCoordinator
         var previous = persistTail;
         persistTail = LaunchLocked(async () =>
         {
-            try { await previous.ConfigureAwait(false); } catch { /* Previous persistence error already logged. */ }
-            try { await queue.SaveRecommendationSessionAsync(record, CancellationToken.None).ConfigureAwait(false); }
+            try { await previous.ConfigureAwait(false); } catch { }
+            try { await library.SaveRecommendationSessionAsync(record, CancellationToken.None).ConfigureAwait(false); }
             catch (Exception error)
             {
                 DebugLog.Warn(DebugCategories.MusicPlayback, "recommendation", "persist_session_failed",
@@ -69,21 +68,21 @@ public sealed partial class MusicRecommendationCoordinator
 
     public async Task RestorePersistedSessionAsync(CancellationToken cancellationToken = default)
     {
-        var saved = await queue.ReadRecommendationSessionAsync(cancellationToken).ConfigureAwait(false);
+        var saved = await library.ReadRecommendationSessionAsync(cancellationToken).ConfigureAwait(false);
         if (saved is null) return;
         if (saved.Kind is not ("fm" or "similar" or "heartbeat" or "queue") || saved.Platform != "wy")
         {
-            await queue.SaveRecommendationSessionAsync(null, cancellationToken).ConfigureAwait(false);
+            await library.SaveRecommendationSessionAsync(null, cancellationToken).ConfigureAwait(false);
             return;
         }
-        var snapshot = await queue.InLaneAsync(ReadAsync, cancellationToken).ConfigureAwait(false);
+        var snapshot = await library.ReadRecommendationQueueSnapshotAsync(cancellationToken).ConfigureAwait(false);
         if (snapshot.Entries.Length == 0)
         {
-            await queue.SaveRecommendationSessionAsync(null, cancellationToken).ConfigureAwait(false);
+            await library.SaveRecommendationSessionAsync(null, cancellationToken).ConfigureAwait(false);
             return;
         }
         string checkpoint = saved.CheckpointId;
-        if (checkpoint.Length > 0 && !await queue.HasRecommendationCheckpointAsync(checkpoint, cancellationToken).ConfigureAwait(false))
+        if (checkpoint.Length > 0 && !await library.HasRecommendationCheckpointAsync(checkpoint, cancellationToken).ConfigureAwait(false))
             checkpoint = "";
         MusicFmRequest? fm = null;
         if (saved.Kind == "fm")
@@ -146,7 +145,7 @@ public sealed partial class MusicRecommendationCoordinator
                 FixedSeed = saved.FixedSeed,
                 Heartbeat = heartbeatCtx,
                 Queue = snapshot,
-                QueueEpoch = queue.Epoch,
+                QueueEpoch = library.QueueEpoch,
                 Anchor = snapshot.Tail,
                 Status = "ready",
                 RecommendationStarted = saved.RecommendationStarted
@@ -187,7 +186,6 @@ public sealed partial class MusicRecommendationCoordinator
     private void CancelLocked(CancellationTokenSource? cancellation)
     {
         if (cancellation is null) return;
-        // Cancellation callbacks are foreign code: never run them under our state lock.
         _ = LaunchLocked(() =>
         {
             try { cancellation.Cancel(); } catch (ObjectDisposedException) { } catch (AggregateException) { }
@@ -311,10 +309,7 @@ public sealed partial class MusicRecommendationCoordinator
         s.ModeIntent++;
         s.Continue = false;
         if (s.InitialPending) s.Navigation++;
-        // A pending source entry cannot replace an ordinary queue after closure.
-        // Provider continuations may finish as preview candidates, never as an
-        // automatic admission for an earlier mode intent.
-        if (s.Loading && s.InitialPending && !s.CommittingInitial && s.Pending is null &&
+        if (s.Loading && s.InitialPending && !s.CommittingInitial &&
             !(s.Config.Kind == "queue" && !s.Config.Restore))
         {
             s.Generation++;
@@ -334,36 +329,27 @@ public sealed partial class MusicRecommendationCoordinator
     }
     private async Task EnableContinuationAsync(Session s, int intent, CancellationToken token)
     {
-        await queue.InLaneAsync(async (owner, ct) =>
+        lock (gate) Require(CurrentLocked(s) && !s.Returning && s.ModeIntent == intent, "STALE_SESSION");
+        var before = await library.ReadRecommendationQueueSnapshotAsync(token).ConfigureAwait(false);
+        if (before.Mode != 1)
         {
             lock (gate) Require(CurrentLocked(s) && !s.Returning && s.ModeIntent == intent, "STALE_SESSION");
-            var before = await ReadAsync(owner, ct).ConfigureAwait(false);
-            if (before.Mode != 1)
-            {
-                Task<MusicQueuePositionResult> admission;
-                lock (gate)
-                {
-                    Require(CurrentLocked(s) && !s.Returning && s.ModeIntent == intent, "STALE_SESSION");
-                    admission = owner.SetPlaybackModeAsync(1, ct);
-                }
-                _ = await admission.ConfigureAwait(false);
-                before = await ReadAsync(owner, ct).ConfigureAwait(false);
-            }
-            lock (gate)
-            {
-                Require(CurrentLocked(s) && !s.Returning && s.ModeIntent == intent, "STALE_SESSION");
-                s.Queue = before; s.QueueEpoch = queue.Epoch;
-                if (s.Candidates is { } batch) s.Candidates = batch with { ModeIntent = intent };
-                s.Continue = true; s.Attempted.Clear();
-                DebugLog.Info(DebugCategories.MusicPlayback, "recommendation", "continue_enabled",
-                    new Dictionary<string, object?> { ["sessionId"] = s.Id, ["kind"] = s.Config.Kind, ["loading"] = s.Loading });
-                SchedulePersistSessionLocked(s);
-                PublishLocked();
-            }
-            return true;
-        }, token).ConfigureAwait(false);
+            _ = await library.SetPlaybackModeAsync(1, token, notifyExternal: false).ConfigureAwait(false);
+            before = await library.ReadRecommendationQueueSnapshotAsync(token).ConfigureAwait(false);
+        }
         Task? next;
-        lock (gate) next = CurrentLocked(s) && s.ModeIntent == intent ? MaybeBeginLocked(s, token) : null;
+        lock (gate)
+        {
+            Require(CurrentLocked(s) && !s.Returning && s.ModeIntent == intent, "STALE_SESSION");
+            s.Queue = before; s.QueueEpoch = library.QueueEpoch;
+            if (s.Candidates is { } batch) s.Candidates = batch with { ModeIntent = intent };
+            s.Continue = true; s.Attempted.Clear();
+            DebugLog.Info(DebugCategories.MusicPlayback, "recommendation", "continue_enabled",
+                new Dictionary<string, object?> { ["sessionId"] = s.Id, ["kind"] = s.Config.Kind, ["loading"] = s.Loading });
+            SchedulePersistSessionLocked(s);
+            PublishLocked();
+            next = MaybeBeginLocked(s, token);
+        }
         if (next is not null) await next.ConfigureAwait(false);
     }
     private void QueueChanged(MusicRecommendationQueueChange change)
@@ -371,39 +357,35 @@ public sealed partial class MusicRecommendationCoordinator
         lock (gate)
         {
             if (session is not { } s || !CurrentLocked(s)) return;
-            long epoch = queue.Epoch;
+            long epoch = library.QueueEpoch;
             _ = LaunchLocked(async () =>
             {
                 try
                 {
-                    await queue.InLaneAsync(async (owner, token) =>
+                    var snapshot = await library.ReadRecommendationQueueSnapshotAsync(CancellationToken.None).ConfigureAwait(false);
+                    lock (gate)
                     {
-                        var snapshot = await ReadAsync(owner, token).ConfigureAwait(false);
-                        lock (gate)
+                        if (!CurrentLocked(s) || library.QueueEpoch != epoch) return;
+                        s.Queue = snapshot; s.QueueEpoch = epoch;
+                        if (s.PreviousSession is { } previous) previous.Queue = snapshot;
+                        if (s.Config.Kind == "queue" && !s.RecommendationStarted &&
+                            !snapshot.Entries.Any(e => e.Id == s.Config.Seed))
+                        { RetireLocked(s, "queue-replaced"); return; }
+                        var ids = snapshot.Entries.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
+                        foreach (string old in s.Feedback.Keys.Where(id => !ids.Contains(id)).ToArray()) s.Feedback.Remove(old);
+                        if (s.Config.Kind == "queue" && !s.RecommendationStarted && s.Feedback.ContainsKey(snapshot.CurrentId))
                         {
-                            if (!CurrentLocked(s) || queue.Epoch != epoch) return false;
-                            s.Queue = snapshot; s.QueueEpoch = epoch;
-                            if (s.PreviousSession is { } previous) previous.Queue = snapshot;
-                            if (s.Config.Kind == "queue" && !s.RecommendationStarted &&
-                                !snapshot.Entries.Any(e => e.Id == s.Config.Seed))
-                            { RetireLocked(s, "queue-replaced"); return false; }
-                            var ids = snapshot.Entries.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
-                            foreach (string old in s.Feedback.Keys.Where(id => !ids.Contains(id)).ToArray()) s.Feedback.Remove(old);
-                            if (s.Config.Kind == "queue" && !s.RecommendationStarted && s.Feedback.ContainsKey(snapshot.CurrentId))
-                            {
-                                s.RecommendationStarted = true;
-                                if (!s.InitialPending) SchedulePersistSessionLocked(s);
-                            }
-                            s.Anchor = snapshot.Tail;
-                            if (snapshot.Entries.Length == 0) RetireLocked(s, "queue-empty");
-                            else { PublishLocked(); MaybeBeginLocked(s); }
+                            s.RecommendationStarted = true;
+                            if (!s.InitialPending) SchedulePersistSessionLocked(s);
                         }
-                        return true;
-                    }, CancellationToken.None).ConfigureAwait(false);
+                        s.Anchor = snapshot.Tail;
+                        if (snapshot.Entries.Length == 0) RetireLocked(s, "queue-empty");
+                        else { PublishLocked(); MaybeBeginLocked(s); }
+                    }
                 }
                 catch (Exception error)
                 {
-                    lock (gate) if (CurrentLocked(s) && queue.Epoch == epoch)
+                    lock (gate) if (CurrentLocked(s) && library.QueueEpoch == epoch)
                         { s.Error = ErrorCode(error); s.Status = "error"; PublishLocked(); }
                 }
             });
@@ -416,10 +398,9 @@ public sealed partial class MusicRecommendationCoordinator
         {
             stopping = true;
             if (session is { } s) RetireLocked(s, "closing", preservePersisted: true);
-            if (preparation is null || preparation.IsFaulted) preparation = Task.Run(PrepareCoreAsync);
+            if (preparation is null || preparation.IsFaulted) preparation = Task.Run(DrainWorkAsync);
             task = preparation;
         }
-        // Cancelling a waiter never marks a non-cooperative HTTP/commit as settled.
         return NotificationBarrier(task).WaitAsync(cancellationToken);
     }
     private async Task DrainWorkAsync()
@@ -430,21 +411,15 @@ public sealed partial class MusicRecommendationCoordinator
             lock (gate) pending = work.ToArray();
             if (pending.Length == 0) break;
             try { await Task.WhenAll(pending).ConfigureAwait(false); }
-            catch { /* Individual caller/background tasks retain their own outcomes; drain waits for physical settlement. */ }
+            catch { }
         }
     }
-    private async Task PrepareCoreAsync()
-    {
-        await DrainWorkAsync().ConfigureAwait(false);
-        lock (gate) Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
-    }
     public ValueTask DisposeAsync()
-        => new(FinalizeAsync(discardUnsaved: false));
+        => new(FinalizeAsync());
 
-    /// <summary>Discard unsaved state only after all actual work and notifications have settled.</summary>
-    public Task AbortAsync() => FinalizeAsync(discardUnsaved: true);
+    public Task AbortAsync() => FinalizeAsync();
 
-    private Task FinalizeAsync(bool discardUnsaved)
+    private Task FinalizeAsync()
     {
         Task task;
         lock (gate)
@@ -452,22 +427,13 @@ public sealed partial class MusicRecommendationCoordinator
             if (closed) return NotificationBarrier(release ?? Task.CompletedTask);
             stopping = true;
             if (session is { } s) RetireLocked(s, "closed", preservePersisted: true);
-            if (discardUnsaved)
-            {
-                if (abortion is null || abortion.IsFaulted)
-                    abortion = Task.Run(() => FinalizeCoreAsync(true));
-                task = abortion;
-            }
-            else
-            {
-                if (disposal is null || disposal.IsFaulted)
-                    disposal = Task.Run(() => FinalizeCoreAsync(false));
-                task = disposal;
-            }
+            if (disposal is null || disposal.IsFaulted)
+                disposal = Task.Run(FinalizeCoreAsync);
+            task = disposal;
         }
         return NotificationBarrier(task);
     }
-    private async Task FinalizeCoreAsync(bool discardUnsaved)
+    private async Task FinalizeCoreAsync()
     {
         Task cleanup;
         while (true)
@@ -476,12 +442,13 @@ public sealed partial class MusicRecommendationCoordinator
             lock (gate)
             {
                 if (work.Count > 0) continue;
-                if (!discardUnsaved) Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
                 closed = true; notice = null; session = null;
                 cleanup = release ??= Task.Run(() =>
                 {
-                    queue.Changing -= QueueChanging; queue.Changed -= QueueChanged; queue.Selected -= QueueSelected;
-                    queue.SelectionSource = null;
+                    library.QueueChanging -= QueueChanging;
+                    library.QueueChanged -= QueueChanged;
+                    library.QueueEntrySelected -= QueueSelected;
+                    library.QueueSelectionSource = null;
                     physical.Dispose();
                 });
                 break;
@@ -517,7 +484,7 @@ public sealed partial class MusicRecommendationCoordinator
             {
                 lock (gate) if (closed || stopping || generation != revision) break;
                 var previous = observerFrame.Value; var frame = new ObserverFrame(); observerFrame.Value = frame;
-                try { ((Action<MusicRecommendationSnapshot>)callback)(value); } catch { /* A UI observer cannot break the native drain. */ }
+                try { ((Action<MusicRecommendationSnapshot>)callback)(value); } catch { }
                 finally { Volatile.Write(ref frame.Active, 0); observerFrame.Value = previous; }
             }
         }

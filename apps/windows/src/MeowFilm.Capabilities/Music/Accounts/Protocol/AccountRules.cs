@@ -15,8 +15,8 @@ internal static class AccountRules
         "VERIFICATION_REQUIRED", "SIGNATURE_REQUIRED", "DEVICE_CONTEXT_REQUIRED", "UNSUPPORTED",
         "NETWORK_ERROR", "UPSTREAM_HTTP", "STORAGE_ERROR", "NOT_FOUND", "MEDIA_UNAVAILABLE", "TRIAL_ONLY", "QUALITY_UNAVAILABLE", "UPSTREAM_ERROR", "INVALID_RESPONSE", "REDIRECT_DENIED", "RATE_LIMITED",
         "CANCELLED", "TIMEOUT", "CLOSED", "LIMIT", "STORAGE", "STORAGE_CONFLICT", "STORAGE_UNAVAILABLE",
-        "CORRUPT_STORAGE", "COMMIT_UNKNOWN", "STALE_SESSION", "IDENTITY_MISMATCH", "ORIGIN_DENIED",
-        "SESSION_CHANGED", "SUPERSEDED", "BUSY", "QR_EXPIRED", "HANDOFF_REJECTED", "HANDOFF_UNCONFIRMED",
+        "CORRUPT_STORAGE", "STALE_SESSION", "IDENTITY_MISMATCH", "ORIGIN_DENIED",
+        "SESSION_CHANGED", "SUPERSEDED", "BUSY", "QR_EXPIRED", "HANDOFF_REJECTED",
         "ACCOUNT_FAILED", "DEVICE_LIMIT", "INVALID_CODE", "INVALID_PHONE", "ACCOUNT_SELECTION_REQUIRED",
         "SMS_SEND_UNCONFIRMED", "TRANSFER_FILE", "TRANSFER_FORMAT"
     };
@@ -42,47 +42,14 @@ internal static class AccountRules
     { if (!test) throw new MusicAccountException(code); }
     internal static string Platform(string value)
     { Require(value is "wy" or "tx" or "kg"); return value; }
-    internal static bool Match(string value, string pattern) =>
-        Regex.IsMatch(value, pattern, RegexOptions.CultureInvariant | RegexOptions.NonBacktracking, TimeSpan.FromMilliseconds(100));
-    internal static string Text(string? value, int? max, string code = "INVALID_RESPONSE", bool empty = false)
-    {
-        Require(value is not null && (empty || value.Length > 0) && (max is null || value.Length <= max), code);
-        for (int i = 0; i < value!.Length; i++)
-        {
-            char c = value[i];
-            Require(c >= 32 && c != 127, code);
-            if (char.IsHighSurrogate(c))
-            { Require(i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]), code); i++; }
-            else Require(!char.IsLowSurrogate(c), code);
-        }
-        return value;
-    }
-    internal static long Integer(JsonElement node)
-    {
-        decimal value = 0;
-        Require(node.ValueKind == JsonValueKind.Number && node.TryGetDecimal(out value) &&
-            value >= 0 && value <= MaxInteger && decimal.Truncate(value) == value, "CORRUPT_STORAGE");
-        return (long)value;
-    }
-    internal static string Id(string? value, string code = "INVALID_RESPONSE")
-    { Require(value is not null && Match(value, "^[1-9][0-9]{0,19}$"), code); return value!; }
     internal static void Required(JsonElement value, string[] required, string code = "INVALID_REQUEST")
     {
         Require(value.ValueKind == JsonValueKind.Object, code);
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var property in value.EnumerateObject())
-            Require(names.Add(property.Name), code);
-        Require(required.All(names.Contains), code);
-    }
-    internal static string String(JsonElement value, string name, int max, string code = "INVALID_REQUEST", bool empty = false)
-    {
-        Require(value.TryGetProperty(name, out var item) && item.ValueKind == JsonValueKind.String, code);
-        return Text(item.GetString(), max, code, empty);
+        foreach (var name in required) Require(value.TryGetProperty(name, out _), code);
     }
     internal static Dictionary<string, string> Cookies(string cookie)
     {
-        Text(cookie, null, "INVALID_CREDENTIALS");
-        Require(cookie.All(c => c is >= ' ' and <= '~'), "INVALID_CREDENTIALS");
+        Require(!string.IsNullOrEmpty(cookie) && cookie.All(c => c is >= ' ' and <= '~'), "INVALID_CREDENTIALS");
         var parts = cookie.Split(';');
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         for (int i = 0; i < parts.Length; i++)
@@ -92,16 +59,11 @@ internal static class AccountRules
             int at = part.IndexOf('=');
             Require(at > 0, "INVALID_CREDENTIALS");
             string key = part[..at], value = part[(at + 1)..];
-            Require(Match(key, "^[A-Za-z0-9_-]{1,80}$") &&
+            Require(Regex.IsMatch(key, "^[A-Za-z0-9_-]{1,80}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking) &&
                 key is not ("__proto__" or "prototype" or "constructor") &&
                 key.ToLowerInvariant() is not ("domain" or "path" or "expires" or "max-age" or "secure" or "httponly" or "samesite" or "priority") &&
                 !value.Any(c => char.IsWhiteSpace(c) || c is '"' or '\\' || c == ',' && key != "_ntes_nnid") && result.TryAdd(key, value), "INVALID_CREDENTIALS");
         }
         return result;
-    }
-    internal static void Challenge(MusicAccountChallenge value, string platform)
-    {
-        // The native owner associates the challenge with its live operation; Node owns the QR protocol and expiry.
-        Require(value.Platform == platform && !string.IsNullOrEmpty(value.ChallengeId), "INVALID_RESPONSE");
     }
 }

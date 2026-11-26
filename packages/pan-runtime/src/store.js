@@ -1,4 +1,3 @@
-import { isAbsolute } from 'node:path';
 import { openDatabase } from '@meowfilm/storage';
 import { PanError, requireValue } from './errors.js';
 import { object } from './values.js';
@@ -25,8 +24,6 @@ export class PanStore {
   #database;
 
   constructor(dataRoot) {
-    requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot) &&
-      !dataRoot.includes('\0') && !dataRoot.split(/[\\/]/).includes('..'));
     this.#database = openDatabase(dataRoot);
   }
 
@@ -43,16 +40,8 @@ export class PanStore {
       ['replace', 'refresh'].includes(command.mode) && integer(command.accountRevision) &&
       integer(command.rowRevision) && object(command.credentials), 'STORAGE_ERROR');
     const { provider, credentials, accountRevision, rowRevision, mode } = command;
-    requireValue(Object.keys(credentials).every(key => allowed[provider].includes(key)), 'STORAGE_ERROR');
-    const values = fields.map(field => {
-      const value = credentials[field] ?? null;
-      requireValue(value === null || (field === 'refreshedAt' ? integer(value) :
-        typeof value === 'string' && !value.includes('\0') && (field === 'password' || !/[\r\n]/.test(value))),
-      'STORAGE_ERROR');
-      return value;
-    });
+    const values = fields.map(field => allowed[provider].includes(field) ? credentials[field] ?? null : null);
     const next = accountRevision + (mode === 'replace' ? 1 : 0);
-    requireValue(integer(next) && integer(rowRevision + 1), 'STORAGE_ERROR');
     try {
       const [, rows] = await this.#database.transaction([
         { sql: 'UPDATE pan_accounts SET account_revision=?,row_revision=row_revision+1,' +

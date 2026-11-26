@@ -32,19 +32,13 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
                 ? rowValue : null;
             return (value, db.Revision(StorageOwner));
         });
-        var behavior = WindowCloseBehavior.Ask;
-        if (saved is not null)
-        {
-            behavior = saved switch
-            {
-                "ask" => WindowCloseBehavior.Ask,
-                "minimizeToTray" => WindowCloseBehavior.MinimizeToTray,
-                "exit" => WindowCloseBehavior.Exit,
-                _ => throw new StorageException(StorageError.Corrupt)
-            };
-        }
         storageRevision = revision;
-        Behavior = behavior;
+        Behavior = saved switch
+        {
+            "minimizeToTray" => WindowCloseBehavior.MinimizeToTray,
+            "exit" => WindowCloseBehavior.Exit,
+            _ => WindowCloseBehavior.Ask
+        };
         loaded = true;
     }
     public async Task LoadAsync()
@@ -106,16 +100,8 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
             }
             catch
             {
-                // A storage failure can follow an accepted CAS. Only the authority can
-                // confirm that the requested behavior was actually saved.
-                try
-                {
-                    await Read();
-                    bool savedBehavior = Behavior == behavior;
-                    Status = savedBehavior ? "" : "窗口行为未保存，请重试";
-                    return savedBehavior;
-                }
-                catch { loaded = false; Status = "窗口行为保存失败，请重新读取"; return false; }
+                Status = "窗口行为保存失败";
+                return false;
             }
         }
         finally

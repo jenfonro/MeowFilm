@@ -22,33 +22,32 @@ public enum CredentialStoreError: Error, Equatable, LocalizedError, Sendable {
     }
 
     static func sanitized(_ error: Error) -> CredentialStoreError {
-        // Never surface an injected error's description, URL, payload or userInfo.
         error as? CredentialStoreError ?? .backendFailure
     }
 }
 
-/// Opaque bytes owned by an account adapter. The core does not parse login protocols.
-/// Not Codable; ordinary description/reflection redact the bytes. Explicit extraction
-/// is for the adapter only. Data is copy-on-write; this does not promise memory zeroization.
+/// Strongly-typed account credential; ordinary description and reflection redact secrets.
 public struct AccountCredential: Equatable, Sendable, CustomStringConvertible,
                                  CustomDebugStringConvertible, CustomReflectable {
-    private let bytes: Data
+    public let siteKey: String
+    public let userID: String
+    public let cookie: String
 
-    public init(data: Data) throws {
-        guard !data.isEmpty else {
+    public init(siteKey: String, userID: String, cookie: String) throws {
+        guard !siteKey.isEmpty, !userID.isEmpty, !cookie.isEmpty else {
             throw CredentialStoreError.invalidCredential
         }
-        bytes = data
+        self.siteKey = siteKey
+        self.userID = userID
+        self.cookie = cookie
     }
 
-    public func dataRepresentation() -> Data { bytes }
     public var description: String { "AccountCredential(<redacted>)" }
     public var debugDescription: String { description }
     public var customMirror: Mirror { Mirror(self, children: ["value": "<redacted>"]) }
 }
 
 /// A persistence revision is separate from the current in-memory callback generation.
-/// It detects unexpected replacement between restore, validation and subsequent access.
 public struct CredentialRecord: Equatable, Sendable, CustomStringConvertible,
                                 CustomDebugStringConvertible, CustomReflectable {
     public let revision: UUID

@@ -55,7 +55,6 @@ internal static class FilmPlaybackError
         "INVALID_PREFERENCES" or "INVALID_RULES" => "播放设置无效",
         "STORAGE_ERROR" => "本地存储失败",
         "CORRUPT_STORAGE" => "本地数据已损坏",
-        "COMMIT_UNKNOWN" => "保存结果未确认，请核对",
         "CACHE_LOAD_FAILED" => "缓存读取失败",
         "STORAGE_CHANGED" => "本地数据已变更，请重试",
         "LIBRARY_UPDATE_FAILED" => "媒体库更新失败",
@@ -276,7 +275,6 @@ internal static class FilmJson
         _ = Identity(source, "detailId", required: true);
         _ = Identity(source, "lineId", required: true);
         _ = RequiredText(source, "candidateId");
-        target.Validate();
         return target;
     }
 }
@@ -299,9 +297,7 @@ internal sealed class FilmPlaybackSnapshot
         SessionId = id;
         Sequence = sequence;
         Target = FilmJson.Target(FilmJson.Member(Raw, "target"));
-        Target.Validate();
         EntryTarget = FilmJson.Target(FilmJson.Member(Raw, "entryTarget"));
-        EntryTarget.Validate();
         string metadataSourceId = FilmJson.Member(Raw, "metadataSourceId") switch
         {
             { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined } => "",
@@ -414,7 +410,6 @@ public sealed record FilmCandidateItem(string Id, string Name, string Path, stri
     {
         var source = FilmJson.Member(value, "source");
         var target = FilmJson.Target(value.GetProperty("playbackTarget"));
-        target.Validate();
         return new(FilmJson.RequiredText(value, "id"), FilmJson.Text(value, "name"), FilmJson.Text(value, "path"),
             FilmJson.Text(value, "quality"), FilmJson.Text(value, "provider") is { Length: > 0 } provider ? provider : null,
             FilmJson.RequiredText(source, "key"), FilmJson.Identity(source, "detailId", required: true), FilmJson.Identity(value, "lineId"),

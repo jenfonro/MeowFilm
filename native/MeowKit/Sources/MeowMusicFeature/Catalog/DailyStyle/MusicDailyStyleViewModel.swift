@@ -12,7 +12,6 @@ final class MusicDailyStyleViewModel: ObservableObject {
     @Published private(set) var saved = false
     private let page: MusicPublicBrowseViewModel
     private let source: MusicRemoteQueueSource
-    private let receipts: MusicSettingsReceiptOwner
     private var sourceObservation: AnyCancellable?
     private var revocations: Task<Void, Never>?
     private var work: Task<Void, Never>?
@@ -20,10 +19,9 @@ final class MusicDailyStyleViewModel: ObservableObject {
     private var requested = false
     private var closed = false
 
-    init(page: MusicPublicBrowseViewModel, source: MusicRemoteQueueSource, receipts: MusicSettingsReceiptOwner) {
+    init(page: MusicPublicBrowseViewModel, source: MusicRemoteQueueSource) {
         self.page = page
         self.source = source
-        self.receipts = receipts
         sourceObservation = page.$remoteSource.map { $0?.id }.removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] id in
@@ -129,7 +127,7 @@ final class MusicDailyStyleViewModel: ObservableObject {
                 try selection.validate(in: categories)
                 try await source.validate()
                 guard current(id) else { return }
-                let result = try await page.saveDailyStyle(selection, receipts: receipts)
+                let result = try await page.saveDailyStyle(selection)
                 guard current(id) else { return }
                 if let actual = page.dailyStyle {
                     category = actual.category
@@ -143,11 +141,7 @@ final class MusicDailyStyleViewModel: ObservableObject {
             } catch {
                 if current(id) {
                     let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
-                    self.error = failure == .commitUnconfirmed ? nil : failure.localizedDescription
-                    if failure == .commitUnconfirmed, let actual = page.dailyStyle {
-                        category = actual.category
-                        choices = [actual.category: Set(actual.tags.map(\.id))]
-                    }
+                    self.error = failure.localizedDescription
                 }
             }
         }

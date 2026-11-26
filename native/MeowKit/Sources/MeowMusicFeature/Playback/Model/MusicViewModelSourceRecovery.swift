@@ -7,55 +7,39 @@ import MeowPlayback
 extension MusicViewModel {
     /// Recovery is a continuation of the user's selection, not a new automatic
     /// play. All peers, caches and media failures remain in the same session.
-    func recoverSourceAudio(_ fact: MusicPlaybackFact, invalidDuration: Bool = false) -> Bool {
-        guard fact.kind == .failed || invalidDuration,
-              let provider = service as? any MusicSourcePlaybackServing,
+    func recoverSourceAudio(_ fact: MusicPlaybackFact) -> Bool {
+        guard fact.kind == .failed,
               let service, let previous = candidate, let selection = lastSelection else { return false }
-        if invalidDuration { feedbackConsumer.invalidate(rejecting: true) }
         if sourcePlayback.sourceCommit?.attemptID == previous.attemptId {
-            sourcePlayback.sourceCommit?.failure = fact; sourcePlayback.sourceCommit?.invalidDuration = invalidDuration
-            if invalidDuration {
-                terminalAttempt = previous.attemptId
-                if let nativeAttempt { playback.pause(attempt: nativeAttempt) }
-            }
+            sourcePlayback.sourceCommit?.failure = fact
             return true
         }
         guard sourcePlayback.sourceRecoveryTask == nil else { return true }
         if let pending = sourcePlayback.pendingSourceSelection {
             // The running selection owns its match and preparation. A donor
             // failure only changes how it will prepare/commit, never reissues it.
-            sourcePlayback.pendingSourceFailure = (pending.id, fact, invalidDuration)
+            sourcePlayback.pendingSourceFailure = (pending.id, fact)
             sourcePlayback.sourceRecoveryWantsPlayback = phase != .paused
             terminalAttempt = previous.attemptId
             position = fact.position
             playbackState.isResolving = true
-            if invalidDuration, let nativeAttempt { playback.pause(attempt: nativeAttempt) }
             return true
         }
         let epoch = lifecycle, token = selectionID, intent = sourcePlayback.sourceIntent
         let automatic = feedbackAutomatic, prior = eventTail, operation = sourcePlayback.sourceSwitchID
-        // A replacement can fail synchronously before its initial seek. Its
-        // zero clock is not evidence that the original resume point was reached.
         let recoveryPosition = sourcePlayback.sourceRecoveryWantsPlayback != nil && lastProgressWrite == nil && fact.position == 0
             ? previous.startPosition : fact.position
-        // A synchronous failure while opening a replacement inherits the
-        // original pause intent, rather than the replacement's preparing phase.
         let shouldResume = sourcePlayback.sourceRecoveryWantsPlayback ?? (phase != .paused)
         sourcePlayback.sourceRecoveryWantsPlayback = shouldResume
         let admission = recommendations.fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let key = selection.installationId + ":" + selection.siteId + ":" + selection.sourceKey + ":" + selection.quality
-        // A known settings change retires this URL's old renewal pin, not the
-        // user's intent. Continue through the session under the current policy.
         let mayRenew = sourcePlayback.sourceCommittedSettingsRevision == state.settingsRevision &&
-            !invalidDuration && !previous.isCachedAudio &&
+            !previous.isCachedAudio &&
             selection.installationId.hasPrefix("official:") && !sourcePlayback.sourceRenewed.contains(key)
         sourcePlayback.sourceRenewed.insert(key)
         sourcePlayback.cachedAudioObservation?.cancel(); sourcePlayback.cachedAudioObservation = nil
         terminalAttempt = previous.attemptId
         playbackState.isResolving = true
-        // A known wrong recording must stop sounding before asynchronous work,
-        // and must never reach feedback/history as a valid playing fact.
-        if invalidDuration, let nativeAttempt { playback.pause(attempt: nativeAttempt) }
         let drainID = UUID()
         sourcePlayback.sourceRecoveryID = drainID
         let task = Task { [weak self] in
@@ -83,10 +67,10 @@ extension MusicViewModel {
                 try checkRecovery()
                 // Before any accepted fact, the service has no committed pin.
                 // Drain prior facts first; a preparation failure uses the session.
-                if mayRenew, self.lastProgressWrite != nil, let renewal = service as? any MusicPlaybackRecoveryServing {
+                if mayRenew, self.lastProgressWrite != nil {
                     var renewed: MusicPlaybackRecovery?
                     do {
-                        renewed = try await renewal.recoverPlayback(previousAttemptID: previous.attemptId,
+                        renewed = try await service.recoverPlayback(previousAttemptID: previous.attemptId,
                             attemptID: UUID().uuidString.lowercased(), rejectedURL: previous.url, position: recoveryPosition)
                         try checkRecovery()
                         if let renewed {
@@ -127,8 +111,8 @@ extension MusicViewModel {
                         rejectedRenewal = renewed
                     }
                 }
-                let session = try await provider.sourceSession(occurrenceID: fact.occurrenceId,
-                                                               expectedQueueRevision: self.state.revision)
+                let session = try await service.sourceSession(occurrenceID: fact.occurrenceId,
+                                                              expectedQueueRevision: self.state.revision)
                 try checkRecovery()
                 await session.rejectMedia(candidate: previous, selection: selection)
                 try checkRecovery()

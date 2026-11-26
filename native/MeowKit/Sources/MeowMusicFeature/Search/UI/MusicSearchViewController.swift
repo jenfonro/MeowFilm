@@ -46,11 +46,7 @@ public final class MusicSearchViewController: SearchPageViewController,
         self.model = model; self.appearance = appearance; self.router = router
         self.history = history ?? model.searchHistory
         self.additionalCategories = additionalCategories; self.primaryTarget = primaryTarget
-        if let provider = model.searchDiscoveryProvider, let browser = model.publicBrowser {
-            discoveryPage = MusicSearchDiscoveryModel(
-                provider: provider, browser: browser, hotPlayback: model.searchHotPlaybackProvider
-            )
-        } else { discoveryPage = nil }
+        discoveryPage = model.service.map { MusicSearchDiscoveryModel(service: $0) }
         super.init(themeProvider: appearance, query: model.query, initialFocus: true)
         searchTargets = [primaryTarget] + additionalCategories.map(\.target)
         searchTargetID = initialTargetID ?? primaryTarget.id
@@ -87,7 +83,6 @@ public final class MusicSearchViewController: SearchPageViewController,
             table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         observe(history, whenVisible: true) { [weak self] in self?.render() }
-        observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
         if let discoveryPage {
             let discoveryVisuals = Publishers.MergeMany([
                 discoveryPage.$hot.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
