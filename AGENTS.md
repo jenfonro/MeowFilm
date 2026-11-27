@@ -1,10 +1,70 @@
 # AGENTS.md
 
-meowfilm 的 iPhone 与 Windows 原生客户端：
-- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供原生业务、账号安全、播放和持久化能力。公共 Node 运行器随 App 启动恢复启用猫源，持有影视规则与会话，并执行两端共同音乐平台请求配方。
-- Windows：WinUI 3 / .NET 原生桌面应用；公共 Node 运行器随 App 启动，影视与音乐平台请求使用共同实现，音乐脚本仅在启用、调用或显式检测时执行。音乐账号安全保存、永久歌曲仓库、引用队列、共享图片和原生播放由本端 owner 管理。
+meowfilm 的 iPhone 与 Windows 原生客户端：iOS 为 UIKit App + Swift Package（`native/MeowKit`），Windows 为 WinUI 3／.NET 桌面应用；两端共用 Node 运行器（`apps/runtime`），承担影视规则与会话、猫源和音乐平台请求。
 
-本文件记录协作规则、构建命令与架构边界；系统行为与模块契约见 [`docs/README.md`](docs/README.md)；**把客户端跑起来做实跑验证与故障排查的操作手册（含禁止的残缺版测试明细、`scripts/debug.mjs` 速查与双端启动踩坑）见 [`AGENTS_DEBUG.md`](AGENTS_DEBUG.md)**。
+本文件定义 meowfilm 的项目规范、限制与索引（目录、构建命令、文档入口）；系统行为与模块契约见 [`docs/README.md`](docs/README.md)，实跑验证与故障排查见 [`AGENTS_DEBUG.md`](AGENTS_DEBUG.md)。
+
+## 目录
+
+```text
+apps/
+  ios/                         iOS App 工程
+    Application/               应用与 scene 生命周期、窗口
+    Composition/               服务、播放、账号与同步装配
+    Navigation/                根容器、页面导航与呈现路由
+    Presentation/              主页面外壳、页头、底部导航、播放器停靠区
+    Debug/                     --debug 调试宿主（Host、Navigation、Inspection、Actions）
+    runtime/                   iOS 运行器启动与 entry
+  windows/
+    app/                       应用入口与装配（Program.cs、App.xaml）
+    runtime/                   Windows 私密启动管道与 aggregate entry，不保留 module 副本
+    native/FilmKernel/         影视解复用、解码、音频时钟与 HDR／SDR 输出内核（C ABI），不含 UI 与音乐
+    src/
+      MeowFilm.Core/           基础契约、播放作用域、运行器客户端
+      MeowFilm.Threading/      DispatcherQueue 调度、取消与计时器
+      MeowFilm.Platform/       SQLite 存储、资源文件、运行器子进程会话、Debug 服务
+      MeowFilm.Desktop/        窗口外壳 Shell、主题 Theme、通用控件 Controls／Management／Dialogs、图片 Artwork、视口 Viewport、通知
+      MeowFilm.Audio/          音乐解码、PCM／DSP 与 WASAPI 输出
+      MeowFilm.Media/          视频播放与自适应流
+      MeowFilm.SystemMedia/    系统媒体传输控件
+      MeowFilm.AppHost/        启动、注入与关闭
+      MeowFilm.Capabilities/   业务能力
+        Music/                 Accounts、Catalog、Library、Lyrics、Playback、PlaybackCache、Recommendations、Search、Settings、Sync、Composition 等
+        Film/                  Home、Library、Playback、Rules、Search、Settings、Sources、Composition 等
+        Novel/                 Domain、Presentation、Storage、Composition
+        Pan/ History/ Search/  网盘、历史、全局搜索
+        Shared/                跨域共享的账号、目录、控件、设置与主题
+  runtime/                     通用运行器：entry.mjs、bootstrap.mjs 装配；modules/ 为九个模块实现（契约见 docs/runtime/）
+native/
+  MeowKit/Sources/             iOS Swift Package
+    MeowUI/                    通用 UI：Navigation（页面基类、反馈）、Settings、List、Catalog、Artwork 等
+    MeowPlayback/ MeowAudio/ MeowPlaybackVideo/                  播放控制、音频会话、视频适配
+    MeowStorage/ MeowRuntime/ MeowAccounts/ MeowContracts/ MeowJSON/ MeowDebug/   存储、运行器客户端、账号、契约、JSON、调试
+    MeowMusicFeature/          音乐界面
+    MeowMusicNativeService/    音乐原生业务
+    MeowMusicPlatform/         音乐平台、账号与播放缓存
+    MeowFilmFeature/           影视
+    MeowNovelFeature/          小说
+  AudioKernel/ VideoKernel/ AetherKernel/   iOS 音频、视频与可选 Aether 内核，不拥有业务或系统媒体会话
+packages/                      共享 Node 包（职责见 docs/runtime/）
+  storage/                     双库 SQLite Schema（schema/）、生成产物（generated/）与引擎
+  script-host/                 脚本实例生命周期；native/ 为 QuickJS 原生 addon
+  source-runtime/              来源规则与 capability ABI，不依赖 Node
+  runtime-bridge/              HTTP 请求、取消与连接生命周期
+  pan-runtime/                 网盘能力，通用默认入口不装配
+  film-playback/               影视会话与业务缓存
+  film-rules/ film-search/     影视纯计算程序，不在客户端执行或持久化
+  netease-token/               网易订阅 token
+  music-platform/              音乐平台请求配方，不持久保存原生账号、歌曲仓库或图片
+  novel-rules/                 小说规则
+scripts/                       Schema 生成 storage/、iOS 工程与内核准备 ios/ 及 prepare-ios-*.py、QuickJS 构建 quickjs/、Windows 构建与检查 windows/、跨端 debug CLI debug.mjs
+docs/                          common/（共同契约：film、music、novel、pages）、ios/、windows/、runtime/；索引 docs/README.md
+LICENSES/                      第三方许可与 NOTICE.md
+build/                         各平台最新构建产物，不入 Git
+tmp/                           日志、构建暂存与任务工作记录 tmp/working/，不入 Git
+```
+
+- 许可正文每种一份放在 `LICENSES/`；改编上游代码时在 `NOTICE.md` 补充来源，增删时同步平台打包清单；删除或移动移植代码前确认许可来源。
 
 ## 命令
 
@@ -22,7 +82,7 @@ bash scripts/verify-native.sh                         # macOS：源码边界、�
 ```
 
 - Windows 将 `python3` 换为 `python -X utf8`。
-- 需要 macOS、Xcode、Node 24 与 `npm ci --ignore-scripts`；参考环境为 Xcode 26.1.1。iOS 部署目标 18.0，macOS 15.0 仅用于原生包编译与校验，不提供 Mac 客户端。
+- 需要 macOS、Xcode、Node 24 与 `npm ci --ignore-scripts`；iOS 部署目标 18.0，macOS 15.0 仅用于原生包编译与校验。构建与签名细节见 [iOS 发布](docs/ios/release.md)。
 
 ### Windows
 
@@ -35,68 +95,9 @@ npm run verify                             # 依赖锁、包边界、原生 JS �
 node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 ```
 
-- 需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git；参考环境为 .NET SDK 10.0.402，Node.js 版本以 `scripts/script-host-native.json` 的 `build.node` 为准。
-- 通用脚本宿主与影视规则共用 Node addon，需要 Python、Perl、NASM 与 MSVC x64 开发环境（`cl`／`nmake` 在 PATH）；首次构建按 `scripts/script-host-native.json` 下载校验依赖，后续复用默认缓存。
-- 随 App 发布的 Node 运行时版本与来源由 `scripts/script-host-native.json` 的 `build.node` 锁定；`scripts/windows/node-runtime.json` 固定运行时文件与许可证哈希，构建时 PATH 上的 `node.exe` 须符合该版本与哈希。
-- 默认完整发布目录自带 Node、引擎依赖和 .NET，不要求目标电脑安装开发工具；`-FrameworkDependent` 另需系统 .NET Runtime。
+- 需要 .NET SDK 10 或更高、Node.js、npm 与 Git；脚本宿主 Node addon 另需 Python、Perl、NASM 与 MSVC x64 环境（`cl`／`nmake` 在 PATH）。Node 版本以 `scripts/script-host-native.json` 的 `build.node` 为准，构建时 PATH 上的 `node.exe` 须符合 `scripts/windows/node-runtime.json` 锁定的版本与哈希；打包细节见 [Windows 运行器打包](docs/windows/runtime-packaging.md)。
 
-## 目录
-
-- `apps/ios/` — 唯一 iOS App 工程
-  - `Application` — 应用与 scene 生命周期、窗口、产品身份
-  - `Composition` — 资源、服务、播放、账号和同步装配
-  - `Debug` — iOS 端 `--debug` 调试控制面、诊断与日志宿主（按 `Host/`、`Navigation/`、`Inspection/`、`Actions/` 分层）
-  - `Navigation` — 根容器、页面导航与呈现路由
-  - `Presentation` — 主页面外壳、页头、底部导航和播放器停靠区
-  - `runtime` — iOS 受信启动／生命周期交接与公共 HTTP 运行器薄 entry
-- `native/MeowKit/` — iOS Swift Package
-  - `MeowContracts`、`MeowJSON`、`MeowDebug`、`MeowStorage`、`MeowAccounts`、`MeowAudio`、`MeowPlayback`、`MeowPlaybackVideo`、`MeowUI`、`MeowRuntime` — 共享能力与平台播放适配
-  - `MeowMusicFeature`、`MeowMusicPlatform`、`MeowMusicNativeService` — 音乐界面、平台和原生业务
-  - `MeowFilmFeature` — 影视数据源、首页、详情、收藏、规则设置与来源管理
-  - `MeowNovelFeature` — 小说发现、搜索、书架／历史、阅读器、书源与净化设置
-- `native/AudioKernel/` — 独立音乐解码 C ABI 与锁定音频依赖，不拥有业务或系统媒体会话
-- `native/VideoKernel/` — iOS 原生视频内核（锁定 FFmpeg 8.1.2 静态库、异步 VideoToolbox、`AVSampleBufferDisplayLayer`、SPSC 实时音频管线、按需字幕、候选首帧与排空），不拥有业务或系统媒体会话
-- `native/AetherKernel/` — 可选 Aether 核心的动态封装、锁定依赖与宿主补丁，不拥有业务或系统媒体会话
-- `apps/windows/app/` — Windows 应用入口与装配
-- `apps/windows/native/FilmKernel/` — Windows 电影独立解复用、解码、WASAPI 时钟（含无设备降级与热插拔重连）与 D3D11 + `libplacebo` 自适应 HDR／SDR Tone-Mapping 输出（C ABI v3），不包含上游 UI 或音乐 owner
-- `apps/windows/src/` — Windows 原生库
-  - `MeowFilm.Core` — 基础契约、中性播放作用域／读取租约与受控 HTTP 输入机制
-  - `MeowFilm.Threading` — 无 XAML 依赖的 DispatcherQueue owner 调度、排队取消和计时器机制
-  - `MeowFilm.Platform` — 本地 SQLite 与资源文件能力、私密启动管道、HTTP 子进程会话、文件授权
-  - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
-  - `MeowFilm.Audio` — 独立音乐解码、PCM／DSP 与 WASAPI 输出
-  - `MeowFilm.Media` — 视频播放与自适应流
-  - `MeowFilm.SystemMedia` — 系统媒体传输控件
-  - `MeowFilm.AppHost` — 启动、注入与关闭
-  - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
-- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.3.0 三个模块。iOS 与 Windows aggregate 按序显式装配 music、cat、source、pan、tmdb、douban、film、netease、music-platform 九模块，保留各自平台受信启动；契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`、`docs/runtime/netease-token.md`、`docs/runtime/music-platform.md`。
-- `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
-- `packages/storage/` — 共享强类型双库 SQLite Schema 源码（`schema/{data,cache}/`）、分角色分平台独立生成产物（`generated/schema-{data,cache}-{standalone,windows,ios}.sql`）与 `@meowfilm/storage` 引擎（`src/{engine,schema,query,values}/`）
-- `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
-- `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
-- `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、取消与连接生命周期
-- `packages/pan-runtime/` — 内置网盘账号、分享与取址能力；同进程异步 I/O，不创建脚本执行环境，通用默认入口不装配，平台 App 显式装配
-- `packages/film-playback/` — 影视规则配置、搜索/智能播放会话、唯一业务数据缓存、本地历史/人工匹配/屏蔽/偏好，以及受控二进制媒体流；不复制原生收藏或图片缓存
-- `packages/film-rules/`、`packages/film-search/` — Node 影视 owner 使用的纯计算程序，共用宿主 QuickJS-NG；不在客户端执行或持久化规则
-- `packages/netease-token/` — 网易订阅实时 token 的按需 SDK Worker；账号和订阅写入仍由原生管理，契约与信任边界见 `docs/runtime/netease-token.md`
-- `packages/music-platform/` — 五平台现有请求配方、字段转换、匿名协议状态和 API 缓存的共同 Node owner；借用既有网易 token owner，不持久保存原生账号、歌曲仓库或图片。
-- `packages/novel-rules/` — source 运行器使用的小说身份、搜索归并、章节匹配、净化与简繁纯规则；客户端保留原生状态、排版与交互，不再链接独立规则引擎
-- `scripts/` — 分平台 Schema 生成与校验（`scripts/storage/generate-schema.py`）、iOS 工程生成、结构检查、原生校验、构建打包与发布，以及跨端 `--debug` CLI（`scripts/debug.mjs`）和 Node 共用工具
-- `scripts/windows/` — Windows 构建、打包与结构/项目边界检查
-- `docs/` — 架构、模块、契约与发布说明，索引见 `docs/README.md`
-- `LICENSES/` — 全部第三方许可与来源声明（`NOTICE.md`）；Windows 构建时复制到 `build/windows/licenses`
-- `build/ios/`、`build/windows/` — 各平台最新一份产物，每次构建成功后整体覆盖；不入 Git
-- `tmp/` — 日志、构建暂存与任务工作记录（`tmp/working/`），可随时整体删除；不入 Git
-- 许可文件只放在 `LICENSES/`，每种许可正文一份；改编新的上游代码时在 `NOTICE.md` 补充来源，增删时同步使用该组件的平台打包清单（Windows 为 `scripts/windows/package-licenses.mjs`，iOS 为工程资源及构建输入策略）。
-
-## 代码组织
-
-- 按真实职责和变化原因组织目录、文件与类型；名称反映实际责任。通用能力使用中性名称，领域专属能力保留业务语义。
-- 拆分必须形成清晰职责和调用边界，不以拆文件、改名、移动目录或增加转发层代替解耦。
-- 遵循现有命名、格式、导入和注释约定，不夹带与任务无关的风格整理。
-- 模块的实现背景、来源、协议与特殊约束写入 `docs` 对应文档，不写入本文件。
-
-## 职责与依赖
+## 架构
 
 | 层次 | 主要责任 | 边界限制 |
 | --- | --- | --- |
@@ -105,87 +106,46 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 | 共享能力 | 通用机制、基础设施与最小公共契约 | 不反向依赖应用或业务，不内置业务分派 |
 | 平台与外部适配 | 系统能力、外部协议与契约实现 | 平台细节不扩散到业务核心，不替业务层决定策略 |
 
-- 每项职责有明确所有者；模块间通过最小公开契约协作，明确输入、输出、生命周期和错误语义。
-- 运行器拥有脚本安装、源码、网络来源地址及私有数据；客户端可持有供原生界面读取的列表／检测快照，不形成第二安装事实源或反向脚本存储 owner。脚本执行内存不做快照持久化；未来缓存需求不预建实现。
-- 公共脚本层不依赖 Windows 源码或启动／管道实现。LX 请求特权存储绑定显式 `context.storage`，不以 ambient 异步上下文授予全局／startup／background 权限。CatNode 的公开网络不使用域名授权名单，也不按公网、私网或链路本地分类拒绝目标；实例已登记回环端口仍映射到实际端点，`socketPath`／fd 属于文件／IPC 隔离继续拒绝；文件只映射安装实例私有卷。source-runtime 规则包不依赖 Node，平台能力通过[来源 capability ABI](docs/runtime/source-capability-abi.md)注入；各输入契约的能力边界不得互相冒充，Node 兼容层不因此具备无 Node 承载能力。
-- 依赖显式且单向，不形成循环依赖或隐式初始化顺序。不用全局事件总线、服务定位器、无边界单例或跨模块直接读写绕过契约。
-- 新增能力前先检查现有实现。公共抽取以通用语义、稳定契约和实际使用为依据；共享层提供机制，业务层决定策略，不给共享实现堆叠业务分支。
-
-## 状态与生命周期
-
-- 每份可变状态有明确的事实来源、作用域和更新所有者；可推导状态优先计算，不重复存储。
+- 按真实职责和变化原因组织目录、文件与类型；名称反映实际责任，通用能力使用中性名称，领域专属能力保留业务语义。
+- 每项职责与每份可变状态都有明确的所有者、作用域和事实来源；模块间通过最小公开契约协作，明确输入、输出、生命周期和错误语义。可推导状态优先计算，不重复存储。
+- 依赖显式且单向，不形成循环依赖或隐式初始化顺序；不用全局事件总线、服务定位器、无边界单例或跨模块直接读写绕过契约。
 - 跨页面业务状态和长期资源由稳定所有者管理，不依赖视图重建或显示切换；页面可见性与资源活跃状态分别判断。
-- 异步操作明确取消、失效和完成语义，旧结果不得覆盖新状态；完成由实际执行者确认，不靠猜测等待时间。
+- 异步操作明确取消、失效和完成语义：由发起方取消并等待旧任务结束后再切换，不另加 generation／epoch 一类过期票据；旧结果不得覆盖新状态，不靠猜测等待时间。
+- 运行器、脚本宿主与来源规则的所有权和能力边界见[脚本运行时](docs/runtime/script-runtime.md)及各运行器契约。
 
 ## 实现
 
-- **修复与重构的完成标准**：
-  - 修复落在根因所在的 owner 或通用层，即使它不在出现症状的文件里；同时删除被替代的旧机制。交付时列出删除了哪些旧机制。
-  - 重构、清理与解耦的结果是删除：去掉越权调用、中转层和重复实现，而不是在原结构外再包一层。
-  - diff 中新增以下任一项即视为未完成，除非单独说明它保护的实际边界：延迟、节流、防抖、轮询、重试；generation／epoch／stamp 一类过期票据；影子布尔或"同值跳过"字段；向上遍历视图树判断可见性或找宿主；只为拆分而新增的 partial、扩展文件或转发方法；单个页面专属的样式、边距或列宽覆写。
-  - 界面问题先查通用控件与通用样式；修正通用层后，整批删除各页面上的对应补丁。
-  - 现有实现本身是问题来源时，以本文件、`docs` 契约和平台原生能力为准，不以现有实现为参照补齐行为。
-- **当前处于开发期，禁止旧数据兼容与旧逻辑兼容**：
-  - 数据库、本地配置与内部业务记录的 schema／格式版本统一固定为 1，不递增、不识别旧表／旧字段、不建历史版本链、不写迁移或自动升级／回退分支；不匹配的旧数据直接拒绝，并发 revision／generation 仍按事务变化递增。已确认保存的数据必须在运行中完成持久化，不能依赖正常退出或 iOS 终止回调才能保存。
-  - 接口、协议、状态与内部逻辑改动直接落到最新实现并清理失效路径；禁止保留旧字段别名、旧参数／旧枚举兜底、过渡兼容层、回退开关或新旧逻辑并存。
-- 内部业务数据与结构化缓存遵循[共享 SQLite 存储契约](docs/common/settings-storage.md)，在每个 App 数据根的 `storage-v1/` 下物理分离为永久数据库（`meowfilm-data.sqlite3`）与可重建缓存数据库（`meowfilm-cache.sqlite3`），均使用 `user_version = 1` 及明确 owner 的手写强类型 `STRICT` 关系表、事务、纯整数 `owner_revisions` CAS 与 `INTEGER` UTC 毫秒时间戳；禁止内部 JSON 文件、整份业务 JSON TEXT/BLOB 入库，以及伪关系 JSON-AST 投影框架（如 `shape_mask`／`null_mask`、内部业务对象经 `JsonNode`/`JSONEncoder`/`MJ` 往返入库、泛化 `*_extensions` 扩展槽）。第三方自管文件、用户主动导出、网络／IPC JSON 及极少数真正动态的第三方脚本／外部元数据有界 typed value-tree 不在禁令内。
-- 满足需求及必要的可控、可观测、可验证和生命周期要求后，综合运行性能、实现复杂度和长期维护成本选择方案；单处性能差异较小也计入，避免各处开销叠加。不增加未要求的功能、框架、配置或扩展点。
-- 技术栈、框架与实现方式按具体职责逐项选择，同样综合运行性能、可控性、实现复杂度和长期维护成本。
-- 优先复用已有实现、标准库和平台能力；替代实现保持所需业务语义。类型准确表达身份、状态和约束，不用任意字符串和静默默认值掩盖错误。
-- 问题沿真实所有者、调用链、数据流和生命周期定位根因，在拥有该职责的边界修正；不以外层特判、影子状态、延时、重试、旁路或新旧实现并存堆叠补丁，修正后删除失效路径。
-
-## 变更范围
-
-- 只修改当前任务必需的内容；每处改动能追溯到需求或必要影响。修正问题根因所在的 owner 属于当前任务必需，不算扩大范围；"不扩大重构"只约束与本问题没有因果关系的改动。
-- 修改公共契约、数据格式或共享实现时，同步更新受影响的消费者、配置、资源和 `docs`。
-- 清理本次修改产生的孤立代码；既有无关问题单独指出，不扩大为未经授权的重构。
-- 删除或移动移植代码前确认许可来源；仍在使用的许可文件随代码保留。
+- **开发期禁止旧数据与旧逻辑兼容**：
+  - 数据库、本地配置与内部业务记录的 schema／格式版本固定为 1，不递增、不识别旧表／旧字段、不写迁移或升级／回退分支；不匹配的旧数据直接拒绝，并发 revision／generation 仍按事务变化递增。已确认保存的数据在运行中完成持久化，不依赖正常退出或 iOS 终止回调。
+  - 接口、协议、状态与内部逻辑改动直接落到最新实现；不保留旧字段别名、旧参数／旧枚举兜底、过渡兼容层、回退开关或新旧逻辑并存。
+- 校验、失败传播与清理遵循[拒绝条件与数据消费边界](docs/common/validation-boundaries.md)：普通 API 按实际字段消费，不做未消费字段预检、镜像断言或静默吞错；typed 存储的列／关系、身份／权限、CAS、执行信任与排空边界保留。
+- 内部业务数据与结构化缓存遵循[共享 SQLite 存储契约](docs/common/settings-storage.md)：永久库与可重建缓存库物理分离，使用手写强类型 `STRICT` 关系表；禁止内部 JSON 文件、整份业务 JSON 入库与伪关系 JSON 投影框架。
 
 ## 前端
 
-- Windows 栏目、卡片和列表的显示内容只随内容回执、显式刷新／筛选及账号等业务状态变化更新。滚动、布局、尺寸、裁剪、命中区域和绘制不触发业务读取、显示重建或刷新，也不扫描控件树。
-- 图片、取色等资源在第一次可见时请求一次，之后在当前页面内复用：滚出再滚回不重新请求，列表容器回收视图不释放资源；只有数据项删除、页面卸载或资源身份变化才释放。页面隐藏后不再发起新请求，未完成的请求取消，关闭时等它们实际结束。以上按真实运行行为在 `--debug` 中核对，不为此增加开关或关键字禁令。
-- 数据回执按稳定身份增量更新实际变化的元素，保留未变化的集合、控件和资源；加载状态、选择及无关属性通知不得清空重填列表或重建整页。验收检查集合通知、元素身份、读取次数和退休边界，性能数值仅作辅助证据，不能代替处理机制正确性。
-
-- **iOS 界面原则**（现行实现与组件说明见 [`docs/ios/architecture.md`](docs/ios/architecture.md)；该文档描述现状，不构成本节之外的强制要求）：
-  - **纯 UIKit**：iOS App 与 `MeowKit` UI 模块不使用 SwiftUI（零 `import SwiftUI`、`UIHostingController`、`UIViewRepresentable`），不做跨框架桥接或整树重建。
-  - **通用底座**：设置页共用 `MeowUI/Settings/` 底座与 `PageTheme`；弹窗、确认与错误／操作反馈由 `MeowUI` 通用组件统一呈现，需要确认的操作与非阻塞提示分开；业务页不自建同类组件，也不加影子去重字段。
-  - **主题与布局**：主题经显式协议分发，不递归遍历 `subviews`；子视图不调用 `superview?.layoutIfNeeded()` 或 `window?.layoutIfNeeded()`；协调器不按具体业务控制器类型做 `is` 判断。
-  - **图片与列表**：各域图片／取色存储由装配根持有，无全局单例；图片行为同 Windows 条款（首次可见请求一次、同页复用、页面卸载才释放）。列表保持 cell 复用、经 `MeowUI/List/` 增量更新，不整表 `reloadData()`，不用非虚拟化 `UIStackView` 承载长列表。
-  - **可见性与热路径**：页面可见性（含被模态遮挡、宿主隐藏）由导航／呈现层统一计算并下发，不可见页面不被唤醒；高频播放状态与低频页面状态分开发布，宽 `ObservableObject` 按字段观察；主线程不做音频喂流、封面模糊或像素取色。
-  - **目录分层**：`MeowUI`、各 Feature 与 `apps/ios/Debug` 按职责建子目录，不平铺堆放跨子域文件。
-
-- Windows 与 iOS 的普通文字统一使用系统常规字体（Normal／Regular），包括标题、按钮、菜单、标签、选中态和歌词；层级只通过字号区分，不使用 Medium、SemiBold、Bold、斜体或状态切换粗细来强调。阅读器 UI 同样遵守；仅阅读器内可自定义的正文排版保留用户字体／加粗设置。纯图标／符号图形不属于普通文字，不通过该例外给文本加粗。
-
-- 禁止纯解释性文本：不添加功能介绍、操作引导、设计意图、占位说明或重复解释；只保留必要的标题、控件标签、业务内容、状态、错误、操作确认及无障碍名称。
-- 操作结果与错误通知走统一的通知或信息框，不作为文本插入页面布局；需要确认或重试的操作保留在对应浮层中。
+- **两端通用**：
+  - 栏目、卡片和列表的显示内容只随内容回执、显式刷新／筛选及账号等业务状态变化更新；滚动、布局、尺寸、裁剪、命中区域和绘制不触发业务读取、显示重建或刷新，也不扫描控件树。
+  - 图片、取色等资源在第一次可见时请求一次，之后在当前页面内复用：滚出再滚回不重新请求，列表容器回收视图不释放资源；只有数据项删除、页面卸载或资源身份变化才释放。页面隐藏后不再发起新请求，未完成的请求取消，关闭时等它们实际结束。
+  - 数据回执按稳定身份增量更新实际变化的元素，保留未变化的集合、控件和资源；加载状态、选择及无关属性通知不得清空重填列表或重建整页。
+  - 普通文字统一使用系统常规字体（Normal／Regular），包括标题、按钮、菜单、标签、选中态和歌词；层级只通过字号区分，不使用 Medium、SemiBold、Bold、斜体或状态切换粗细。仅阅读器内可自定义的正文排版保留用户字体／加粗设置；纯图标／符号图形不属于普通文字。
+  - 不添加功能介绍、操作引导、设计意图、占位说明等纯解释性文本；只保留必要的标题、控件标签、业务内容、状态、错误、操作确认及无障碍名称。
+  - 操作结果与错误通知走统一的通知或信息框，不作为文本插入页面布局；需要确认或重试的操作保留在对应浮层中。
+- **iOS**（现行实现见 [`docs/ios/architecture.md`](docs/ios/architecture.md)，该文档描述现状，不构成本节之外的强制要求）：
+  - 纯 UIKit：iOS App 与 `MeowKit` UI 模块不使用 SwiftUI（零 `import SwiftUI`、`UIHostingController`、`UIViewRepresentable`），不做跨框架桥接或整树重建。
+  - 设置页共用 `MeowUI/Settings/` 底座与 `PageTheme`；弹窗、确认与错误／操作反馈由 `MeowUI` 通用组件统一呈现，需要确认的操作与非阻塞提示分开；业务页不自建同类组件。
+  - 主题经显式协议分发，不递归遍历 `subviews`；子视图不调用 `superview?.layoutIfNeeded()` 或 `window?.layoutIfNeeded()`；协调器不按具体业务控制器类型做 `is` 判断。
+  - 各域图片／取色存储由装配根持有，无全局单例；列表保持 cell 复用、经 `MeowUI/List/` 增量更新，不整表 `reloadData()`，不用非虚拟化 `UIStackView` 承载长列表。
+  - 页面可见性（含被模态遮挡、宿主隐藏）由导航／呈现层统一计算并下发，不可见页面不被唤醒；高频播放状态与低频页面状态分开发布，宽 `ObservableObject` 按字段观察；主线程不做音频喂流、封面模糊或像素取色。
+  - `MeowUI`、各 Feature 与 `apps/ios/Debug` 按职责建子目录，不平铺堆放跨子域文件。
 
 ## 验证
 
-- 校验、失败传播与清理遵循[拒绝条件与数据消费边界](docs/common/validation-boundaries.md)。普通 API 按实际字段消费；禁止未消费兄弟／全库业务预检、覆盖或删除前校验将被丢弃的旧业务值、静默吞错与完整实现镜像断言。typed 存储的实际列／关系、身份／权限、CAS、执行信任与排空边界继续保留。
-- **禁止一切残缺版测试与替身验证**：禁止编写或使用单元测试、UI/业务回归测试、Mock/替身/合成假服务夹具、仅服务于测试的生产代码钩子（如 `InternalsVisibleTo("*Tests")`、`XCTestCase` 旁路）、外部盲扫控件树/模拟键鼠自动化，以及用一次性半截探针或编译/静态检查冒充真实运行验收（完整红线清单见 [`AGENTS_DEBUG.md`](AGENTS_DEBUG.md)）。
-- **统一使用 Debug 模式实跑验收**：功能、数据产出、界面交互、状态流转与底层故障排查统一通过正常构建产物的 `--debug` 模式完成（实操手册见 [`AGENTS_DEBUG.md`](AGENTS_DEBUG.md)，协议唯一来源见 [`docs/common/debug-mode.md`](docs/common/debug-mode.md)），依据 16 类结构化日志、`blobs/` 不脱敏原文、本地 Control API（直达页面、结构化内容读取、语义操控、条件等待、截屏）、只读 SQL 及底层内存/线程堆栈/GC/Dump/V8 Snapshot 进行真实运行验证。
-- **保留非测试构建与完整性检查**：可机械核对的目录、依赖、打包与边界约束继续保留在 `scripts`（如 `scripts/verify-boundaries.mjs`、`scripts/verify-dependency-lock.mjs`、`scripts/check-source-scope.py`、`scripts/windows/verify-app-structure.mjs`、`scripts/windows/verify-projects.mjs`）。
-- 构建与打包只检查实际输入、依赖边界和交付完整性，不增加逐文件／导入／target 名称批准表、固定数量或完整源码／方法清单快照；合法公开依赖和实际引用的 helper 不需要额外登记。启动只核对实际身份、权限、执行内容与生命周期，不预检未调用业务方法，不重复审计同一输入，不将普通描述扩展或无依赖的排列变化作为拒绝条件。
-- 新增构建或启动拒绝条件须说明当前保护的实际消费边界，并在真实启动或 Debug 模式下核对；不增加关键字扫描式禁令、例外白名单或另一套批准框架。真实 native 来源／ABI／哈希／签名、执行污染、权限与资源排空约束继续保留。
-- 通用运行器原生引擎仅按 `scripts/script-host-native.json` 的精确来源、版本、ABI／架构、补丁、根锁、构建输入及文件／许可哈希放行；用 `node scripts/quickjs/build-native.mjs` 构建，再由 `scripts/package-runtime.mjs --product aggregate --profile common-native --output <absolute-directory>` 复制受信产物。无 WASM／asm.js 回退；其他 native/WASM 仍拒绝，打包不安装／修锁。平台包装尚未迁移时，不将通用运行器通过表述为平台 App 通过。
-- 影视纯计算与第三方脚本共用锁定的 QuickJS-NG 0.18.0 源码、Unicode 表及平台载体，但 Runtime/Context、线程和生命周期独立；影视通过 `NativeJsonProgram` 使用 JSON 字符串边界，客户端不再链接第二份引擎。
-- iOS 脚本引擎使用 App 内置 `MeowScriptHost.framework`，复用通用原生核心与固定依赖，构建目标明确区分 device／simulator。原生载体随 App 签名；构建回执、内置身份和 JS／SDK 清单不能用签名前 Mach-O 全文件 hash 代替安装后签名边界，也不能据此放宽桌面 `.node` 校验。
-- 编译成功、静态检查与真实业务/界面运行验证分别记录，不互相冒充。
-- 实跑验证覆盖本次改动的具体路径（如关闭流程、二次启动、滚动中持续播放、弹层打开时的命中），交付时列出场景；只打开页面截图不算这些路径的验收。
-- 外部脚本由 `scripts/accept-sources.mjs` 按实际声明动作验收；未归因、宿主缺失能力、资源超限或清理失败不能因初始化成功而放行。报告只保留脱敏结构和固定分类，见 `docs/runtime/source-acceptance.md`。
-- 交付时说明实际修改范围、验证结果和未覆盖项。
-
-## 安全与协作
-
-- 密码、令牌、Cookie、密钥和真实用户数据不得进入源码、文档、提交记录或公开报告；仅在显式开启 `--debug` 的本机私有调试会话目录中按 [docs/common/debug-mode.md](docs/common/debug-mode.md) 保留原始明文用于排查，严禁纳入版本控制或外部共享。
-- 不覆盖他人未提交的修改，不擅自清理用户数据；删除或移动前核对绝对路径。
-- 提交、推送和破坏性操作须有当次明确授权。
+- **禁止残缺版测试与替身验证**：不编写或使用单元测试、UI／业务回归测试、Mock／替身夹具、仅服务于测试的生产代码钩子、外部盲扫控件树／模拟键鼠自动化，也不用一次性探针或编译／静态检查冒充运行验收（红线清单见 [`AGENTS_DEBUG.md`](AGENTS_DEBUG.md)）。
+- **统一用 `--debug` 模式实跑验收**：功能、界面交互、状态流转与故障排查通过正常构建产物的 `--debug` 模式完成（操作见 [`AGENTS_DEBUG.md`](AGENTS_DEBUG.md)，协议见 [`docs/common/debug-mode.md`](docs/common/debug-mode.md)）。调试会话目录可保留不脱敏原文用于排查，仅限本机，不纳入版本控制或外部共享。
+- 目录、依赖、打包与边界的机械检查保留在 `scripts`（如 `scripts/verify-boundaries.mjs`、`scripts/verify-dependency-lock.mjs`、`scripts/check-source-scope.py`、`scripts/windows/verify-app-structure.mjs`、`scripts/windows/verify-projects.mjs`）。构建与启动只检查实际输入、依赖边界、身份、权限与交付完整性；不增加文件／导入批准表、固定数量、源码清单快照、关键字扫描禁令或例外白名单；新增拒绝条件须说明保护的实际消费边界。
+- 外部脚本由 `scripts/accept-sources.mjs` 按实际声明动作验收，见 [`docs/runtime/source-acceptance.md`](docs/runtime/source-acceptance.md)。
 
 ## 文档组织
 
-- 本文件只在用户明确要求时修改；功能与修复改动不改写本文件，实现细节写入对应 `docs`。
-- 按使用范围和真实职责维护文档：共同契约放在 `docs/common/`，端侧 API、系统生命周期、协议、存储与实现差异放在对应端目录；总入口为[文档索引](docs/README.md)。
-- 共同规则以[共同契约索引](docs/common/README.md)中的对应职责文件为唯一来源；端侧直接引用，只补充本端事实与差异，不复制规则或建立重复别名文件。
-- 拆分必须形成独立说明职责；移动、删除或调整范围时同步全部索引和引用，避免失效相对链接及多份同义说明。
-- 区分共同契约、现行实现、待实施设计和验证证据；未落地的类型、接口、数据格式或存储身份不得写成已实现，完成实施后同步对应端侧说明。
+- 共同契约放在 `docs/common/`，以[共同契约索引](docs/common/README.md)中的对应文件为唯一来源；端侧文档只补充本端事实与差异，不复制规则。总入口为[文档索引](docs/README.md)；移动、删除或调整文档时同步全部索引和引用。
+- 文档区分共同契约、现行实现与待实施设计。
